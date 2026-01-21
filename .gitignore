@@ -1,0 +1,46 @@
+# Large video files (exceed GitHub 100MB limit)
+*.mp4
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temp files
+*.tmp
+temp_audio/
+services/temp_audio/
+
+# Audio data (large files)
+*.wav
+*.mp3
+*.flac
+
+# Model files (too large for git)
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Data folder (user data)
+voice_chat_data/
+
+# OS files
+.DS_Store
+Thumbs.db

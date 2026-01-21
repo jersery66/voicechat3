@@ -1,0 +1,31 @@
+# Voice Chat Application Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core
+numpy
+torch
+torchaudio
+transformers>=4.51.3
+
+# Audio
+sounddevice>=0.5.0
+PyAudio>=0.2.14
+soundfile
+librosa
+
+# LLM
+ollama>=0.6.0
+
+# UI
+pillow
+tkinter  # Usually comes with Python
+
+# Video
+pygame
+moviepy
+
+# ModelScope (for model downloading)
+modelscope
+
+# CosyVoice dependencies
+einops
