@@ -1,46 +1,37 @@
-# Large video files (exceed GitHub 100MB limit)
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Project Specific
+*.backup
+*.original
+*.log
+crash_debug.log
+temp/
+temp_audio/
+voice_chat_data/
+cache/
+
+# Large Media (Excluded as requested)
+冥想训练.mp4
+呼吸训练.mp4
+肌肉放松.mp4
 *.mp4
 
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
-venv/
-env/
-.env/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Logs
-*.log
-logs/
-
-# Temp files
-*.tmp
-temp_audio/
-services/temp_audio/
-
-# Audio data (large files)
-*.wav
-*.mp3
-*.flac
-
-# Model files (too large for git)
-*.gguf
-*.bin
-*.safetensors
-*.pt
-*.pth
-
-# Data folder (user data)
-voice_chat_data/
-
-# OS files
+# OS
 .DS_Store
 Thumbs.db

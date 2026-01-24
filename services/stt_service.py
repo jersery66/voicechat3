@@ -55,6 +55,8 @@ class STTService:
                 model=self.model_path,
                 device=self.device
             )
+            # Force Chinese language recognition
+            self.model_kwargs['language'] = 'zh'
             self.model.eval()
             
         except Exception as e:
@@ -213,9 +215,33 @@ class STTService:
                 if res and len(res) > 0:
                     item = res[0]
                     if isinstance(item, list) and len(item) > 0:
-                        return item[0].get("text", "").strip()
+                        text = item[0].get("text", "").strip()
                     elif isinstance(item, dict):
-                        return item.get("text", "").strip()
+                        text = item.get("text", "").strip()
+                    else:
+                        text = ""
+                    
+                    # Check if result is primarily Chinese, if not retry with forced Chinese
+                    if text and not self._is_chinese_text(text):
+                        print(f"[WARNING] Non-Chinese text detected: {text}, retrying with forced Chinese...")
+                        # Retry with explicit Chinese language setting
+                        retry_kwargs = dict(self.model_kwargs)
+                        retry_kwargs['language'] = 'zh'
+                        retry_res = self.model.inference(
+                            data_in=[tmp_path],
+                            **retry_kwargs
+                        )
+                        if retry_res and len(retry_res) > 0:
+                            retry_item = retry_res[0]
+                            if isinstance(retry_item, list) and len(retry_item) > 0:
+                                text = retry_item[0].get("text", "").strip()
+                            elif isinstance(retry_item, dict):
+                                text = retry_item.get("text", "").strip()
+                        print(f"[INFO] Retry result: {text}")
+                    
+                    # Post-processing: correct common misrecognitions
+                    text = self._correct_common_errors(text)
+                    return text
                 
                 return ""
             finally:
@@ -248,6 +274,67 @@ class STTService:
             print(f"[WARNING] STT Warmup had issue (non-fatal): {e}")
             # Don't fail completely - the model may still work
             return True
+    
+    def _correct_common_errors(self, text: str) -> str:
+        """Correct common STT misrecognitions, especially drug-related terms."""
+        if not text:
+            return text
+        
+        # Common misrecognitions mapping
+        corrections = {
+            # Drug-related terms
+            "西毒": "吸毒",
+            "吸读": "吸毒",
+            "吸独": "吸毒",
+            "习毒": "吸毒",
+            "洗毒": "吸毒",
+            "细毒": "吸毒",
+            "戒读": "戒毒",
+            "截毒": "戒毒",
+            "接毒": "戒毒",
+            "冰读": "冰毒",
+            "并毒": "冰毒",
+            "海洛音": "海洛因",
+            "海螺因": "海洛因",
+            "摇头完": "摇头丸",
+            "K份": "K粉",
+            "K分": "K粉",
+            # Other common terms
+            "强制隔离戒读": "强制隔离戒毒",
+            "戒读所": "戒毒所",
+        }
+        
+        for wrong, correct in corrections.items():
+            text = text.replace(wrong, correct)
+        
+        return text
+    
+    def _is_chinese_text(self, text: str) -> bool:
+        """Check if text is primarily Chinese (>30% Chinese characters)."""
+        if not text:
+            return True  # Empty is fine
+        
+        # Count Chinese characters (CJK Unified Ideographs range)
+        chinese_count = 0
+        total_chars = 0
+        
+        for char in text:
+            # Skip whitespace and punctuation
+            if char.isspace() or char in '.,!?;:()[]{}、。，！？；：（）【】""''':
+                continue
+            total_chars += 1
+            # Chinese character range: \u4e00-\u9fff (CJK Unified Ideographs)
+            if '\u4e00' <= char <= '\u9fff':
+                chinese_count += 1
+        
+        if total_chars == 0:
+            return True  # Only punctuation/whitespace is fine
+        
+        ratio = chinese_count / total_chars
+        print(f"[DEBUG] Chinese ratio: {ratio:.2f} ({chinese_count}/{total_chars})")
+        
+        # If less than 30% Chinese, likely not Chinese
+        return ratio >= 0.3
 
 
 # Singleton instance

@@ -79,6 +79,13 @@ class DataManager:
         
         return self.current_folder_name
     
+    @property
+    def session_dir(self) -> Optional[str]:
+        """Get the current session directory path as string."""
+        if self.current_folder_name is None:
+            return None
+        return str(self._get_session_path())
+
     def _get_session_path(self) -> Path:
         """Get the current session directory path."""
         return self.data_root / self.current_date / self.current_folder_name

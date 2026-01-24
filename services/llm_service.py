@@ -34,12 +34,18 @@ class LLMService:
         """Set the system prompt."""
         self.system_prompt = prompt
         
-    def chat(self, user_message: str) -> Generator[str, None, None]:
+        # Build messages list with system prompt
+        current_system_prompt = self.system_prompt
+        # Check for system suffix in options (passed via kwargs or we can add explicit arg)
+        # But we need to change signature. Let's start with just modifying chat.
+        
+    def chat(self, user_message: str, system_suffix: str = None) -> Generator[str, None, None]:
         """
         Send a message and yield streamed response chunks.
         
         Args:
             user_message: The user's input message
+            system_suffix: Optional temporary instruction appended to system prompt for this turn only
             
         Yields:
             Response text chunks as they arrive
@@ -51,7 +57,11 @@ class LLMService:
         })
         
         # Build messages list with system prompt
-        messages = [{"role": "system", "content": self.system_prompt}]
+        current_system_prompt = self.system_prompt
+        if system_suffix:
+            current_system_prompt += "\n" + system_suffix
+            
+        messages = [{"role": "system", "content": current_system_prompt}]
         messages.extend(self.conversation_history)
         
         # Stream response
@@ -60,7 +70,10 @@ class LLMService:
             stream = self.client.chat(
                 model=self.model,
                 messages=messages,
-                stream=True
+                stream=True,
+                options={
+                    "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "\n\n", "心医生:", "心医生："]
+                }
             )
             
             for chunk in stream:
@@ -70,9 +83,10 @@ class LLMService:
                     yield content
                     
         except Exception as e:
-            error_msg = f"[Error: {str(e)}]"
-            yield error_msg
-            full_response = error_msg
+            # Log error to console but DO NOT yield it as chat text
+            print(f"[ERROR] LLM Generation Failed: {e}")
+            # Raise exception so main pipeline can handle it (or ignore)
+            raise e
             
         # Add assistant response to history
         self.conversation_history.append({

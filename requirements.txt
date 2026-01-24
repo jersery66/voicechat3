@@ -18,7 +18,7 @@ ollama>=0.6.0
 
 # UI
 pillow
-tkinter  # Usually comes with Python
+
 
 # Video
 pygame
@@ -29,3 +29,6 @@ modelscope
 
 # CosyVoice dependencies
 einops
+
+# PDF Report Generation
+reportlab>=4.0.0

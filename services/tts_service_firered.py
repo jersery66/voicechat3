@@ -357,7 +357,61 @@ class TTSService:
     def stop_playing(self):
         """Stop audio playback."""
         self.is_playing = False
+    
+    def play_audio(self, audio: np.ndarray):
+        """Play pre-generated audio data synchronously.
         
+        Args:
+            audio: numpy array of audio data (float32, mono)
+        """
+        if audio is None or len(audio) == 0:
+            print("[WARNING] play_audio called with empty audio data")
+            return
+            
+        print(f"[DEBUG] play_audio called with {len(audio)} samples")
+        self.is_playing = True
+        
+        p = None
+        stream = None
+        
+        try:
+            p = pyaudio.PyAudio()
+            stream = p.open(
+                format=pyaudio.paFloat32,
+                channels=1,
+                rate=self.sample_rate,
+                output=True,
+                frames_per_buffer=2048
+            )
+            
+            # Convert to float32 if needed
+            if audio.dtype != np.float32:
+                audio = audio.astype(np.float32)
+            
+            # Play audio in chunks
+            chunk_size = 4096
+            for i in range(0, len(audio), chunk_size):
+                if not self.is_playing:
+                    print("[DEBUG] Playback interrupted")
+                    break
+                chunk = audio[i:i+chunk_size]
+                stream.write(chunk.tobytes())
+            
+            print("[DEBUG] play_audio finished")
+            
+        except Exception as e:
+            print(f"[ERROR] play_audio error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+        finally:
+            if stream:
+                stream.stop_stream()
+                stream.close()
+            if p:
+                p.terminate()
+            self.is_playing = False
+    
     def save_audio(self, audio: np.ndarray, filepath: str):
         """Save audio to file."""
         if audio.size == 0:
@@ -371,7 +425,6 @@ class TTSService:
             self.stream.close()
         if self.pyaudio:
             self.pyaudio.terminate()
-
 
 # Singleton instance
 _tts_service = None
