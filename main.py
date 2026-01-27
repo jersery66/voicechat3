@@ -6,9 +6,13 @@ import threading
 import queue
 from typing import Any
 import subprocess
+import random
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from PIL import Image, ImageTk, ImageFilter, ImageEnhance
+import re
+import hashlib # Added for cache hash
+import json # Added for report
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,7 +21,7 @@ from services.stt_service import STTService
 from services.llm_service import LLMService
 from services.tts_service import TTSService
 from services.video_service import get_video_player
-from services.report_service import ReportService, EndType
+from services.report_service import ReportService, EndType, END_PATTERNS
 from services.report_generator import get_pdf_generator
 from data.data_manager import DataManager
 import hashlib
@@ -39,6 +43,7 @@ class VoiceChatApp:
         
         # Session tracking for report generation
         self.session_ended = False
+        self.user_info = {}
         self.current_user_id = None  # Track current user ID for change detection
         
         # UI related
@@ -47,6 +52,7 @@ class VoiceChatApp:
         self.current_user_var = None
         self.chat_text = None
         self.load_thread = None
+        self.reset_timer_id = None  # Track reset timer to cancel it if needed
         
         self.createUI()
 
@@ -356,7 +362,7 @@ class VoiceChatApp:
                                     bg="#4DD0E1", fg="white", font=("Arial", 10))
         self.btn_meditation = tk.Button(self.control_frame, text="冥想放松训练", width=20, height=1,
                                         command=lambda: self._play_video_with_animation(self.btn_meditation, "#9575CD", "冥想训练.mp4"),
-                                        bg="#9575CD", fg="white", font=("Arial", 10))
+                                    bg="#9575CD", fg="white", font=("Arial", 10))
         # self.btn_stop_video removed as requested
         
         self.btn_clear = tk.Button(self.control_frame, text="清除对话历史", width=20, height=2,
@@ -479,14 +485,17 @@ class VoiceChatApp:
                     self.append_to_chat("system", content)
                 elif msg_type == "session_end":
                     # Session ended - show report dialog
-                    # Unpack potentially 4 elements
-                    if len(content) == 4:
+                    # Unpack potentially 5 elements
+                    play_audio = True # Default behavior
+                    if len(content) == 5:
+                         end_type, visitor_feedback, relaxation_rec, audio_data, play_audio = content
+                    elif len(content) == 4:
                         end_type, visitor_feedback, relaxation_rec, audio_data = content
                     else:
                         end_type, visitor_feedback, relaxation_rec = content
                         audio_data = None
                         
-                    self._show_session_end_dialog(end_type, visitor_feedback, relaxation_rec, audio_data)
+                    self._show_session_end_dialog(end_type, visitor_feedback, relaxation_rec, audio_data, play_audio=play_audio)
                 elif msg_type == "show_crisis_resources":
                     # Show crisis hotlines for safety endings
                     self._show_crisis_resources_dialog()
@@ -658,13 +667,20 @@ class VoiceChatApp:
             # Check if session already ended
             if self.session_ended:
                 self.processing_queue.put(("status", "⚠️ 会话已结束，请开始新对话"))
+                self.processing_queue.put(("set_buttons_state", "normal"))
                 return
+            
+            # CRITICAL FIX: If user continues chatting, any previous interim report is now stale.
+            # We must clear it so that 'end session' logic knows to generate a NEW one.
+            self._interim_report = None
+            self._interim_pdf_path = None
             
             # 1. Get Audio
             audio_data = self.stt_service.stop_recording()
             
             if len(audio_data) == 0:
                 self.processing_queue.put(("status", "⚠️ 未检测到语音"))
+                self.processing_queue.put(("set_buttons_state", "normal"))
                 return
 
             # 2. Transcribe
@@ -673,6 +689,7 @@ class VoiceChatApp:
             
             if not text.strip():
                 self.processing_queue.put(("status", "⚠️ 无法识别内容"))
+                self.processing_queue.put(("set_buttons_state", "normal"))
                 return
                 
             self.processing_queue.put(("append_chat", ("user", text)))
@@ -725,44 +742,58 @@ class VoiceChatApp:
             
             def stream_and_filter(text_chunk):
                 nonlocal stream_buffer
+                if not text_chunk: return
+
                 stream_buffer += text_chunk
                 
-                # 1. Remove complete tags if present
-                for tag in possible_tags:
-                    if tag in stream_buffer:
-                        print(f"[DEBUG] Detecting and removing tag from stream: {tag}")
-                        stream_buffer = stream_buffer.replace(tag, "")
+                # Robust Filtering Logic:
+                # 1. Check if buffer contains any potential tag start (<, [, 【)
+                #    If so, check if we have a complete tag to remove.
                 
-                # 2. Determine what is safe to stream
-                if "[" in stream_buffer:
-                    # Find the first '['
-                    idx = stream_buffer.find("[")
-                    
-                    # Anything before '[' is definitely safe
-                    safe_part = stream_buffer[:idx]
-                    potential_tag = stream_buffer[idx:]
-                    
-                    # Check if potential_tag is a prefix of any known tag
-                    is_prefix = False
-                    for tag in possible_tags:
-                         # Check if tag starts with potential_tag
-                         if tag.startswith(potential_tag):
-                             is_prefix = True
-                             break
-                    
-                    if is_prefix:
-                        # It is a valid prefix, HOLD IT (do not stream)
-                        if safe_part:
-                            self.processing_queue.put(("stream_chat", safe_part))
-                        stream_buffer = potential_tag 
-                    else:
-                        # It matches no tag prefix, so it's not a control tag. Release all.
-                        self.processing_queue.put(("stream_chat", stream_buffer))
-                        stream_buffer = ""
-                else:
-                    # No brackets, allow all
+                # Defined strict tags to remove immediately
+                import re
+                stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer)
+                stream_buffer = re.sub(r'\[END_[A-Z_]+\]', '', stream_buffer)
+                stream_buffer = re.sub(r'【.*?】', '', stream_buffer)
+                # Also strip emotion tags from streaming buffer
+                stream_buffer = re.sub(r'<\|[^>]+\|>', '', stream_buffer)
+                
+                # 2. Decide what to flush
+                # If buffer contains partial tag indicators, hold until safe or too long
+                # Indicators: < (for <|...|>), [ (for [REC_...]), 【 (for 【...】)
+                
+                potential_starts = ['<', '[', '【']
+                first_danger_idx = float('inf')
+                
+                for char in potential_starts:
+                    idx = stream_buffer.find(char)
+                    if idx != -1 and idx < first_danger_idx:
+                        first_danger_idx = idx
+                
+                if first_danger_idx == float('inf'):
+                    # Safe to flush all
                     self.processing_queue.put(("stream_chat", stream_buffer))
                     stream_buffer = ""
+                else:
+                    # Flush up to the first danger char
+                    if first_danger_idx > 0:
+                        safe_part = stream_buffer[:first_danger_idx]
+                        self.processing_queue.put(("stream_chat", safe_part))
+                        stream_buffer = stream_buffer[first_danger_idx:]
+                    
+                    # Now buffer starts with a danger char.
+                    # Heuristic: If buffer is getting too long (>50 chars) and still no valid tag formed, 
+                    # it might just be normal text like "Look at [this]"
+                    # But we must be careful. 
+                    # For now, just hold it. To prevent infinite holding on normal brackets:
+                    # If we have '[', check if it matches prefix of any known tag.
+                    # Known tags: [REC_..., [END_..., [S...]
+                    # Simplified: Just hold context window.
+                    if len(stream_buffer) > 50: 
+                        # Release one char to unblock, unless it's strictly a tag prefix
+                        # (Simplified approach: just flush first char and retry next loop if we needed one, but here we just flush char)
+                        self.processing_queue.put(("stream_chat", stream_buffer[0]))
+                        stream_buffer = stream_buffer[1:]
 
             for chunk in llm_gen:
                 if first_token_time is None:
@@ -803,15 +834,26 @@ class VoiceChatApp:
             # DEBUG: Print full response
             print(f"[DEBUG] LLM完整响应长度: {len(full_response)}")
             
-            # Fallback if no separator found (edge case)
+                    # Fallback if no separator found (edge case)
             if not found_separator:
-                print(f"[DEBUG] 警告: 未找到分隔符|||，假设全部为口语或全部为分析")
-                # Heuristic: if response is short and looks like analysis, treat as analysis?
-                # For safety, let's treat as spoken text to avoid silence, unless it really looks like JSON/internal
-                spoken_text = full_response
-                analysis_text = ""
-                # Since we didn't stream anything (waiting for separator), show it now
-                self.processing_queue.put(("stream_chat", spoken_text + "\n"))
+                print(f"[DEBUG] 警告: 未找到分隔符|||，针对内部标记执行启发式解析")
+                
+                # Heuristic: If it contains analysis markers but no spoken markers, treat as analysis
+                # These markers are defined in config.py SYSTEM_PROMPT
+                analysis_markers = ["【情绪识别】", "【状态评估】", "【变革话语", "【策略选择】", "【红色预警】"]
+                if any(m in full_response for m in analysis_markers):
+                    print(f"[DEBUG] 检测到心理分析标记且无分隔符，将其视为纯分析，使用占位回复")
+                    analysis_text = full_response
+                    spoken_text = "嗯，我听着呢。咱们接着往下聊。" # Simple non-intrusive fallback
+                    found_separator = True # Marked as parsed
+                else:
+                    # Treat as spoken text to avoid silence
+                    spoken_text = full_response
+                    analysis_text = ""
+                
+                # Show what we decided in UI
+                clean_spoken = self._clean_text_for_ui(spoken_text)
+                self.processing_queue.put(("stream_chat", clean_spoken + "\n"))
             
             # Save analysis to log
             if analysis_text:
@@ -830,25 +872,65 @@ class VoiceChatApp:
             
             # Check round threshold
             current_rounds = self.report_service.get_round_count()
-            allow_relaxation = (current_rounds >= MIN_ROUNDS_FOR_RELAXATION)
+            
+            # PREVENT REPETITIVE RECOMMENDATIONS
+            # 1. If already completed, never recommend again
+            already_completed = getattr(self, '_relaxation_completed_flag', False)
+            # 2. If recommended recently (e.g. last 2 rounds), suppress
+            last_rec_round = getattr(self, '_last_relaxation_recommendation_round', -99)
+            recently_recommended = (current_rounds - last_rec_round) < 3
+            
+            allow_relaxation = (current_rounds >= MIN_ROUNDS_FOR_RELAXATION) and (not already_completed) and (not recently_recommended)
+            
             if not allow_relaxation:
-                 print(f"[DEBUG] Only {current_rounds} rounds, relaxation recommendation filtered (min: {MIN_ROUNDS_FOR_RELAXATION})")
+                 if already_completed:
+                     print(f"[DEBUG] Relaxation filtered: Already completed.")
+                 elif recently_recommended:
+                     print(f"[DEBUG] Relaxation filtered: Recently recommended at round {last_rec_round}.")
+                 else:
+                     print(f"[DEBUG] Relaxation filtered: Only {current_rounds} rounds (min: {MIN_ROUNDS_FOR_RELAXATION})")
             
             detected_tag = None
             for tag, keyword in control_tags.items():
                 if tag in spoken_text:
-                    if allow_relaxation:
-                         detected_tag = keyword
+                    if allow_relaxation and not detected_tag:
+                        detected_tag = tag # Store the tag itself
+                        print(f"[DEBUG] Relaxation tag detected and parsed: {tag}")
+                        # Update tracking state
+                        self._last_relaxation_recommendation_round = current_rounds
+                    else:
+                        print(f"[DEBUG] Relaxation tag detected but suppressed: {tag}")
+                    
+                    # ALWAYS strip the tag from spoken text
                     spoken_text = spoken_text.replace(tag, "").strip()
+            
+             # Heuristic: If allowed and no tag detected, but text implies recommendation, INFER tag
+            if allow_relaxation and not detected_tag:
+                 if "呼吸" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+                     detected_tag = "[REC_BREATHING]"
+                     print(f"[DEBUG] Inferred relaxation tag from text: {detected_tag}")
+                     self._last_relaxation_recommendation_round = current_rounds
+                 elif "肌肉" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+                     detected_tag = "[REC_MUSCLE]"
+                     print(f"[DEBUG] Inferred relaxation tag from text: {detected_tag}")
+                     self._last_relaxation_recommendation_round = current_rounds
+                 elif "冥想" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+                     detected_tag = "[REC_MEDITATION]"
+                     print(f"[DEBUG] Inferred relaxation tag from text: {detected_tag}")
+                     self._last_relaxation_recommendation_round = current_rounds
+            
+            # Also strip session end tags from spoken text
+            for pattern in END_PATTERNS.values():
+                spoken_text = re.sub(pattern, '', spoken_text).strip()
             
             # If not allowed, also strip verbal recommendations to be safe
             if not allow_relaxation:
-                import re
                 patterns = [
-                     r"试试.*?(呼吸|放松|冥想).*?练习",
+                     r"试试.*?(呼吸|放松|冥想).*?(练习|按钮)",
                      r"做个.*?(深呼吸|肌肉放松)",
                      r"进行.*?(放松训练)",
-                     r"点击.*?(按钮|屏幕)",
+                     r"点击.*?(按钮|屏幕|左边)",
+                     r"(右边|左边).*?(按钮|屏幕)",
                 ]
                 for pattern in patterns:
                     try:
@@ -876,9 +958,31 @@ class VoiceChatApp:
             # self.processing_queue.put(("append_chat", ("ai_start", "")))
             # Code removed as it duplicates streaming logic
             
-            # 8. TTS Streaming (only the spoken part, without analysis or tags)
-            self.processing_queue.put(("status", "🔊 正在朗读..."))
+            # FINAL SAFETY CHECK for TTS: Strip any analysis tags that leaked through
+                # Robust regex for Chinese full-width brackets
+            safe_spoken_text = re.sub(r'【.*?】', '', spoken_text)
+            # Also strip any remaining [REC_...] or [END_...] tags just in case
+            safe_spoken_text = re.sub(r'\[REC_[A-Z_]+\]', '', safe_spoken_text)
+            safe_spoken_text = re.sub(r'\[END_[A-Z_]+\]', '', safe_spoken_text)
+
+            if safe_spoken_text.strip() != spoken_text.strip():
+                 print(f"[WARNING] 从语音输出中剥离了心理分析标记或控制标记: {spoken_text}")
+                 spoken_text = safe_spoken_text
             
+            # Clean spoken text for TTS (remove tags + markdown + ellipses)
+            # 1. Remove control tags
+            for tag in control_tags:
+                spoken_text = spoken_text.replace(tag, "")
+            
+            # 2. Remove Markdown like **bold** (which breaks TTS)
+            spoken_text = spoken_text.replace("**", "")
+            spoken_text = spoken_text.replace("*", "")
+            
+            # 3. Normalize ellipses (...... -> ，)
+            spoken_text = spoken_text.replace("......", "，")
+            spoken_text = spoken_text.replace("...", "，")
+            
+            # spoken_text retains <|emotion...|> tags for TTS service
             tts_audio_data = self.tts_service.generate_and_play(spoken_text)
             
             if tts_audio_data is not None and len(tts_audio_data) > 0:
@@ -886,12 +990,40 @@ class VoiceChatApp:
             else:
                  print("Warning: No audio generated for saving.")
             
+            # FALLBACK: Keyword Inference (Task 23 improvement/User req)
+            # If no tag detected but we see "Meditation/Breathing" keywords in text,
+            # and relaxation is allowed, we infer it.
+            if not detected_tag and allow_relaxation:
+                 if "冥想" in spoken_text:
+                     detected_tag = "[REC_MEDITATION]"
+                     print("[DEBUG] Inferred relaxation tag: [REC_MEDITATION] from text content")
+                     self._last_relaxation_recommendation_round = current_rounds
+                 elif "呼吸" in spoken_text:
+                     detected_tag = "[REC_BREATHING]"
+                     print("[DEBUG] Inferred relaxation tag: [REC_BREATHING] from text content")
+                     self._last_relaxation_recommendation_round = current_rounds
+                 elif "肌肉" in spoken_text:
+                     detected_tag = "[REC_MUSCLE]"
+                     print("[DEBUG] Inferred relaxation tag: [REC_MUSCLE] from text content")
+                     self._last_relaxation_recommendation_round = current_rounds
+            
             # 9. Handle session end if detected
             if end_type != EndType.NONE:
                 self._handle_session_end(end_type, detected_tag)
             elif detected_tag:
-                # Just highlight relaxation button if no session end
-                self.processing_queue.put(("check_relaxation_recommendation", detected_tag))
+                 # Map tag to button keyword (e.g. "呼吸") for highlight logic
+                 rec_keyword = control_tags.get(detected_tag)
+                 # Wait, highlight logic uses Chinese keys (e.g. "冥想"), so we pass the key "冥想"
+                 # Wait... in previous fix (Step 613), we changed it to send `relaxation_tag` which was e.g. "冥想".
+                 # BUT here `detected_tag` is `[REC_MEDITATION]`.
+                 # We need to extract the value "冥想" from `control_tags` dict.
+                 highlight_keyword = control_tags.get(detected_tag)
+                 
+                 print(f"[INFO] 推荐放松训练: {highlight_keyword} ({detected_tag})")
+                 self.processing_queue.put(("check_relaxation_recommendation", highlight_keyword))
+                 
+                 if "尝试放松" not in spoken_text: # avoid redundant text if already said
+                     pass
             
             self.processing_queue.put(("status", "✅ 完成"))
             self.processing_queue.put(("set_buttons_state", "normal"))
@@ -1072,8 +1204,9 @@ class VoiceChatApp:
                 selected_greeting = random.choice(GREETING_VARIANTS)
                 print(f"[DEBUG] Random greeting selected: {selected_greeting}")
                 
-                # Display greeting in chat
-                self.processing_queue.put(("append_chat", ("ai", selected_greeting)))
+                # Display greeting in chat (cleaned)
+                clean_greeting = self._clean_text_for_ui(selected_greeting)
+                self.processing_queue.put(("append_chat", ("ai", clean_greeting)))
                 
                 # Update status
                 self.processing_queue.put(("status", "🔊 正在播放问候..."))
@@ -1086,7 +1219,7 @@ class VoiceChatApp:
                 
                 # Check cache logic
                 # Include voice config to invalidate cache when voice changes
-                hash_source = selected_greeting + VOICE_PROMPT_PATH + VOICE_PROMPT_TEXT
+                hash_source = selected_greeting + str(VOICE_PROMPT_PATH) + str(VOICE_PROMPT_TEXT)
                 greeting_hash = hashlib.md5(hash_source.encode('utf-8')).hexdigest()
                 cache_dir = os.path.join(os.getcwd(), "cache")
                 os.makedirs(cache_dir, exist_ok=True)
@@ -1131,6 +1264,79 @@ class VoiceChatApp:
                 self.processing_queue.put(("set_buttons_state", "normal"))
         
         threading.Thread(target=greeting_task, daemon=True).start()
+
+    def _generate_fallback_suggestions_from_history(self):
+        """Generate fallback suggestions using LLM based on conversation history."""
+        try:
+            # 1. Format history (last 10 rounds)
+            history_text = ""
+            if self.llm_service and self.llm_service.conversation_history:
+                for msg in self.llm_service.conversation_history[-10:]:
+                    role = "咨询师" if msg.get("role") == "assistant" else "来访者"
+                    content = msg.get("content", "")
+                    history_text += f"{role}: {content}\n"
+            
+            if not history_text:
+                history_text = "（无对话记录）"
+
+            # 2. Prepare prompt
+            prompt = SUGGESTIONS_PROMPT.format(conversation=history_text)
+            
+            # 3. Call LLM (Direct client call to avoid polluting history)
+            # We use the raw client to get a one-off completion
+            if self.llm_service and self.llm_service.client:
+                print("[INFO] Requesting fallback suggestions from LLM...")
+                response = self.llm_service.client.chat(
+                    model=self.llm_service.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                
+                text = response['message']['content']
+                print(f"[INFO] Generated fallback suggestions: {text}")
+                return text
+            return None
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to generate fallback suggestions: {e}")
+            raise e
+
+    def _generate_fallback_summary_from_history(self, suggestions_text):
+        """Generate fallback session summary using LLM when report service fails."""
+        try:
+             # 1. Format history (last 15 rounds for better context)
+            history_text = ""
+            if self.llm_service and self.llm_service.conversation_history:
+                for msg in self.llm_service.conversation_history[-15:]:
+                    role = "咨询师" if msg.get("role") == "assistant" else "来访者"
+                    content = msg.get("content", "")
+                    history_text += f"{role}: {content}\n"
+            
+            if not history_text:
+                history_text = "（无对话记录）"
+            
+            # 2. Prepare prompt
+            from config import SESSION_SUMMARY_PROMPT
+            prompt = SESSION_SUMMARY_PROMPT.format(
+                conversation=history_text,
+                suggestions=suggestions_text or "无特定建议"
+            )
+            
+            # 3. Call LLM
+            if self.llm_service and self.llm_service.client:
+                print("[INFO] Requesting fallback summary from LLM...")
+                response = self.llm_service.client.chat(
+                    model=self.llm_service.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                text = response['message']['content']
+                print(f"[INFO] Generated fallback summary: {text}")
+                return text
+            return None
+        except Exception as e:
+            print(f"[ERROR] Failed to generate fallback summary: {e}")
+            raise e
     
     def _play_post_relaxation_greeting(self):
         """Play transition + suggestions after relaxation video, then show continue/end dialog."""
@@ -1140,9 +1346,10 @@ class VoiceChatApp:
                 self.processing_queue.put(("status", "🎯 放松训练完成，正在准备建议..."))
                 
                 # Wait for background generation to complete (max 60 seconds)
+                # OPTIMIZATION: Only wait for CONTENT, not PDF report
                 import time
                 wait_start = time.time()
-                while not getattr(self, '_background_generation_complete', True):
+                while not getattr(self, '_content_generation_complete', True):
                     if time.time() - wait_start > 60:
                         print("[WARNING] Background generation timeout, using fallback")
                         break
@@ -1153,14 +1360,25 @@ class VoiceChatApp:
                 
                 # 2. Play transition TTS
                 self.processing_queue.put(("status", "🔊 正在播放过渡语..."))
+                
+                # Select message (prioritize pre-generated text to match audio)
+                pre_generated_text = getattr(self, '_relaxation_transition_text', None)
+                if pre_generated_text:
+                    selected_message = pre_generated_text
+                elif isinstance(POST_RELAXATION_MESSAGE, list):
+                    selected_message = random.choice(POST_RELAXATION_MESSAGE)
+                else:
+                    selected_message = POST_RELAXATION_MESSAGE
+                
                 # Display transition message in chat first
-                self.processing_queue.put(("append_chat", ("ai", POST_RELAXATION_MESSAGE)))
+                clean_transition = self._clean_text_for_ui(selected_message)
+                self.processing_queue.put(("append_chat", ("ai", clean_transition)))
                 transition_audio = getattr(self, '_relaxation_transition_audio', None)
                 if transition_audio is not None and len(transition_audio) > 0:
                     self.tts_service.play_audio(transition_audio)
                 else:
                     # Fallback: generate on the fly
-                    self.tts_service.generate_and_play(POST_RELAXATION_MESSAGE)
+                    self.tts_service.generate_and_play(selected_message)
                 
                 # 3. Play suggestions TTS
                 self.processing_queue.put(("status", "🔊 正在播放建议..."))
@@ -1169,7 +1387,8 @@ class VoiceChatApp:
                 
                 # Display suggestions in chat BEFORE playing audio
                 if suggestions_text:
-                    self.processing_queue.put(("append_chat", ("ai", f"【后续建议】{suggestions_text}")))
+                    clean_suggestions = self._clean_text_for_ui(suggestions_text)
+                    self.processing_queue.put(("append_chat", ("ai", f"【后续建议】{clean_suggestions}")))
                 
                 if suggestions_audio is not None and len(suggestions_audio) > 0:
                     self.tts_service.play_audio(suggestions_audio)
@@ -1177,8 +1396,17 @@ class VoiceChatApp:
                     self.tts_service.generate_and_play(suggestions_text)
                 else:
                     # Fallback
-                    fallback_suggestions = "睡不着时试试深呼吸。心里堵得慌就写两句。作息尽量规律。有空多走走晒太阳。"
-                    self.processing_queue.put(("append_chat", ("ai", f"【后续建议】{fallback_suggestions}")))
+                    try:
+                        print("[INFO] Attempting to generate fallback suggestions via LLM...")
+                        fallback_suggestions = self._generate_fallback_suggestions_from_history()
+                        if not fallback_suggestions:
+                            raise ValueError("Generated suggestions empty")
+                    except Exception as e:
+                        print(f"[WARNING] Dynamic fallback failed ({e}), using static fallback.")
+                        fallback_suggestions = "睡不着时试试深呼吸。心里堵得慌就写两句。作息尽量规律。有空多走走晒太阳。"
+                    
+                    display_suggestions = self._clean_text_for_ui(fallback_suggestions)
+                    self.processing_queue.put(("append_chat", ("ai", f"【后续建议】{display_suggestions}")))
                     self.tts_service.generate_and_play(fallback_suggestions)
                     suggestions_text = fallback_suggestions
                 
@@ -1221,8 +1449,12 @@ class VoiceChatApp:
         self.append_to_chat("system", "放松训练已完成，可以继续对话。")
         
         # Save interim PDF report in background (checkpoint)
+        # Save interim PDF report in background (checkpoint)
+        # Save interim PDF report in background (checkpoint)
         def save_interim_report():
             try:
+                # OPTIMIZATION: Use pre-generated PDF if available
+                # Logic updated to avoid waiting if not needed
                 print("[INFO] Saving interim PDF report (continue chat checkpoint)...")
                 
                 user_id = self.user_id_entry.get().strip() or "default_user"
@@ -1230,17 +1462,21 @@ class VoiceChatApp:
                 conversation_history = self.llm_service.conversation_history
                 suggestions_text = getattr(self, '_relaxation_suggestions_text', None)
                 
+                # Prepare relaxation info
+                relax_str = self._get_relaxation_info_str()
+                
                 # Use interim report from background generation
                 researcher_report = getattr(self, '_interim_report', None)
                 if not researcher_report:
                     researcher_report = self.report_service.generate_researcher_report(
-                        conversation_history, user_id, EndType.GOAL_ACHIEVED, user_info=current_user_info
+                        conversation_history, user_id, EndType.GOAL_ACHIEVED, 
+                        user_info=current_user_info, relaxation_info=relax_str
                     )
                 
                 # Add relaxation info
                 if isinstance(researcher_report, dict):
                     researcher_report["relaxation_completed"] = True
-                    researcher_report["relaxation_type"] = getattr(self, '_current_relaxation_type', "unknown")
+                    researcher_report["relaxation_type"] = relax_str
                     researcher_report["suggestions_provided"] = suggestions_text or ""
                     researcher_report["session_continued"] = True  # Mark as interim
                 
@@ -1251,23 +1487,31 @@ class VoiceChatApp:
                 print(f"[INFO] Interim report saved: {save_result}")
                 
                 # Generate interim PDF
-                pdf_generator = get_pdf_generator()
-                pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
-                if "subject_id" not in pdf_data:
-                    pdf_data["subject_id"] = user_id
-                
-                pdf_data.update({
-                    "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                    "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                    "conversation_rounds": self.report_service.round_count,
-                    "end_type": "RELAXATION_CHECKPOINT",
-                })
-                
-                session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
-                if session_folder and os.path.isdir(session_folder):
-                    pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
-                    if pdf_path:
-                        print(f"[INFO] Interim PDF generated: {pdf_path}")
+                # Check if pre-generated in background
+                pre_pdf = getattr(self, '_interim_pdf_path', None)
+                if pre_pdf and os.path.exists(pre_pdf):
+                     print(f"[INFO] Using pre-generated interim PDF: {pre_pdf}")
+                     # It's already generated, we don't need to do anything heavy.
+                else:
+                    # Fallback if not pre-generated
+                    print("[INFO] generating PDF now (fallback)...")
+                    pdf_generator = get_pdf_generator()
+                    pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
+                    if "subject_id" not in pdf_data:
+                        pdf_data["subject_id"] = user_id
+                    
+                    pdf_data.update({
+                        "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
+                        "session_duration_minutes": self.report_service.get_session_duration_minutes(),
+                        "conversation_rounds": self.report_service.round_count,
+                        "end_type": "RELAXATION_CHECKPOINT",
+                    })
+                    
+                    session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
+                    if session_folder and os.path.isdir(session_folder):
+                        pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
+                        if pdf_path:
+                            print(f"[INFO] Interim PDF generated: {pdf_path}")
                         
             except Exception as e:
                 print(f"[ERROR] Interim PDF generation failed: {e}")
@@ -1279,12 +1523,57 @@ class VoiceChatApp:
         # Play continue message
         def play_continue():
             try:
-                self.tts_service.generate_and_play(CONTINUE_CHAT_MESSAGE)
+                selected_msg = CONTINUE_CHAT_MESSAGE
+                if isinstance(CONTINUE_CHAT_MESSAGE, list):
+                    selected_msg = random.choice(CONTINUE_CHAT_MESSAGE)
+                
+                # Display clean text in chat
+                clean_msg = self._clean_text_for_ui(selected_msg)
+                self.processing_queue.put(("append_chat", ("ai", clean_msg)))
+                
+                self.tts_service.generate_and_play(selected_msg)
             except Exception as e:
                 print(f"[ERROR] Continue message playback failed: {e}")
         
         threading.Thread(target=play_continue, daemon=True).start()
     
+    def _clean_text_for_ui(self, text):
+        """Remove control tags and TTS emotion tags for UI display."""
+        import re
+        if not text: return ""
+        # Remove psychological analysis tags in brackets like 【情绪识别】
+        text = re.sub(r'【.*?】', '', text)
+        # Remove control tags like [REC_BREATHING]
+        text = re.sub(r'\[REC_[A-Z_]+\]', '', text)
+        # Remove emotion/paralinguistic tags like <|breath|>, <|emotion_happy|>
+        # Matches <|...|> even if surrounded by spaces or oddly formatted
+        text = re.sub(r'\s*<\|[^>]+\|>\s*', '', text)
+        # Remove session end tags like [END_...]
+        text = re.sub(r'\[END_[A-Z_]+\]', '', text)
+        return text.strip()
+
+    def _get_relaxation_info_str(self):
+        """Get Chinese description of the current or last completed relaxation training."""
+        relax_map = {
+            "huxi": "呼吸放松训练",
+            "jirou": "渐进式肌肉放松",
+            "mingxiang": "冥想正念训练",
+            "冥想训练": "冥想正念训练",
+            "肌肉放松训练": "渐进式肌肉放松",
+            "肌肉放松": "渐进式肌肉放松",
+            "呼吸放松训练": "呼吸放松训练",
+            "呼吸训练": "呼吸放松训练",
+            "unknown": "未知"
+        }
+        # Prioritize filename if currently playing, otherwise last type
+        raw_type = getattr(self, '_current_relaxation_type', "")
+        
+        if raw_type:
+             # Clean potential extension
+             clean_type = raw_type.replace(".mp4", "")
+             return relax_map.get(clean_type, clean_type)
+        return "未进行"
+
     def _end_session_after_relaxation(self):
         """End session after relaxation, generate final report."""
         def end_task():
@@ -1296,80 +1585,194 @@ class VoiceChatApp:
                 suggestions_text = getattr(self, '_relaxation_suggestions_text', None)
                 conversation_history = self.llm_service.conversation_history
                 
-                # Generate comprehensive session summary via LLM
-                print("[INFO] Generating session summary via LLM...")
+                # 2. Generate detailed summary via streaming
+                print("[INFO] Generating session summary via LLM (streaming)...")
                 try:
-                    farewell = self.report_service.generate_session_summary(
-                        conversation_history, suggestions_text or ""
+                    summary_stream = self.report_service.generate_session_summary(
+                        conversation_history, suggestions_text or "", stream=True
                     )
-                    print(f"[INFO] Session summary generated: {farewell}")
+                    
+                    full_farewell = ""
+                    current_buffer = ""
+                    
+                    # Display initial empty message
+                    self.processing_queue.put(("append_chat", ("ai", "【会话总结】")))
+                    
+                    # Buffer for sentence-based TTS
+                    sentence_buffer = ""
+                    # Buffer for UI text to cleaner tag handling
+                    ui_buffer = ""
+                    
+                    # Process stream
+                    for chunk in summary_stream:
+                        full_farewell += chunk
+                        current_buffer += chunk
+                        sentence_buffer += chunk
+                        ui_buffer += chunk
+                        
+                        # Stream text to UI immediately (Cleaned)
+                        # We use a more robust approach:
+                        # 1. Check if ui_buffer contains a complete tag or updated text
+                        # 2. If we determine it's safe to show, we stream it
+                        # For now, simple regex strip on chunk is prone to failure if split.
+                        # So we strip from accumulated ui_buffer and output diff?
+                        # No, stream_chat just appends.
+                        # Pragramtic fix: strip known tags from chunk. If a tag is split, it might show garbage.
+                        # But removing the duplication is the main fix.
+                        
+                        import re
+                        clean_chunk = chunk
+                        clean_chunk = re.sub(r'\[REC_[A-Z_]+\]', '', clean_chunk)
+                        clean_chunk = re.sub(r'\[END_[A-Z_]+\]', '', clean_chunk) 
+                        clean_chunk = re.sub(r'【.*?】', '', clean_chunk) 
+                        clean_chunk = re.sub(r'<\|[^>]+\|>', '', clean_chunk)
+                        
+                        # If chunk is weirdly short and contains partial tag symbols like '<|', skip to be safe?
+                        # Or just output it. The repetition was the main UX issue.
+                        
+                        if clean_chunk:
+                            self.processing_queue.put(("stream_chat", clean_chunk))
+                        
+                        # Check for sentence delimiters for TTS
+                        if any(punct in chunk for punct in ["。", "！", "？", "!", "?", "\n"]):
+                            # It's crude but works for streaming speech
+                            # Extract clean sentences from buffer
+                            # Split by punctuation but keep delimiters
+                            sentences = re.split(r'([。！？!?\n]+)', sentence_buffer)
+                            
+                            # Process pairs (text + punct)
+                            while len(sentences) >= 2:
+                                s_text = sentences.pop(0)
+                                s_punct = sentences.pop(0)
+                                complete_sent = s_text + s_punct
+                                if complete_sent.strip():
+                                    print(f"[INFO] Streaming TTS chunk: {complete_sent}")
+                                    # Send to TTS immediately (thread-safe queue)
+                                    self.tts_service.generate_and_play(complete_sent)
+                                
+                            # Remaining is new buffer
+                            sentence_buffer = "".join(sentences)
+                    
+                    # Process remaining buffer
+                    if sentence_buffer.strip():
+                        print(f"[INFO] Streaming TTS final chunk: {sentence_buffer}")
+                        self.tts_service.generate_and_play(sentence_buffer)
+                        
+                    print(f"[INFO] Session summary generated: {full_farewell}")
+                    
+                    # Final cleanup of the AI response in UI to ensure no tags are visible
+                    # This replaces the messy streamed version with a clean version
+                    clean_farewell = self._clean_text_for_ui(full_farewell)
+                    self.processing_queue.put(("clean_last_ai_response", f"【会话总结】{clean_farewell}"))
+                    
+                    farewell = full_farewell
+
+                    farewell = full_farewell
+
                 except Exception as e:
                     print(f"[ERROR] Failed to generate session summary: {e}")
-                    farewell = "今天聊了不少，辛苦你了。回去记得试试那几条建议，有事儿随时再来找我。"
-                
-                # Display farewell in chat first, then play TTS
-                self.processing_queue.put(("append_chat", ("ai", f"【会话总结】{farewell}")))
-                
-                print(f"[INFO] Playing session summary TTS...")
-                try:
-                    self.tts_service.generate_and_play(farewell)
-                    print(f"[INFO] Session summary TTS playback completed")
-                except Exception as e:
-                    print(f"[ERROR] Session summary TTS failed: {e}")
                     import traceback
                     traceback.print_exc()
-                
-                # Use interim report if available, otherwise generate fresh
-                user_id = self.user_id_entry.get().strip() or "default_user"
-                current_user_info = getattr(self, "user_info", {})
-                conversation_history = self.llm_service.conversation_history
-                
-                # Use interim report from background generation
-                researcher_report = getattr(self, '_interim_report', None)
-                if not researcher_report:
-                    researcher_report = self.report_service.generate_researcher_report(
-                        conversation_history, user_id, EndType.GOAL_ACHIEVED, user_info=current_user_info
-                    )
-                
-                # Add relaxation info to report
-                if isinstance(researcher_report, dict):
-                    researcher_report["relaxation_completed"] = True
-                    researcher_report["relaxation_type"] = getattr(self, '_current_relaxation_type', "unknown")
-                    researcher_report["suggestions_provided"] = getattr(self, '_relaxation_suggestions_text', "")
-                
-                # Save report
-                save_result = self.data_manager.save_session_report(
-                    researcher_report, "Relaxation completed", EndType.GOAL_ACHIEVED.value
-                )
-                print(f"[INFO] Final report saved: {save_result}")
-                
-                # Generate PDF
-                try:
-                    pdf_generator = get_pdf_generator()
-                    pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
-                    if "subject_id" not in pdf_data:
-                        pdf_data["subject_id"] = user_id
                     
-                    pdf_data.update({
-                        "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                        "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                        "conversation_rounds": self.report_service.round_count,
-                        "end_type": "RELAXATION_COMPLETED",
-                    })
+                    # Dynamic Fallback
+                    try:
+                        print("[INFO] Attempting to generate fallback summary via LLM...")
+                        farewell = self._generate_fallback_summary_from_history(suggestions_text)
+                        if not farewell: raise ValueError("Empty summary")
+                    except Exception as fallback_e:
+                        print(f"[WARNING] Dynamic fallback summary failed ({fallback_e}), using static message.")
+                        farewell = "今天聊了不少，辛苦你了。回去记得试试那几条建议，有事儿随时再来找我。"
                     
-                    session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
-                    if session_folder and os.path.isdir(session_folder):
-                        pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
-                        if pdf_path:
-                            print(f"[INFO] Final PDF generated: {pdf_path}")
-                except Exception as e:
-                    print(f"[ERROR] PDF generation failed: {e}")
+                    
+                    # Clean for UI
+                    display_farewell = self._clean_text_for_ui(farewell)
+                    self.processing_queue.put(("append_chat", ("ai", f"【会话总结】{display_farewell}")))
+                    threading.Thread(target=lambda: self.tts_service.generate_and_play(farewell), daemon=True).start()
                 
-                self.session_ended = True
-                self.processing_queue.put(("status", "✅ 会话结束，报告已生成 - 请下一位来访者录入信息"))
+                # We already played TTS during stream, so no need to run_tts() separately
+                # UNLESS exception happened fallback
+
+                
+                # Run report generation in parallel (totally background)
+                def save_final_report_background():
+                    try:
+                        # Wait a bit to let TTS start streaming smoothly (avoid GPU contention)
+                        time.sleep(10) # Increased delay to accommodate transition + summary
+                        
+                        # Use interim report if available, otherwise generate fresh
+                        user_id = self.user_id_entry.get().strip() or "default_user"
+                        current_user_info = getattr(self, "user_info", {})
+                        conversation_history = self.llm_service.conversation_history
+                        
+                        # Prepare relaxation info string
+                        relax_str = self._get_relaxation_info_str()
+                        
+                        # Use interim report from background generation
+                        researcher_report = getattr(self, '_interim_report', None)
+                        if not researcher_report:
+                             researcher_report = self.report_service.generate_researcher_report(
+                                conversation_history, 
+                                user_id, 
+                                EndType.GOAL_ACHIEVED, 
+                                user_info=current_user_info,
+                                relaxation_info=relax_str
+                            )
+                        
+                        # Add relaxation info to report
+                        if isinstance(researcher_report, dict):
+                            researcher_report["relaxation_completed"] = True
+                            researcher_report["relaxation_type"] = getattr(self, '_current_relaxation_type', "unknown")
+                            researcher_report["suggestions_provided"] = getattr(self, '_relaxation_suggestions_text', "")
+                        
+                        # Save report
+                        save_result = self.data_manager.save_session_report(
+                            researcher_report, "Relaxation completed", EndType.GOAL_ACHIEVED.value
+                        )
+                        print(f"[INFO] Final report saved: {save_result}")
+                        
+                        # Generate PDF
+                        try:
+                            # OPTIMIZATION: Reuse pre-generated PDF if available
+                            pre_pdf = getattr(self, '_interim_pdf_path', None)
+                            if pre_pdf and os.path.exists(pre_pdf):
+                                print(f"[INFO] Using pre-generated final PDF: {pre_pdf}")
+                                # It's already generated.
+                            else:
+                                print("[INFO] generating Final PDF now (fallback)...")
+                                pdf_generator = get_pdf_generator()
+                                pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
+                                if "subject_id" not in pdf_data:
+                                    pdf_data["subject_id"] = user_id
+                                
+                                pdf_data.update({
+                                    "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
+                                    "session_duration_minutes": self.report_service.get_session_duration_minutes(),
+                                    "conversation_rounds": self.report_service.round_count,
+                                    "end_type": "RELAXATION_COMPLETED",
+                                })
+                                
+                                session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
+                                if session_folder and os.path.isdir(session_folder):
+                                    pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
+                                    if pdf_path:
+                                        print(f"[INFO] Final PDF generated: {pdf_path}")
+                        except Exception as e:
+                            print(f"[ERROR] PDF generation failed: {e}")
+                            
+                        self.session_ended = True
+                        self.processing_queue.put(("status", "✅ 会话结束，报告已生成 - 请下一位来访者录入信息"))
+                    except Exception as e:
+                         print(f"[ERROR] Background report generation failed: {e}")
+                         import traceback
+                         traceback.print_exc()
+
+                threading.Thread(target=save_final_report_background, daemon=True).start()
                 
                 # Delay then partial reset (keep chat visible)
-                self.root.after(2000, lambda: self._reset_ui_for_new_session(clear_chat=False))
+                # Ensure reset happens after a reasonable time for TTS to finish? 
+                # Or just give it a fixed 30s delay
+                # Capture timer ID so we can cancel it if user manually starts new session early
+                self.reset_timer_id = self.root.after(30000, lambda: self._reset_ui_for_new_session(clear_chat=False))
                 
             except Exception as e:
                 print(f"[ERROR] End session failed: {e}")
@@ -1379,9 +1782,13 @@ class VoiceChatApp:
                 self.processing_queue.put(("set_buttons_state", "normal"))
         
         threading.Thread(target=end_task, daemon=True).start()
+                
+
     
     def _play_fill_info_prompt(self):
         """Play voice prompt to guide visitor to fill basic info form."""
+        if self.info_confirmed:
+            return
         def prompt_task():
             try:
                 self.processing_queue.put(("set_buttons_state", "disabled"))
@@ -1452,6 +1859,36 @@ class VoiceChatApp:
             except Exception as e:
                 print(f"[WARNING] 智能推荐失败 ({e})，使用默认: 呼吸")
                 relaxation_tag = "呼吸"
+                
+        # Intercept End if Relaxation not done and not previously rejected/offered at end
+        # Only for GOAL/QUIT/TIME_LIMIT, not SAFETY
+        if end_type not in [EndType.SAFETY, EndType.INVALID] and \
+           not getattr(self, '_current_relaxation_type', None) and \
+           not getattr(self, '_has_forced_relaxation_rec', False):
+               
+            print("[INFO] Intercepting session end to recommend relaxation...")
+            self._has_forced_relaxation_rec = True
+            self.session_ended = False
+            
+            # 1. Generate transition text
+            rec_text = f"等等，在结束之前，我留意到你还是有点紧张。要不咱们先做个{relaxation_tag}放松训练？只需几分钟，效果很好的。"
+            
+            # 2. Play and Show
+            self.append_to_chat("ai", rec_text) # Use robust append
+            self.processing_queue.put(("stream_chat", "\n")) # Ensure newline
+            
+            # Play TTS
+            self.processing_queue.put(("status", "🔊 正在播放建议..."))
+            threading.Thread(target=lambda: self.tts_service.generate_and_play(rec_text), daemon=True).start()
+            
+            # 3. Highlight Button
+            time.sleep(1) # Wait for text to appear
+            # BUG FIX: _highlight_recommended_buttons expects Chinese keys (e.g. "呼吸"), not English
+            self.processing_queue.put(("check_relaxation_recommendation", relaxation_tag))
+            
+            self.processing_queue.put(("status", "✅ 请尝试放松训练"))
+            self.processing_queue.put(("set_buttons_state", "normal"))
+            return
             
         self.processing_queue.put(("status", "📊 正在生成反馈..."))
         
@@ -1472,15 +1909,25 @@ class VoiceChatApp:
                     tag_map = {"呼吸": "BREATHING", "肌肉": "MUSCLE", "冥想": "MEDITATION"}
                     relaxation_rec = tag_map.get(relaxation_tag)
                 
-                # ===== STEP 1: Generate visitor feedback (Streamed) =====
-                print("[INFO] 生成来访者反馈(流式)...")
+                # ===== STEP 1: Generate visitor feedback (Streamed to TTS) =====
+                print("[INFO] 生成来访者反馈(流式 + TTS实时播放)...")
+                
+                # Start Streaming TTS Mode
+                self.tts_service.start_streaming_mode()
+                
+                full_feedback = ""
                 
                 if pre_generated_feedback:
                     print("[INFO] 使用预生成反馈...")
                     visitor_feedback = pre_generated_feedback
-                    # Simulate streaming for pre-generated content
+                    # Simulate streaming for chat
                     self.processing_queue.put(("append_chat", ("ai_start", f"[反馈] {visitor_feedback}")))
                     self.processing_queue.put(("stream_chat", "\n"))
+                    
+                    # Feed to TTS immediately
+                    self.tts_service.queue_text(visitor_feedback)
+                    full_feedback = visitor_feedback
+                    
                 else:
                     # Get end type name for system message
                     end_type_names = {
@@ -1497,33 +1944,116 @@ class VoiceChatApp:
                     # Start streaming feedback
                     self.processing_queue.put(("append_chat", ("ai_start", "[反馈] ")))
                     
-                    full_feedback = ""
+                    # Ensure re is imported locally
+                    import re
+
                     stream_gen = self.report_service.generate_visitor_feedback(
                         conversation_history, end_type, relaxation_rec, stream=True
                     )
                     
+                    stream_buffer = "" # For chat display
+                    tts_sentence_buffer = "" # For TTS accumulation
+                    
                     for chunk in stream_gen:
                         full_feedback += chunk
-                        self.processing_queue.put(("stream_chat", chunk))
+                        
+                        # --- Chat Streaming Logic ---
+                        stream_buffer += chunk
+                        # Clean complete tags in buffer for UI
+                        stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer)
+                        stream_buffer = re.sub(r'\[END_[A-Z_]+\]', '', stream_buffer)
+                        stream_buffer = re.sub(r'【.*?】', '', stream_buffer)
+                        stream_buffer = re.sub(r'<\|[^>]+\|>', '', stream_buffer)
+                        
+                        # Safe flush logic for Chat
+                        potential_starts = ['<', '[', '【']
+                        if not any(c in stream_buffer for c in potential_starts):
+                             self.processing_queue.put(("stream_chat", stream_buffer))
+                             stream_buffer = ""
+                        elif len(stream_buffer) > 50:
+                             # Flush safe part or first char
+                             self.processing_queue.put(("stream_chat", stream_buffer[0]))
+                             stream_buffer = stream_buffer[1:]
+                        
+                        # --- TTS Streaming Logic ---
+                        tts_sentence_buffer += chunk
+                        # Check for sentence delimiters
+                        if any(p in tts_sentence_buffer for p in ['。', '！', '？', '!', '?', '\n']):
+                            # Split by delimiters but keep them
+                            # Simplified: just split by the last found delimiter to be safe/lazy
+                            # or just use re.split
+                            
+                            # Find the last delimiter index
+                            last_delim = -1
+                            for p in ['。', '！', '？', '!', '?', '\n']:
+                                idx = tts_sentence_buffer.rfind(p)
+                                if idx > last_delim:
+                                    last_delim = idx
+                            
+                            if last_delim != -1:
+                                to_speak = tts_sentence_buffer[:last_delim+1]
+                                tts_sentence_buffer = tts_sentence_buffer[last_delim+1:]
+                                
+                                # Send to TTS
+                                self.tts_service.queue_text(to_speak)
                     
+                    # Flush remaining buffers
+                    if stream_buffer:
+                        stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer) # Final clean
+                        self.processing_queue.put(("stream_chat", stream_buffer))
+                    
+                    if tts_sentence_buffer.strip():
+                        self.tts_service.queue_text(tts_sentence_buffer)
+
                     self.processing_queue.put(("stream_chat", "\n"))
-                    visitor_feedback = self.report_service._clean_for_tts(full_feedback)
+                    
+                    # Final Cleanup UI just in case
+                    visitor_feedback = full_feedback
+                    visitor_feedback_clean = self._clean_text_for_ui(visitor_feedback)
+                    self.processing_queue.put(("clean_last_ai_response", f"[反馈] {visitor_feedback_clean}"))
                 
-                # ===== STEP 2: Immediately trigger UI and TTS playback =====
-                # Pass pre_generated_audio if available
-                # Note: valid_feedback is cleaned
-                self.processing_queue.put(("session_end", (end_type, visitor_feedback, relaxation_rec, pre_generated_audio)))
+                # ===== STEP 2: Stop Streaming Mode and Wait for Playback =====
+                # This ensures we don't proceed to PDF generation (and potentially closing app or lagging) 
+                # until audio is reasonably finished or at least queued properly.
+                # Actually, blocking here is good to ensure user hears it before "PDF generated" message pops up.
+                
+                # Signal stop (this waits for threads to join)
+                print("[INFO] 等待TTS流式播放完成...")
+                collected_audio = self.tts_service.stop_streaming_mode()
+                
+                # If we collected audio, use it for saving in Step 2 call
+                final_audio_data = collected_audio if (collected_audio is not None and len(collected_audio) > 0) else None
+                
+                # Signal session end, but skip playback in dialog since we already streamed it
+                self.processing_queue.put(("session_end", (end_type, visitor_feedback, relaxation_rec, final_audio_data, False)))
                 
                 # Show crisis resources for safety endings
                 if end_type == EndType.SAFETY:
                     self.processing_queue.put(("show_crisis_resources", None))
                 
                 # ===== STEP 3: Generate researcher report in background (slow) =====
+                # OPTIMIZATION: Removed sleep, as streaming TTS blocks in stop_streaming_mode until done (or timeout)
+                # So we can proceed immediately after that returns.
+                # time.sleep(15) 
+
+                
+                # BUG FIX: Inject relaxation data if session continued after relaxation
+                # The report service doesn't know about relaxation happening in UI unless passed
+                relax_str = self._get_relaxation_info_str()
+                
                 print("[INFO] 后台生成研究人员报告...")
-                # Pass user_info to ensure it's included in the report JSON and PDF
                 researcher_report = self.report_service.generate_researcher_report(
-                    conversation_history, user_id, end_type, user_info=current_user_info
+                    conversation_history, user_id, end_type, user_info=current_user_info,
+                    relaxation_info=relax_str
                 )
+                
+                # Force inject if flag is set (regardless of whether LLM picked it up)
+                if getattr(self, '_relaxation_completed_flag', False) or (relax_str and relax_str != "未进行"):
+                    print(f"[INFO] Injecting relaxation data into final report: {relax_str}")
+                    if isinstance(researcher_report, dict):
+                        researcher_report["relaxation_completed"] = True
+                        researcher_report["relaxation_type"] = relax_str
+                        researcher_report["suggestions_provided"] = getattr(self, '_relaxation_suggestions_text', "") or ""
                 
                 # Update relaxation recommendation if found in report
                 report_rec = self.report_service.get_relaxation_recommendation(researcher_report)
@@ -1563,6 +2093,18 @@ class VoiceChatApp:
                         pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
                         if pdf_path:
                             print(f"[INFO] PDF报告已生成: {pdf_path}")
+                            
+                            # REQUIREMENT: If we generated a new final report after continuing chat,
+                            # replace (delete) the old interim report.
+                            interim_pdf = getattr(self, '_interim_pdf_path', None)
+                            if interim_pdf and os.path.exists(interim_pdf) and interim_pdf != pdf_path:
+                                try:
+                                    print(f"[INFO] Replacing interim PDF (deleting old): {interim_pdf}")
+                                    os.remove(interim_pdf)
+                                    # Clear the pointer so we don't delete it again
+                                    self._interim_pdf_path = None
+                                except Exception as del_e:
+                                    print(f"[WARNING] Failed to delete interim PDF: {del_e}")
                     else:
                         print("[WARNING] 无法确定会话文件夹，跳过PDF生成")
                 except Exception as pdf_error:
@@ -1586,7 +2128,7 @@ class VoiceChatApp:
         
         threading.Thread(target=generate_reports, daemon=True).start()
     
-    def _show_session_end_dialog(self, end_type: EndType, visitor_feedback: str, relaxation_rec: str = None, audio_data: Any = None):
+    def _show_session_end_dialog(self, end_type: EndType, visitor_feedback: str, relaxation_rec: str = None, audio_data: Any = None, play_audio: bool = True):
         """
         Show session end dialog with visitor feedback.
         
@@ -1595,6 +2137,7 @@ class VoiceChatApp:
             visitor_feedback: The oral-style feedback text
             relaxation_rec: Optional relaxation recommendation
             audio_data: Optional pre-generated audio data
+            play_audio: Whether to play the audio (default True). Set False if already streamed.
         """
         # Update status
         self.status_var.set("📋 正在准备会话总结...")
@@ -1640,15 +2183,23 @@ class VoiceChatApp:
                     except:
                         pass
                 
-                if audio_data is not None:
-                    # Use pre-generated audio
-                    print("[INFO] Using pre-generated feedback audio.")
-                    self.tts_service.play_audio(audio_data)
+                if play_audio:
+                    if audio_data is not None:
+                        # Use pre-generated audio / collected stream audio
+                        print("[INFO] Using pre-generated/collected feedback audio.")
+                        self.tts_service.play_audio(audio_data)
+                    else:
+                        # If no audio data (and we didn't just stream it), then generate
+                        # This fallback should rarely happen if streaming worked
+                        # Or if pre-generated was passed as None in non-streaming case
+                        if not visitor_feedback:
+                             print("[WARNING] No feedback text to generate audio for.")
+                        else:
+                            print("[INFO] Generating full summary audio (fallback)...")
+                            full_audio = self.tts_service.generate(visitor_feedback)
+                            self.tts_service.play_audio(full_audio)
                 else:
-                    # Use full generation instead of streaming to prevent stuttering
-                    print("[INFO] Pre-generating full summary audio to ensure smooth playback...")
-                    full_audio = self.tts_service.generate(visitor_feedback)
-                    self.tts_service.play_audio(full_audio)
+                    print("[INFO] Audio playback skipped (already streamed).")
                 
                 # After TTS, highlight relaxation button if recommended
                 if relaxation_rec:
@@ -1681,7 +2232,8 @@ class VoiceChatApp:
         if end_type in [EndType.GOAL_ACHIEVED, EndType.SAFETY]:
             title = "会话总结" if end_type == EndType.GOAL_ACHIEVED else "重要提示"
             # Delay popup until after audio generation
-            self.root.after(3000, lambda: self._show_feedback_popup(title, visitor_feedback, end_type))
+            clean_feedback = self._clean_text_for_ui(visitor_feedback)
+            self.root.after(3000, lambda: self._show_feedback_popup(title, clean_feedback, end_type))
     
     def _show_feedback_popup(self, title: str, feedback: str, end_type: EndType):
         """Show a non-blocking popup with feedback summary."""
@@ -1870,47 +2422,101 @@ class VoiceChatApp:
             self._relaxation_transition_audio = None
             self._relaxation_suggestions_text = None
             self._relaxation_suggestions_audio = None
-            self._background_generation_complete = False
+            self._content_generation_complete = False # Critical for playback
+            self._interim_pdf_path = None
+            
             self._current_relaxation_type = filename.replace(".mp4", "")
             
-            # Start background generation thread immediately
-            def background_generation():
+            # IMMEDIATE REPORT UPDATE: Record relaxation start immediately so interim reports see it
+            if self.report_service:
+                relax_name = filename.replace(".mp4", "")
+                self.report_service.record_relaxation(relax_name)
+            
+            # TASK 1: Critical Content Generation (Must finish before video ends)
+            def background_content_gen():
                 try:
-                    print("[INFO] Background generation starting...")
+                    print("[INFO] Background CONTENT generation starting...")
                     
                     # 1. Generate transition TTS
                     print("[INFO] Generating transition TTS...")
-                    self._relaxation_transition_audio = self.tts_service.generate(POST_RELAXATION_MESSAGE)
+                    local_trans_text = transition_text # Capture variable
+                    if isinstance(local_trans_text, list):
+                        local_trans_text = random.choice(local_trans_text)
+                    self._relaxation_transition_text = local_trans_text
+                    self._relaxation_transition_audio = self.tts_service.generate(local_trans_text)
+                    self._relaxation_completed_flag = True
                     
                     # 2. Generate personalized suggestions via LLM
                     print("[INFO] Generating suggestions via LLM...")
                     conversation_history = self.llm_service.conversation_history
                     suggestions = self.report_service.generate_suggestions(conversation_history)
                     self._relaxation_suggestions_text = suggestions
-                    print(f"[INFO] Suggestions generated: {suggestions[:50]}...")
                     
                     # 3. Synthesize suggestions TTS
                     print("[INFO] Generating suggestions TTS...")
                     self._relaxation_suggestions_audio = self.tts_service.generate(suggestions)
                     
-                    # 4. Generate interim report (fallback in case user force-exits)
-                    print("[INFO] Generating interim report...")
-                    user_id = self.user_id_entry.get().strip() or "default_user"
-                    current_user_info = getattr(self, "user_info", {})
-                    self._interim_report = self.report_service.generate_researcher_report(
-                        conversation_history, user_id, EndType.GOAL_ACHIEVED, user_info=current_user_info
-                    )
-                    
-                    self._background_generation_complete = True
-                    print("[INFO] Background generation complete!")
-                    
+                    self._content_generation_complete = True
+                    print("[INFO] Background CONTENT generation complete!")
                 except Exception as e:
-                    print(f"[ERROR] Background generation failed: {e}")
+                    print(f"[ERROR] Content generation failed: {e}")
                     import traceback
                     traceback.print_exc()
-                    self._background_generation_complete = True  # Mark as done to avoid blocking
+                    self._content_generation_complete = True # Unblock UI
             
-            threading.Thread(target=background_generation, daemon=True).start()
+            # TASK 2: Heavy Report Generation (Can run in parallel, no one waits for it immediately)
+            def background_report_gen():
+                try:
+                    # WAIT 10s to ensure everything is synced (e.g. video started, logs updated)
+                    print("[INFO] Waiting 10s for synchronization before interim report...")
+                    time.sleep(10)
+                    
+                    print("[INFO] Background REPORT generation starting...")
+                    # 4. Generate interim report
+                    user_id = self.user_id_entry.get().strip() or "default_user"
+                    current_user_info = getattr(self, "user_info", {})
+                    relax_str = self._get_relaxation_info_str()
+                    conversation_history = self.llm_service.conversation_history
+                    
+                    # Generate report structure first
+                    self._interim_report = self.report_service.generate_researcher_report(
+                        conversation_history, user_id, EndType.GOAL_ACHIEVED, 
+                        user_info=current_user_info, relaxation_info=relax_str
+                    )
+                    
+                    # FORCE INJECT relaxation status into interim report
+                    # This ensures the PDF generator sees it even if LLM missed it
+                    if isinstance(self._interim_report, dict):
+                        self._interim_report["relaxation_completed"] = True
+                        self._interim_report["relaxation_type"] = relax_str
+                        # Also attempt to parse suggestion text if available (though usually generated in parallel)
+                        self._interim_report["suggestions_provided"] = getattr(self, '_relaxation_suggestions_text', "") or ""
+                    
+                    # 5. Generate interim PDF
+                    print("[INFO] Generating interim PDF report in background...")
+                    pdf_generator = get_pdf_generator()
+                    pdf_data = self._interim_report.copy() if isinstance(self._interim_report, dict) else {}
+                    if "subject_id" not in pdf_data:
+                        pdf_data["subject_id"] = user_id
+                    
+                    pdf_data.update({
+                        "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
+                        "session_duration_minutes": self.report_service.get_session_duration_minutes(),
+                        "conversation_rounds": self.report_service.round_count,
+                        "end_type": "RELAXATION_CHECKPOINT",
+                    })
+                    
+                    # Use current session dir
+                    session_folder = self.data_manager.session_dir
+                    if session_folder and os.path.exists(session_folder):
+                         self._interim_pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
+                         print(f"[INFO] Interim PDF pre-generated at: {self._interim_pdf_path}")
+                    
+                except Exception as e:
+                    print(f"[ERROR] Background REPORT generation failed: {e}")
+            
+            threading.Thread(target=background_content_gen, daemon=True).start()
+            threading.Thread(target=background_report_gen, daemon=True).start()
             
             # Video runner thread
             def video_runner():
@@ -1921,6 +2527,12 @@ class VoiceChatApp:
                     print(f"Video runner exception: {e}")
                 finally:
                     print("[INFO] Video finished.")
+                    # Notify report service of completion
+                    if self.report_service:
+                        # Convert filename to type string (e.g. "呼吸放松训练.mp4" -> "呼吸放松训练")
+                        relax_name = filename.replace(".mp4", "")
+                        self.report_service.record_relaxation(relax_name)
+                    
                     # Trigger post-relaxation flow
                     self.processing_queue.put(("post_relaxation_greeting", None))
             
@@ -1966,7 +2578,7 @@ class VoiceChatApp:
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 50
         popup.geometry(f"+{x}+{y}")
         
-        label = tk.Label(popup, text="正在生成报告并退出...", font=("Microsoft YaHei", 12))
+        label = tk.Label(popup, text="正在退出...", font=("Microsoft YaHei", 12))
         label.pack(expand=True, pady=20)
         popup.update()
         
@@ -1992,8 +2604,10 @@ class VoiceChatApp:
                 
                 if conversation_history: # Only generate if there is chat
                     print("[INFO] Exiting: Generating final report...")
+                    relax_str = self._get_relaxation_info_str()
                     researcher_report = self.report_service.generate_researcher_report(
-                        conversation_history, user_id, EndType.QUIT, user_info=current_user_info
+                        conversation_history, user_id, EndType.QUIT, user_info=current_user_info,
+                        relaxation_info=relax_str
                     )
                     
                     self.data_manager.save_session_report(
@@ -2019,8 +2633,18 @@ class VoiceChatApp:
                         
                         if session_folder and os.path.isdir(session_folder):
                             pdf_generator = get_pdf_generator()
-                            pdf_generator.generate_report(pdf_data, session_folder)
-                            print("[INFO] Exit PDF generated.")
+                            pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
+                            if pdf_path:
+                                print(f"[INFO] Exit PDF generated: {pdf_path}")
+                                
+                                # Clean up interim PDF
+                                interim_pdf = getattr(self, '_interim_pdf_path', None)
+                                if interim_pdf and os.path.exists(interim_pdf) and interim_pdf != pdf_path:
+                                    try:
+                                        print(f"[INFO] Replacing interim PDF (deleting old): {interim_pdf}")
+                                        os.remove(interim_pdf)
+                                    except Exception as del_e:
+                                        print(f"[WARNING] Failed to delete interim PDF: {del_e}")
                     except Exception as e:
                         print(f"[ERROR] Exit PDF generation failed: {e}")
                         
@@ -2035,6 +2659,9 @@ class VoiceChatApp:
 
     def _confirm_user_info(self):
         """Validate and confirm user info, then start session."""
+        # Cancel any pending auto-reset from previous session
+        self._cancel_reset_timer()
+        
         # Validate required fields
         user_id = self.user_id_entry.get().strip()
         gender = self.gender_var.get()
@@ -2189,11 +2816,17 @@ class VoiceChatApp:
             threading.Thread(target=end_and_reset, daemon=True).start()
             
         else:
+            # SAFETY check: confirm even if no session, to prevent accidental click after confirmation
+            if not messagebox.askyesno("修改信息", "确定要清除当前信息并重新填写吗？"):
+                return
             # Just reset directly if no active session
             self._reset_ui_for_new_session()
 
     def _reset_ui_for_new_session(self, clear_chat=True):
         """Reset UI to initial state for new user."""
+        # Cancel pending timer to prevent double-resets
+        self._cancel_reset_timer()
+        
         # 1. Unlock form fields
         self.user_id_entry.config(state="normal")
         self.user_id_entry.delete(0, tk.END)
@@ -2224,6 +2857,13 @@ class VoiceChatApp:
         self.current_user_var.set("请填写基本信息后开始对话")
         self.status_var.set("等待用户输入信息")
         
+        # Reset relaxation state for new session
+        self._relaxation_completed_flag = False
+        self._current_relaxation_type = None
+        self._relaxation_suggestions_text = None
+        self._has_forced_relaxation_rec = False
+        self._last_relaxation_recommendation_round = -99
+        
         # 4. Clear chat (only if requested)
         if clear_chat:
             self.chat_text.config(state=tk.NORMAL)
@@ -2233,6 +2873,12 @@ class VoiceChatApp:
         # 5. Stop any playing audio/TTS
         if self.tts_service:
             self.tts_service.stop_playing()
+            
+        # 6. Play voice prompt for new user to fill info (Fix for missing guidance)
+        self.processing_queue.put(("fill_info_prompt", None))
+        
+        # 7. Force UI update to ensure fields obey state changes immediately
+        self.root.update_idletasks()
             
     def setButtonsState(self, state):
         cfg = {"state": state}
@@ -2250,6 +2896,16 @@ class VoiceChatApp:
     def start_audio_monitor(self):
         # Optional: Implement VAD visualization if needed
         pass
+
+    def _cancel_reset_timer(self):
+        """Cancel the pending session reset timer if it exists."""
+        if getattr(self, 'reset_timer_id', None):
+            try:
+                self.root.after_cancel(self.reset_timer_id)
+                print(f"[INFO] Cancelled pending pending session reset timer: {self.reset_timer_id}")
+            except Exception as e:
+                print(f"[WARNING] Failed to cancel reset timer: {e}")
+            self.reset_timer_id = None
 
 if __name__ == "__main__":
     app = VoiceChatApp()

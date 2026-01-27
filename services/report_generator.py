@@ -42,9 +42,9 @@ class PDFReportGenerator:
         # Try multiple font paths
         font_paths = [
             font_path,
-            r"C:\Windows\Fonts\simhei.ttf",
-            r"C:\Windows\Fonts\msyh.ttc",  # Microsoft YaHei
-            r"C:\Windows\Fonts\simsun.ttc",  # SimSun
+            os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "simhei.ttf"),
+            os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "msyh.ttc"),  # Microsoft YaHei
+            os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "simsun.ttc"),  # SimSun
         ]
         
         for path in font_paths:
@@ -159,7 +159,9 @@ class PDFReportGenerator:
                 canvas.saveState()
                 
                 # 1. Draw Background Image (Full Page)
-                bg_path = r"D:\program\voice_chat_app\services\PDFbackground.png"
+                # Use relative path for portability
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                bg_path = os.path.join(current_dir, "PDFbackground.png")
                 if os.path.exists(bg_path):
                     try:
                         # Draw image covering the whole page
@@ -336,10 +338,31 @@ class PDFReportGenerator:
             else:
                 issues_text = "暂无"
             
+            # Relaxation Info
+            relax_map = {
+                "huxi": "呼吸放松训练",
+                "jirou": "渐进式肌肉放松",
+                "mingxiang": "冥想正念训练",
+                "呼吸训练": "呼吸放松训练",
+                "肌肉放松": "渐进式肌肉放松",
+                "冥想训练": "冥想正念训练",
+                "unknown": "未知"
+            }
+            relax_type_code = report_data.get("relaxation_type", "")
+            if not relax_type_code and report_data.get("relaxation_completed"):
+                 relax_type_code = "unknown"
+                 
+            relax_text = "未进行"
+            if relax_type_code:
+                 # Clean up potential file extension
+                 code_clean = relax_type_code.replace(".mp4", "")
+                 relax_text = relax_map.get(code_clean, code_clean)
+
             assessment_data = [
                 ["情绪状态", Paragraph(emotion_text, styles["body"])],
                 ["风险等级", Paragraph(risk_text, styles["body"])],
                 ["识别问题", Paragraph(issues_text, styles["body"])],
+                ["放松训练", Paragraph(relax_text, styles["body"])],
             ]
             
             # Add recommendations if available

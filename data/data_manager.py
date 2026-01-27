@@ -56,10 +56,40 @@ class DataManager:
         folder_name = base_folder
         
         if date_path.exists():
-            # 检查同名文件夹
+            # Check for existing folder with same name
             if (date_path / folder_name).exists():
-                # 添加时间戳区分：被试编号_HHMMSS
                 folder_name = f"{base_folder}_{now.strftime('%H%M%S')}"
+        
+        # Check if we should rename an existing empty "default_subject" session
+        # This prevents accumulating empty default folders
+        if self.current_folder_name and "default_subject" in self.current_folder_name and self.message_counter == 0:
+            old_path = self._get_session_path()
+            if old_path.exists() and subject_id != "default_subject":
+                try:
+                    new_folder_name = folder_name
+                    # Ensure new name is unique if we are renaming to it (though we just calculated it)
+                    # But wait, folder_name was calculated based on existence.
+                    # If we rename 'default' to 'subject_001', we need to check if 'subject_001' exists?
+                    # Yes, logic above handled collision for 'subject_001' vs existing 'subject_001'.
+                    
+                    self.current_folder_name = new_folder_name
+                    new_path = self._get_session_path()
+                    
+                    # Rename directory
+                    old_path.rename(new_path)
+                    print(f"[INFO] Renamed empty default session to: {new_path}")
+                    
+                    # Update metadata in the renamed folder
+                    metadata = self._load_metadata()
+                    metadata["subject_id"] = subject_id
+                    metadata["folder_name"] = new_folder_name
+                    self._save_metadata(metadata)
+                    
+                    return self.current_folder_name
+                except Exception as e:
+                    print(f"[WARNING] Failed to rename default session: {e}")
+                    # Fallback to creating new folder
+                    self.current_folder_name = folder_name
         
         self.current_folder_name = folder_name
         

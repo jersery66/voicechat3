@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     OLLAMA_HOST, OLLAMA_MODEL,
     MAX_CONVERSATION_ROUNDS, MAX_CONVERSATION_MINUTES, TIME_WARNING_MINUTES,
-    CRISIS_HOTLINES, RESEARCHER_REPORT_PROMPT, VISITOR_FEEDBACK_PROMPT
+    CRISIS_HOTLINES, RESEARCHER_REPORT_PROMPT, VISITOR_FEEDBACK_PROMPT,
+    SESSION_SUMMARY_PROMPT
 )
 
 
@@ -62,6 +63,7 @@ class ReportService:
         self.session_start_time: Optional[datetime] = None
         self.round_count: int = 0
         self.time_warning_shown: bool = False
+        self.completed_relaxation: Optional[str] = None # Track completed relaxation type
         
     def _get_llm_service(self):
         """Lazy load LLM service if not provided."""
@@ -77,6 +79,12 @@ class ReportService:
         self.session_start_time = datetime.now()
         self.round_count = 0
         self.time_warning_shown = False
+        self.completed_relaxation = None
+        
+    def record_relaxation(self, relaxation_name: str):
+        """Record that a relaxation session was completed."""
+        self.completed_relaxation = relaxation_name
+        print(f"[INFO] ReportService recorded relaxation: {relaxation_name}")
         
     def increment_round(self):
         """Increment conversation round count."""
@@ -140,10 +148,12 @@ class ReportService:
             return True, f"我们的对话已进行约{int(duration)}分钟，还剩约{int(remaining)}分钟。如有需要，可以延长或约定下次讨论。"
         
         # Round warning (approaching limit)
-        if self.round_count >= MAX_CONVERSATION_ROUNDS - 2:
-            self.time_warning_shown = True
-            remaining = MAX_CONVERSATION_ROUNDS - self.round_count
-            return True, f"我们已交流约{self.round_count}轮，建议稍作整理。还可以继续{remaining}轮左右。"
+        # Round warning (approaching limit)
+        # DISABLE round warning as per user request
+        # if self.round_count >= MAX_CONVERSATION_ROUNDS - 2:
+        #     self.time_warning_shown = True
+        #     remaining = MAX_CONVERSATION_ROUNDS - self.round_count
+        #     return False, ""
             
         return False, ""
     
@@ -159,7 +169,8 @@ class ReportService:
                                    conversation_history: List[Dict],
                                    subject_id: str,
                                    end_type: EndType,
-                                   user_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                                   user_info: Optional[Dict[str, Any]] = None,
+                                   relaxation_info: str = "未进行") -> Dict[str, Any]:
         """
         Generate researcher report (JSON format).
         
@@ -168,6 +179,7 @@ class ReportService:
             subject_id: Subject/participant ID
             end_type: How the session ended
             user_info: Optional dictionary containing user demographics
+            relaxation_info: Description of completed relaxation training
             
         Returns:
             Structured report dict
@@ -177,12 +189,19 @@ class ReportService:
         # Format conversation for analysis
         formatted_history = self._format_conversation(conversation_history)
         
+        # Inject relaxation info explicitly into conversation history for LLM
+        # This ensures the LLM 'sees' the event in the context
+        actual_relaxation = relaxation_info if relaxation_info != "未进行" else (self.completed_relaxation or "未进行")
+        if actual_relaxation != "未进行":
+            formatted_history += f"\n【系统记录】来访者刚刚完成了{actual_relaxation}，目前状态应该有所缓解。"
+        
         prompt = RESEARCHER_REPORT_PROMPT.format(
             conversation=formatted_history,
             subject_id=subject_id,
             duration_minutes=int(self.get_session_duration_minutes()),
             total_rounds=self.round_count,
-            end_type=end_type.value
+            end_type=end_type.value,
+            relaxation_info=relaxation_info if relaxation_info != "未进行" else (self.completed_relaxation or "未进行")
         )
         
         # Get analysis from LLM (use separate context to not pollute main conversation)
@@ -199,6 +218,24 @@ class ReportService:
             
             # Attempt to parse as JSON, or wrap in structure
             report = self._parse_report_json(analysis_text, subject_id, end_type)
+            
+            # FORCE FIX: Check if we have explicit relaxation completion info
+            # This overrides LLM potential "Not performed" hallucination
+            actual_relaxation = relaxation_info if relaxation_info != "未进行" else (self.completed_relaxation or "未进行")
+            
+            if actual_relaxation != "未进行":
+                # Infer code
+                code = "NONE"
+                if "呼吸" in actual_relaxation: code = "BREATHING"
+                elif "肌肉" in actual_relaxation: code = "MUSCLE"
+                elif "冥想" in actual_relaxation: code = "MEDITATION"
+                
+                # Update report fields
+                report["relaxation_recommendation"] = code
+                report["relaxation_completed_type"] = actual_relaxation # Helper field
+                
+                # Verify summary mentions it, if not, append it? 
+                # (Risky to modify text, but ensures PDF shows it if PDF uses this)
             
             # Add user info if provided
             if user_info:
@@ -223,42 +260,44 @@ class ReportService:
                 report["user_info"] = user_info
             return report
     
-    def generate_visitor_feedback(self,
+    def generate_visitor_feedback(self, 
                                   conversation_history: List[Dict],
                                   end_type: EndType,
-                                  relaxation_recommendation: Optional[str] = None,
+                                  relaxation_rec: Optional[str] = None,
                                   stream: bool = False) -> Any:
         """
-        Generate visitor-friendly feedback (oral style for TTS).
+        Generate oral-style feedback for the visitor (TTS).
         
         Args:
-            conversation_history: List of message dicts
-            end_type: How the session ended
-            relaxation_recommendation: Optional recommended relaxation type
-            stream: Whether to stream the response (yield chunks)
+            conversation_history: List of messages
+            end_type: Session end reason
+            relaxation_rec: Recommended relaxation type (BREATHING/MUSCLE/MEDITATION) or None
+            stream: Whether to stream the response
             
         Returns:
-            Oral-style feedback text suitable for TTS, or generator if stream=True
+            Feedback text string or generator (if stream=True)
         """
         llm = self._get_llm_service()
-        
         formatted_history = self._format_conversation(conversation_history)
         
-        # Different prompts based on end type
-        if end_type == EndType.SAFETY:
-            prompt = self._get_safety_feedback_prompt(formatted_history)
-        else:
-            prompt = VISITOR_FEEDBACK_PROMPT.format(
-                conversation=formatted_history,
-                end_type=end_type.value,
-                relaxation_recommendation=relaxation_recommendation or "无特定推荐"
-            )
+        # Map relaxation_rec code to Chinese for prompt
+        rec_map = {
+            "BREATHING": "呼吸放松训练",
+            "MUSCLE": "肌肉放松训练", 
+            "MEDITATION": "冥想放松训练"
+        }
+        rec_str = rec_map.get(relaxation_rec, "无") if relaxation_rec else "无"
+        
+        prompt = VISITOR_FEEDBACK_PROMPT.format(
+            conversation=formatted_history,
+            end_type=end_type.value,
+            relaxation_recommendation=rec_str
+        )
         
         import ollama
         client = ollama.Client(host=OLLAMA_HOST)
         
         try:
-            # Check if we should stream
             if stream:
                 def stream_generator():
                     stream_response = client.chat(
@@ -266,9 +305,12 @@ class ReportService:
                         messages=[{"role": "user", "content": prompt}],
                         stream=True
                     )
+                    full_text = ""
                     for chunk in stream_response:
                         if "message" in chunk and "content" in chunk["message"]:
-                            yield chunk["message"]["content"]
+                            content = chunk["message"]["content"]
+                            full_text += content
+                            yield content
                 return stream_generator()
             else:
                 response = client.chat(
@@ -277,18 +319,75 @@ class ReportService:
                     stream=False
                 )
                 feedback = response["message"]["content"]
+                return self._clean_for_tts(feedback)
                 
-                # Clean up the feedback for TTS
-                feedback = self._clean_for_tts(feedback)
-                return feedback
-            
         except Exception as e:
-            fallback = "今天聊了这么久，辛苦你了。有什么想说的，咱们下次再聊。"
+            fallback = "今天聊得不错，辛苦你了。如果觉得不舒服，随时可以进行放松训练。再见。"
             if stream:
                 def fallback_gen(): yield fallback
                 return fallback_gen()
             return fallback
-    
+
+    def generate_session_summary(self, conversation_history: List[Dict], suggestions: str = None, stream: bool = False) -> Any:
+        """
+        Generate a warm closing summary with suggestions.
+        
+        Args:
+            conversation_history: List of messages
+            suggestions: Provided relaxation suggestions
+            stream: Whether to stream the response (yield chunks)
+            
+        Returns:
+            Summary text string or generator (if stream=True)
+        """
+        llm = self._get_llm_service()
+        
+        # We need a specific prompt for session summary which might be different from visitor feedback
+        # reusing visitor feedback prompt logic for now but customized
+        
+        formatted_history = self._format_conversation(conversation_history)
+        
+        # Use dedicated SESSION_SUMMARY_PROMPT
+        prompt = SESSION_SUMMARY_PROMPT.format(
+            conversation=formatted_history,
+            suggestions=suggestions or "无特定推荐"
+        )
+        
+        import ollama
+        client = ollama.Client(host=OLLAMA_HOST)
+        
+        try:
+            if stream:
+                def stream_generator():
+                    stream_response = client.chat(
+                        model=OLLAMA_MODEL,
+                        messages=[{"role": "user", "content": prompt}],
+                        stream=True
+                    )
+                    full_text = ""
+                    for chunk in stream_response:
+                        if "message" in chunk and "content" in chunk["message"]:
+                            content = chunk["message"]["content"]
+                            full_text += content
+                            yield content
+                    # We might want to return full text at end too? 
+                    # But generator only yields. The caller constructs full text.
+                return stream_generator()
+            else:
+                response = client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                feedback = response["message"]["content"]
+                return self._clean_for_tts(feedback)
+                
+        except Exception as e:
+            fallback = "今天聊了不少，辛苦你了。回去记得试试那几条建议，有事儿随时再来找我。"
+            if stream:
+                def fallback_gen(): yield fallback
+                return fallback_gen()
+            return fallback
     def generate_suggestions(self, conversation_history: List[Dict]) -> str:
         """
         Generate personalized suggestions based on conversation history.
@@ -326,50 +425,6 @@ class ReportService:
             print(f"[ERROR] generate_suggestions failed: {e}")
             # Fallback suggestions
             return "睡不着时试试深呼吸。心里堵得慌就写两句。作息尽量规律。有空多走走晒太阳。"
-    
-    def generate_session_summary(self, conversation_history: List[Dict], suggestions: str) -> str:
-        """
-        Generate comprehensive session summary for farewell.
-        Includes emotional feedback, suggestion recap, and warm goodbye.
-        
-        Args:
-            conversation_history: List of message dicts
-            suggestions: The suggestions that were given
-            
-        Returns:
-            Session summary text for TTS (50-80 chars)
-        """
-        from config import SESSION_SUMMARY_PROMPT
-        
-        formatted_history = self._format_conversation(conversation_history)
-        
-        prompt = SESSION_SUMMARY_PROMPT.format(
-            conversation=formatted_history,
-            suggestions=suggestions or "无"
-        )
-        
-        import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
-        
-        try:
-            response = client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False
-            )
-            summary = response["message"]["content"]
-            
-            # Clean up for TTS
-            summary = self._clean_for_tts(summary)
-            return summary
-            
-        except Exception as e:
-            print(f"[ERROR] generate_session_summary failed: {e}")
-            # Fallback summary
-            if suggestions:
-                return f"今天聊了不少，辛苦你了。回去记得试试那几条建议，有事儿随时再来找我。"
-            else:
-                return "今天聊了不少，辛苦你了。有啥想说的，咱们下次再聊。"
     
     # ==================== Safety Resources ====================
     

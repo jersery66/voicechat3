@@ -1,8 +1,13 @@
 import os
+import sys
 
 def patch_file(filepath, old_str, new_str):
     print(f"Patching {filepath}...")
     try:
+        if not os.path.exists(filepath):
+             print(f"⚠️ File not found: {filepath}")
+             return
+
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
         
@@ -16,51 +21,63 @@ def patch_file(filepath, old_str, new_str):
     except Exception as e:
         print(f"❌ Error patching {filepath}: {e}")
 
-# Patch llm/utils.py
-llm_utils = r"d:\program\FireRedTTS2\fireredtts2\llm\utils.py"
-# Look for standard torch.load without map_location
-patch_file(llm_utils, "state_dict = torch.load(", "state_dict = torch.load(map_location='cpu', f=")
-patch_file(llm_utils, "f=checkpoint_path", "checkpoint_path") # Fix potential syntax error from simple replace if needed, or better:
-# Let's simple replace the specific line if exact match, otherwise regex is better but simple string replace is safer if we know content.
-# Based on findstr output: "state_dict = torch.load("
-# We'll reload the file content again to be sure in the script
+def get_firered_path():
+    # Construct path relative to this script
+    # Assuming this script is in d:\program\voice_chat_app\
+    # And FireRedTTS2 is in d:\program\FireRedTTS2\
+    
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir) # d:\program
+    firered_path = os.path.join(parent_dir, "FireRedTTS2", "fireredtts2")
+    
+    return firered_path
 
-# Let's try a robust replace
 def patch_llm_utils():
-    filepath = r"d:\program\FireRedTTS2\fireredtts2\llm\utils.py"
+    base_path = get_firered_path()
+    filepath = os.path.join(base_path, "llm", "utils.py")
+    
+    if not os.path.exists(filepath):
+         print(f"Could not find llm/utils.py at {filepath}")
+         return
+
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # Target: state_dict = torch.load(checkpoint_path) or similar. 
-    # The error came from "Attempting to deserialize object on a CUDA device"
-    # So we want to add map_location='cpu' to any torch.load call.
-    
+    # Target: state_dict = torch.load(checkpoint_path) -> ...map_location='cpu'...
     if "map_location" not in content:
-        new_content = content.replace("torch.load(", "torch.load(map_location='cpu', ")
-        # This might break if torch.load is called with args positionally valid but kwargs invalid.
-        # torch.load(f, map_location=..., pickle_module=..., ...)
-        # The first arg is 'f'. 'map_location' is second arg (optional). 
-        # If code is `torch.load(path)`, then `torch.load(map_location='cpu', f=path)` is valid.
-        # But `torch.load(path)` -> `torch.load(map_location='cpu', path)` is INVALID syntax.
-        
-        # Better replacement:
+        # Replace the specific calls we know are problematic
+        # 1. torch.load(checkpoint_path)
         new_content = content.replace("torch.load(checkpoint_path)", "torch.load(checkpoint_path, map_location='cpu')")
+        # 2. torch.load(ckpt_path)
         new_content = new_content.replace("torch.load(ckpt_path)", "torch.load(ckpt_path, map_location='cpu')")
         
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-        print("Patched llm/utils.py")
+        if content != new_content:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            print("✅ Patched llm/utils.py")
+        else:
+            print("⚠️ No changes made to llm/utils.py (already patched or pattern not found)")
+    else:
+        print("ℹ️ llm/utils.py seems already patched (found 'map_location')")
 
 def patch_codec_model():
-    filepath = r"d:\program\FireRedTTS2\fireredtts2\codec\model.py"
+    base_path = get_firered_path()
+    filepath = os.path.join(base_path, "codec", "model.py")
+    
+    if not os.path.exists(filepath):
+         print(f"Could not find codec/model.py at {filepath}")
+         return
+
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    if 'torch.load(ckpt_path)' in content:
+    if 'torch.load(ckpt_path)' in content and 'map_location' not in content:
         new_content = content.replace('torch.load(ckpt_path)', 'torch.load(ckpt_path, map_location="cpu")')
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(new_content)
-        print("Patched codec/model.py")
+        print("✅ Patched codec/model.py")
+    else:
+         print("ℹ️ codec/model.py seems okay or already patched")
 
 if __name__ == "__main__":
     patch_llm_utils()

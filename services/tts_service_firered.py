@@ -11,6 +11,7 @@ import pyaudio
 import soundfile as sf
 import tempfile
 import uuid
+import time
 
 # Try importing librosa for robust audio loading
 try:
@@ -49,6 +50,13 @@ class TTSService:
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_audio")
         if not os.path.exists(self.temp_dir):
             os.makedirs(self.temp_dir, exist_ok=True)
+            
+        # Streaming state
+        self.streaming_mode = False
+        self.streaming_queue = None
+        self.streaming_playback_queue = None
+        self.streaming_stop_event = None
+        self.streaming_threads = []
         
     def load_model(self, progress_callback=None, **kwargs):
         """Load the FireRedTTS2 model in dialogue mode."""
@@ -103,6 +111,77 @@ class TTSService:
             traceback.print_exc()
             return False
 
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for TTS: replace problematic punctuation and strip internal tags."""
+        if not text:
+            return ""
+            
+        import re
+        
+        # 0. Preserve Speaker Tag if present (e.g. [S1]) which is required by FireRedTTS
+        speaker_tag = ""
+        match = re.match(r'^(\[S\d+\])\s*', text)
+        if match:
+            speaker_tag = match.group(1)
+            text = text[match.end():] # Remove tag from text for cleaning
+        
+        # 1. Replace problematic Chinese punctuation that might cause "garbled" audio
+        replacements = {
+            '“': '"', '”': '"',
+            '‘': "'", '’': "'",
+            '（': '(', '）': ')',
+            '「': '"', '」': '"',
+            '『': '"', '』': '"',
+            '—': '-',
+            '…': '，', # Convert Chinese ellipsis to comma for better pause
+            ' \n': ' ', '\n': ' ',
+        }
+        for k, v in replacements.items():
+            text = text.replace(k, v)
+            
+        # 2. Strip any remaining [REC_...] or [END_...] tags that main.py might have missed
+        text = re.sub(r'\[REC_[A-Z_]+\]', '', text)
+        text = re.sub(r'\[END_[A-Z_]+\]', '', text)
+        # Also strip psychological markers if any
+        # Strip any remaining tags
+        text = re.sub(r'【.*?】', '', text)
+        
+        # 3. Strip Markdown characters that TTS shouldn't read
+        text = text.replace("**", "").replace("*", "")
+        
+        # 3.5 Convert English ellipses to comma (before strict cleaning)
+        text = text.replace("...", "，").replace("..", "，")
+        
+        # 3.6 Preserve Emotion/Paralinguistic Tags (e.g. <|breath|>)
+        # We replace them with safe placeholders that pass strict cleaning (\w include _)
+        preserved_tags = []
+        def save_tag(match):
+            preserved_tags.append(match.group(0))
+            return f"__TAG_{len(preserved_tags)-1}__"
+            
+        text = re.sub(r'<\|[^|]+\|>', save_tag, text)
+
+        # 4. Strict Whitelist Cleaning (User Request: Remove all symbols except 。，！？)
+        # We also keep English punctuation for compatibility and basic content (\w\s)
+        # Note: \w in Python 3 matches Unicode characters (Chinese, etc.)
+        text = re.sub(r'[^\w\s。，！？.,!?]', '', text)
+        
+        text = text.strip()
+        
+        # Ensure punctuation at the end to help EOS detection
+        if text and text[-1] not in ['.', '。', '!', '！', '?', '？']:
+            text += "。"
+            
+        # Restore Emotion Tags
+        for i, tag in enumerate(preserved_tags):
+            text = text.replace(f"__TAG_{i}__", tag)
+            
+        # Restore speaker tag
+        if speaker_tag:
+            text = f"{speaker_tag} {text}"
+            
+        return text
+    
     def _prepare_prompt(self, path):
         """Preprocess prompt audio path. Convert to WAV if needed (e.g. FLAC issues)."""
         if not path or not os.path.exists(path):
@@ -115,6 +194,8 @@ class TTSService:
                 ext = os.path.splitext(path)[1].lower()
                 # Always convert FLAC to safe WAV using librosa -> soundfile write
                 if ext == '.flac':
+                    # Check if already converted in temp to avoid re-conversion delay
+                    # But we use unique names, so... keep logic simple for now
                     print(f"[DEBUG] Converting FLAC prompt to WAV: {path}")
                     y, sr = librosa.load(path, sr=None)
                     
@@ -139,7 +220,7 @@ class TTSService:
             while not stop_event.is_set():
                 try:
                     # Wait for audio data with a timeout to check stop_event
-                    chunk = playback_queue.get(timeout=0.5)  # Increased timeout for slower generation
+                    chunk = playback_queue.get(timeout=0.2)  # Reduced timeout for responsiveness
                     if chunk is None: # Sentinel value
                         # Play any remaining buffered chunks
                         for c in buffered_chunks:
@@ -219,10 +300,30 @@ class TTSService:
             # Prepare inputs for dialogue mode (lists)
             # Auto-add speaker tag [S1] if missing (required by FireRedTTS2 dialogue mode)
             if not text.lstrip().startswith("[S"):
-                print(f"[DEBUG] Prepending [S1] tag to text")
-                text = f"[S1]{text}"
+                # print(f"[DEBUG] Prepending [S1] tag to text")
+                text = f"[S1] {text}"
+            
+            # Normalize text (strip tags, fix punctuation)
+            text = self._normalize_text(text)
+            
+            # Extract and strip emotion tags for prompt selection
+            import re
+            emotion_match = re.search(r'<\|emotion_(\w+)\|>', text)
+            emotion = "default"
+            if emotion_match:
+                emotion = emotion_match.group(1)
+                # Strip the tag from text to be spoken
+                text = re.sub(r'<\|emotion_\w+\|>', '', text)
+            
+            # Also strip any other <|...|> tags (e.g. breath) if model doesn't support them
+            # For now, we strip all <|...|> tags to be safe as user reported leakage
+            text = re.sub(r'<\|[^>]+\|>', '', text)
+            
+            # Clean up double spaces
+            text = re.sub(r'\s+', ' ', text).strip()
                 
             text_list = [text] 
+            # print(f"[DEBUG] Final TTS Input to Model: {text_list}") 
             
             # Prepare prompts
             cfg_wav = getattr(config, 'VOICE_PROMPT_PATH', None)
@@ -232,7 +333,20 @@ class TTSService:
             prompt_text_list = []
             
             if cfg_wav:
-                 if isinstance(cfg_wav, list):
+                 if isinstance(cfg_wav, dict):
+                     # Use extracted emotion
+                     # print(f"[DEBUG] Emotion detected for prompt selection: {emotion}")
+                     
+                     # Select path
+                     wav_path = cfg_wav.get(emotion) or cfg_wav.get("default")
+                     if not wav_path and len(cfg_wav) > 0:
+                         wav_path = list(cfg_wav.values())[0]
+                     
+                     if wav_path and os.path.exists(wav_path):
+                         prompt_wav_list.append(self._prepare_prompt(wav_path))
+                         prompt_text_list.append(str(cfg_text) if cfg_text else "")
+                         
+                 elif isinstance(cfg_wav, list):
                      prompt_wav_list = [self._prepare_prompt(p) for p in cfg_wav]
                      prompt_text_list = cfg_text if isinstance(cfg_text, list) else [str(cfg_text)] * len(cfg_wav)
                  elif isinstance(cfg_wav, str) and os.path.exists(cfg_wav):
@@ -242,11 +356,12 @@ class TTSService:
                      else:
                          prompt_text_list.append("")
             
-            print(f"[DEBUG] Inputs - Text: {len(text_list)} | PromptWav: {len(prompt_wav_list)} items")
-            print(f"[DEBUG] Text Content: {text_list}")
+            # print(f"[DEBUG] Inputs - Text: {len(text_list)} | PromptWav: {len(prompt_wav_list)} items")
+            # print(f"[DEBUG] Text Content: {text_list}")
 
             try:
                 # Streaming generation
+                # Note: We create a generator but iterate it to push to queue
                 audio_generator = self.model.generate_dialogue(
                     text_list=text_list,
                     prompt_wav_list=prompt_wav_list if prompt_wav_list else None,
@@ -256,6 +371,8 @@ class TTSService:
                 )
                 
                 chunk_count = 0
+                previous_chunk = None
+
                 for audio_chunk in audio_generator:
                     if not self.is_playing:
                         print("[DEBUG] Playback interrupted.")
@@ -263,16 +380,25 @@ class TTSService:
                         
                     chunk_np = audio_chunk.squeeze().float().cpu().numpy().astype(np.float32)
                     
-                    # Normalize if needed
-                    max_amp = np.abs(chunk_np).max()
-                    if max_amp > 1e-6:
-                         pass
-
-                    all_audio.append(chunk_np)
+                    # Playback Buffer Logic with Fade-out
+                    if previous_chunk is not None:
+                        all_audio.append(previous_chunk)
+                        playback_queue.put(previous_chunk)
                     
-                    # Add to playback queue
-                    playback_queue.put(chunk_np)
+                    previous_chunk = chunk_np
                     chunk_count += 1
+                
+                # Process the Final Chunk
+                if previous_chunk is not None:
+                    # Apply fade-out to the last chunk (last 100ms or 2000 samples)
+                    fade_len = min(len(previous_chunk), int(self.sample_rate * 0.1))
+                    if fade_len > 0:
+                        fade_curve = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+                        previous_chunk[-fade_len:] *= fade_curve
+                    
+                    # print(f"[DEBUG] Applying fade-out to last chunk (len={len(previous_chunk)})")
+                    all_audio.append(previous_chunk)
+                    playback_queue.put(previous_chunk)
                 
                 print(f"\n[DEBUG] Streaming finished. Chunks processed: {chunk_count}")
                     
@@ -312,7 +438,25 @@ class TTSService:
             
         # Auto-add speaker tag [S1] if missing
         if not text.lstrip().startswith("[S"):
-            text = f"[S1]{text}"
+            text = f"[S1] {text}"
+
+        # Normalize text
+        text = self._normalize_text(text)
+
+        # Extract and strip emotion tags for prompt selection
+        import re
+        emotion_match = re.search(r'<\|emotion_(\w+)\|>', text)
+        emotion = "default"
+        if emotion_match:
+            emotion = emotion_match.group(1)
+            # Strip the tag from text to be spoken
+            text = re.sub(r'<\|emotion_\w+\|>', '', text)
+        
+        # Also strip any other <|...|> tags
+        text = re.sub(r'<\|[^>]+\|>', '', text)
+
+        # Clean up double spaces
+        text = re.sub(r'\s+', ' ', text).strip()
 
         # Prepare inputs
         text_list = [text]
@@ -323,7 +467,21 @@ class TTSService:
         cfg_text = getattr(config, 'VOICE_PROMPT_TEXT', None)
 
         if cfg_wav:
-             if isinstance(cfg_wav, list):
+             if isinstance(cfg_wav, dict):
+
+                 # DETECT EMOTION (Peek only) - actually logic moved up, but for consistency in `generate`...
+                 # Wait, for `generate` we also need to move the stripping up.
+                 pass # Logic below needs update
+                 
+                 wav_path = cfg_wav.get(emotion) or cfg_wav.get("default")
+                 if not wav_path and len(cfg_wav) > 0:
+                     wav_path = list(cfg_wav.values())[0]
+                 
+                 if wav_path and os.path.exists(wav_path):
+                     prompt_wav_list.append(self._prepare_prompt(wav_path))
+                     prompt_text_list.append(str(cfg_text) if cfg_text else "")
+                     
+             elif isinstance(cfg_wav, list):
                  prompt_wav_list = [self._prepare_prompt(p) for p in cfg_wav]
                  prompt_text_list = cfg_text if isinstance(cfg_text, list) else [str(cfg_text)] * len(cfg_wav)
              elif isinstance(cfg_wav, str) and os.path.exists(cfg_wav):
@@ -359,11 +517,8 @@ class TTSService:
         self.is_playing = False
     
     def play_audio(self, audio: np.ndarray):
-        """Play pre-generated audio data synchronously.
-        
-        Args:
-            audio: numpy array of audio data (float32, mono)
-        """
+        """Play pre-generated audio data synchronously."""
+        # Kept mostly same as before for compatibility
         if audio is None or len(audio) == 0:
             print("[WARNING] play_audio called with empty audio data")
             return
@@ -425,6 +580,194 @@ class TTSService:
             self.stream.close()
         if self.pyaudio:
             self.pyaudio.terminate()
+
+    # ================= CONTINUOUS STREAMING METHODS =================
+    
+    def start_streaming_mode(self):
+        """Start background threads for continuous streaming synthesis and playback."""
+        if self.streaming_mode:
+            print("[INFO] Streaming mode already active.")
+            return
+
+        print("[INFO] Starting continuous streaming mode...")
+        self.streaming_mode = True
+        self.streaming_queue = queue.Queue()
+        self.streaming_playback_queue = queue.Queue(maxsize=100) # Buffer some audio
+        self.streaming_stop_event = threading.Event()
+        self.is_playing = True
+        self.collected_audio_for_streaming = [] # Collect all audio during session to return at end?
+        
+        # Start synthesis worker
+        synth_thread = threading.Thread(
+            target=self._synthesis_worker,
+            args=(self.streaming_queue, self.streaming_playback_queue, self.streaming_stop_event),
+            daemon=True
+        )
+        synth_thread.start()
+        self.streaming_threads.append(synth_thread)
+        
+        # Start playback worker
+        # We need a dedicated PyAudio instance for this session
+        self.streaming_p = pyaudio.PyAudio()
+        self.streaming_stream = self.streaming_p.open(
+            format=pyaudio.paFloat32,
+            channels=1,
+            rate=self.sample_rate,
+            output=True,
+            frames_per_buffer=2048
+        )
+        
+        pb_thread = threading.Thread(
+            target=self._playback_worker,
+            args=(self.streaming_playback_queue, self.streaming_stream, self.streaming_stop_event),
+            daemon=True
+        )
+        pb_thread.start()
+        self.streaming_threads.append(pb_thread)
+
+    def queue_text(self, text: str):
+        """Queue a sentence for synthesis in streaming mode."""
+        if not self.streaming_mode or not self.streaming_queue:
+            print("[WARNING] queue_text called but streaming mode not active!")
+            return
+            
+        if not text.strip():
+            return
+            
+        print(f"[DEBUG] Queueing text for streaming: {text[:20]}...")
+        self.streaming_queue.put(text)
+        
+    def stop_streaming_mode(self):
+        """Stop streaming mode and wait for queues to drain."""
+        if not self.streaming_mode:
+            return
+            
+        print("[INFO] Stopping streaming mode. Waiting for queues...")
+        
+        # Send sentinel to synthesis queue
+        if self.streaming_queue:
+            self.streaming_queue.put(None)
+        
+        # Wait for threads
+        for t in self.streaming_threads:
+            t.join(timeout=30) # Prevent hanging forever
+        
+        # Close PyAudio
+        if hasattr(self, 'streaming_stream') and self.streaming_stream:
+            self.streaming_stream.stop_stream()
+            self.streaming_stream.close()
+        if hasattr(self, 'streaming_p') and self.streaming_p:
+            self.streaming_p.terminate()
+            
+        self.streaming_mode = False
+        self.streaming_queue = None
+        self.streaming_playback_queue = None
+        self.streaming_threads = []
+        self.is_playing = False
+        
+        print("[INFO] Streaming mode stopped.")
+        
+        # Return collected audio if any
+        if self.collected_audio_for_streaming:
+            return np.concatenate(self.collected_audio_for_streaming)
+        return np.array([])
+
+    def _synthesis_worker(self, text_queue, playback_queue, stop_event):
+        """Continuous background text synthesis."""
+        print("[DEBUG] Synthesis worker started.")
+        while not stop_event.is_set():
+            try:
+                # Wait for text
+                text = text_queue.get(timeout=0.5)
+                if text is None: # Sentinel
+                    # Signal playback worker to stop (by sending None to playback queue)
+                    playback_queue.put(None)
+                    break
+                
+                # Synthesis logic (reused from generate_and_play logic partially)
+                # Normalize
+                if not text.lstrip().startswith("[S"):
+                    text = f"[S1] {text}"
+                text = self._normalize_text(text)
+                
+                # If text became empty after normalization, skip
+                if not text.strip() or text.strip() == "。":
+                    text_queue.task_done()
+                    continue
+                
+                import re
+                
+                # Extract/Strip emotion tags as above
+                emotion_match = re.search(r'<\|emotion_(\w+)\|>', text)
+                # emotion = "default" # Unused variable locally but used for prompt selection logic if we copy it?
+                # Actually _synthesis_worker currently doesn't implement emotion selection in previous code!
+                # Wait, looking at lines 692+, it just used prompt_wav_list.append(...)
+                
+                # Let's fix that while we are here: Prompt selection support in streaming
+                emotion = "default"
+                if emotion_match:
+                    emotion = emotion_match.group(1)
+                    text = re.sub(r'<\|emotion_\w+\|>', '', text)
+                
+                text = re.sub(r'<\|[^>]+\|>', '', text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                
+                text_list = [text] 
+                
+                # Simple prompt selection (optimize: cache prompts?)
+                prompt_wav_list = []
+                prompt_text_list = []
+                
+                cfg_wav = getattr(config, 'VOICE_PROMPT_PATH', None)
+                cfg_text = getattr(config, 'VOICE_PROMPT_TEXT', None)
+                
+                # Logic copied from generate
+                if cfg_wav:
+                     if isinstance(cfg_wav, str) and os.path.exists(cfg_wav):
+                         prompt_wav_list.append(self._prepare_prompt(cfg_wav))
+                         prompt_text_list.append(str(cfg_text) if cfg_text else "")
+                     elif isinstance(cfg_wav, dict):
+                         # Streaming support for emotion!
+                         wav_path = cfg_wav.get(emotion) or cfg_wav.get("default")
+                         if not wav_path and len(cfg_wav) > 0:
+                             wav_path = list(cfg_wav.values())[0]
+                         if wav_path and os.path.exists(wav_path):
+                             prompt_wav_list.append(self._prepare_prompt(wav_path))
+                             prompt_text_list.append(str(cfg_text) if cfg_text else "")
+                
+                # Synthesize
+                # To reduce latency, we iterate chunks and push IMMEDIATELY to playback_queue
+                audio_generator = self.model.generate_dialogue(
+                    text_list=text_list,
+                    prompt_wav_list=prompt_wav_list if prompt_wav_list else None,
+                    prompt_text_list=prompt_text_list if prompt_text_list else None,
+                    temperature=0.5,
+                    topk=10
+                )
+                
+                audio_for_sentence = []
+                
+                for audio_chunk in audio_generator:
+                    if stop_event.is_set(): break
+                    chunk_np = audio_chunk.squeeze().float().cpu().numpy().astype(np.float32)
+                    playback_queue.put(chunk_np)
+                    audio_for_sentence.append(chunk_np)
+                
+                # Add to total collection
+                if audio_for_sentence:
+                    self.collected_audio_for_streaming.append(np.concatenate(audio_for_sentence))
+
+                text_queue.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[ERROR] Synthesis worker error: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print("[DEBUG] Synthesis worker finished.")
+
 
 # Singleton instance
 _tts_service = None
