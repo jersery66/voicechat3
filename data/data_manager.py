@@ -5,7 +5,7 @@ import sys
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import wave
 import numpy as np
 
@@ -20,14 +20,18 @@ class DataManager:
     
     Structure (simplified):
         voice_chat_data/
-        ├── 2025-12-22/              # Date folder
-        │   └── 被试001/              # Subject ID folder (被试编号)
+        ├── user_profiles/                    # 来访者基本信息存储
+        │   └── 被试001.json                   # 每个来访者一个文件
+        ├── session_summaries/                # 会话摘要存储
+        │   └── 被试001_summary.json          # 每个来访者的历史摘要
+        ├── 2025-12-22/                       # Date folder
+        │   └── 被试001/                      # Subject ID folder (被试编号)
         │       ├── metadata.json
         │       ├── 001_user.wav
         │       ├── 001_user.txt
         │       ├── 001_assistant.wav
         │       └── 001_assistant.txt
-        │   └── 被试001_153045/       # Duplicate with timestamp
+        │   └── 被试001_153045/               # Duplicate with timestamp
     """
     
     def __init__(self, data_root: str = DATA_ROOT):
@@ -36,10 +40,214 @@ class DataManager:
         self.current_folder_name: Optional[str] = None  # 实际文件夹名（可能带时间戳）
         self.current_date: Optional[str] = None
         self.message_counter: int = 0
+        self._ensure_profile_dirs()
+        
+    def _ensure_profile_dirs(self):
+        """Ensure profile and summary directories exist."""
+        profiles_dir = self.data_root / "user_profiles"
+        summaries_dir = self.data_root / "session_summaries"
+        profiles_dir.mkdir(parents=True, exist_ok=True)
+        summaries_dir.mkdir(parents=True, exist_ok=True)
         
     def set_user_id(self, user_id: str):
         """Set the current subject ID (被试编号)."""
         self.current_subject_id = user_id.strip() or "default_subject"
+        
+    # ==================== User Profile Management ====================
+    
+    def save_user_profile(self, profile: Dict[str, Any]) -> str:
+        """
+        Save user profile information.
+        
+        Args:
+            profile: Dict containing user info like:
+                - name: 姓名
+                - age: 年龄
+                - gender: 性别
+                - occupation: 职业
+                - addiction_type: 吸毒类型
+                - addiction_duration: 吸毒年限
+                - treatment_count: 戒毒次数
+                - notes: 备注
+                
+        Returns:
+            Path to saved profile file
+        """
+        if not self.current_subject_id:
+            return ""
+            
+        profiles_dir = self.data_root / "user_profiles"
+        profiles_dir.mkdir(parents=True, exist_ok=True)
+        
+        profile_path = profiles_dir / f"{self.current_subject_id}.json"
+        
+        existing_profile = {}
+        if profile_path.exists():
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                existing_profile = json.load(f)
+        
+        existing_profile.update(profile)
+        existing_profile["subject_id"] = self.current_subject_id
+        existing_profile["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        with open(profile_path, 'w', encoding='utf-8') as f:
+            json.dump(existing_profile, f, ensure_ascii=False, indent=2)
+            
+        return str(profile_path)
+    
+    def load_user_profile(self, subject_id: str = None) -> Dict[str, Any]:
+        """
+        Load user profile information.
+        
+        Args:
+            subject_id: Subject ID to load, or current subject if None
+            
+        Returns:
+            Profile dict or empty dict if not found
+        """
+        sid = subject_id or self.current_subject_id
+        if not sid:
+            return {}
+            
+        profile_path = self.data_root / "user_profiles" / f"{sid}.json"
+        if profile_path.exists():
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    
+    def get_all_user_profiles(self) -> List[Dict[str, Any]]:
+        """Get all user profiles."""
+        profiles_dir = self.data_root / "user_profiles"
+        if not profiles_dir.exists():
+            return []
+            
+        profiles = []
+        for profile_file in profiles_dir.glob("*.json"):
+            try:
+                with open(profile_file, 'r', encoding='utf-8') as f:
+                    profiles.append(json.load(f))
+            except Exception as e:
+                print(f"[WARNING] Failed to load profile {profile_file}: {e}")
+        return profiles
+    
+    # ==================== Session Summary Management ====================
+    
+    def save_session_summary(self, summary: str, session_date: str = None) -> str:
+        """
+        Save session summary for a subject.
+        
+        Args:
+            summary: Summary text of the session
+            session_date: Date of the session (defaults to current date)
+            
+        Returns:
+            Path to saved summary file
+        """
+        if not self.current_subject_id:
+            return ""
+            
+        summaries_dir = self.data_root / "session_summaries"
+        summaries_dir.mkdir(parents=True, exist_ok=True)
+        
+        summary_path = summaries_dir / f"{self.current_subject_id}_summary.json"
+        
+        summaries_data = {"subject_id": self.current_subject_id, "sessions": []}
+        if summary_path.exists():
+            with open(summary_path, 'r', encoding='utf-8') as f:
+                summaries_data = json.load(f)
+        
+        session_entry = {
+            "date": session_date or self.current_date or datetime.now().strftime("%Y-%m-%d"),
+            "summary": summary,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        summaries_data["sessions"].append(session_entry)
+        summaries_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summaries_data, f, ensure_ascii=False, indent=2)
+            
+        return str(summary_path)
+    
+    def load_session_summaries(self, subject_id: str = None, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Load recent session summaries for a subject.
+        
+        Args:
+            subject_id: Subject ID to load, or current subject if None
+            limit: Maximum number of summaries to return
+            
+        Returns:
+            List of session summary dicts (most recent first)
+        """
+        sid = subject_id or self.current_subject_id
+        if not sid:
+            return []
+            
+        summary_path = self.data_root / "session_summaries" / f"{sid}_summary.json"
+        if not summary_path.exists():
+            return []
+            
+        try:
+            with open(summary_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            sessions = data.get("sessions", [])
+            return sessions[-limit:][::-1]
+        except Exception as e:
+            print(f"[WARNING] Failed to load summaries: {e}")
+            return []
+    
+    def get_formatted_history_context(self, subject_id: str = None, include_profile: bool = True, include_summaries: int = 3) -> str:
+        """
+        Get formatted context string with user profile and recent session summaries.
+        Used to inject into LLM system prompt.
+        
+        Args:
+            subject_id: Subject ID, or current subject if None
+            include_profile: Whether to include user profile info
+            include_summaries: Number of recent summaries to include (0 to disable)
+            
+        Returns:
+            Formatted context string
+        """
+        sid = subject_id or self.current_subject_id
+        if not sid:
+            return ""
+            
+        context_parts = []
+        
+        if include_profile:
+            profile = self.load_user_profile(sid)
+            if profile:
+                context_parts.append("【来访者基本信息】")
+                if profile.get("name"):
+                    context_parts.append(f"姓名：{profile['name']}")
+                if profile.get("age"):
+                    context_parts.append(f"年龄：{profile['age']}")
+                if profile.get("gender"):
+                    context_parts.append(f"性别：{profile['gender']}")
+                if profile.get("occupation"):
+                    context_parts.append(f"职业：{profile['occupation']}")
+                if profile.get("addiction_type"):
+                    context_parts.append(f"吸毒类型：{profile['addiction_type']}")
+                if profile.get("addiction_duration"):
+                    context_parts.append(f"吸毒年限：{profile['addiction_duration']}")
+                if profile.get("treatment_count"):
+                    context_parts.append(f"戒毒次数：{profile['treatment_count']}")
+                if profile.get("notes"):
+                    context_parts.append(f"备注：{profile['notes']}")
+                context_parts.append("")
+        
+        if include_summaries > 0:
+            summaries = self.load_session_summaries(sid, limit=include_summaries)
+            if summaries:
+                context_parts.append("【历史会话摘要】")
+                for i, s in enumerate(summaries, 1):
+                    context_parts.append(f"--- {s.get('date', '未知日期')} ---")
+                    context_parts.append(s.get("summary", "无摘要"))
+                    context_parts.append("")
+        
+        return "\n".join(context_parts) if context_parts else ""
         
     def start_new_session(self) -> str:
         """Start a new chat session and return folder name."""

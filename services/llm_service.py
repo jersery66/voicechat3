@@ -18,6 +18,7 @@ class LLMService:
         self.client = ollama.Client(host=host)
         self.conversation_history: List[Dict[str, str]] = []
         self.system_prompt = SYSTEM_PROMPT
+        self.history_context: str = ""
         
         # Auto-detect model if not specified
         if model is None:
@@ -33,6 +34,10 @@ class LLMService:
     def set_system_prompt(self, prompt: str):
         """Set the system prompt."""
         self.system_prompt = prompt
+        
+    def set_history_context(self, context: str):
+        """Set the history context (user profile and past summaries)."""
+        self.history_context = context
         
         # Build messages list with system prompt
         current_system_prompt = self.system_prompt
@@ -58,6 +63,8 @@ class LLMService:
         
         # Build messages list with system prompt
         current_system_prompt = self.system_prompt
+        if self.history_context:
+            current_system_prompt += self.history_context
         if system_suffix:
             current_system_prompt += "\n" + system_suffix
             

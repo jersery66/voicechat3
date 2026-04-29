@@ -1,4 +1,4 @@
-# TTS Service - FireRedTTS2 Streaming Integration
+# TTS Service - FireRedTTS Streaming Integration
 
 import os
 import sys
@@ -22,11 +22,18 @@ except ImportError:
 # Add FireRedTTS2 to path
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(root_dir, "FireRedTTS2"))
+
+# Try different import paths for FireRedTTS
+FireRedTTS2_Stream = None
 try:
-    from fireredtts2.fireredtts2 import FireRedTTS2_Stream
+    from fireredtts.models.fireredtts import FireRedTTS as FireRedTTS2_Stream
+    print("[INFO] Loaded FireRedTTS from fireredtts.models.fireredtts")
 except ImportError:
-    # Fallback or check if imported correctly
-    print("Warning: could not import FireRedTTS2_Stream")
+    try:
+        from fireredtts2.fireredtts2 import FireRedTTS2_Stream
+        print("[INFO] Loaded FireRedTTS2_Stream from fireredtts2.fireredtts2")
+    except ImportError:
+        print("Warning: could not import FireRedTTS")
 
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,14 +66,21 @@ class TTSService:
         self.streaming_threads = []
         
     def load_model(self, progress_callback=None, **kwargs):
-        """Load the FireRedTTS2 model in dialogue mode."""
+        """Load the FireRedTTS model."""
         if progress_callback:
             progress_callback("Loading TTS model...")
-            
-        print(f"[DEBUG] Loading FireRedTTS2_Stream on {self.device} with gen_type='dialogue'")
+        
+        # Get config path from FireRedTTS2 directory
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        config_path = os.path.join(root_dir, "FireRedTTS2", "configs", "config_24k.json")
+        
+        print(f"[DEBUG] Loading FireRedTTS on {self.device}")
+        print(f"[DEBUG] Config path: {config_path}")
+        print(f"[DEBUG] Pretrained path: {self.model_path}")
+        
         self.model = FireRedTTS2_Stream(
-            pretrained_dir=self.model_path,
-            gen_type="dialogue",
+            config_path=config_path,
+            pretrained_path=self.model_path,
             device=self.device,
         )
             
@@ -466,51 +480,51 @@ class TTSService:
         cfg_wav = getattr(config, 'VOICE_PROMPT_PATH', None)
         cfg_text = getattr(config, 'VOICE_PROMPT_TEXT', None)
 
-        if cfg_wav:
-             if isinstance(cfg_wav, dict):
-
-                 # DETECT EMOTION (Peek only) - actually logic moved up, but for consistency in `generate`...
-                 # Wait, for `generate` we also need to move the stripping up.
-                 pass # Logic below needs update
-                 
-                 wav_path = cfg_wav.get(emotion) or cfg_wav.get("default")
-                 if not wav_path and len(cfg_wav) > 0:
-                     wav_path = list(cfg_wav.values())[0]
-                 
-                 if wav_path and os.path.exists(wav_path):
-                     prompt_wav_list.append(self._prepare_prompt(wav_path))
-                     prompt_text_list.append(str(cfg_text) if cfg_text else "")
-                     
-             elif isinstance(cfg_wav, list):
-                 prompt_wav_list = [self._prepare_prompt(p) for p in cfg_wav]
-                 prompt_text_list = cfg_text if isinstance(cfg_text, list) else [str(cfg_text)] * len(cfg_wav)
-             elif isinstance(cfg_wav, str) and os.path.exists(cfg_wav):
-                 prompt_wav_list.append(self._prepare_prompt(cfg_wav))
-                 if cfg_text:
-                     prompt_text_list.append(str(cfg_text))
-                 else:
-                     prompt_text_list.append("")
+        prompt_wav = None
+        prompt_text = ""
         
-        # Determine device
-        device = self.device
-
-        all_audio_tensors = []
-        audio_generator = self.model.generate_dialogue(
-            text_list=text_list,
-            prompt_wav_list=prompt_wav_list if prompt_wav_list else None,
-            prompt_text_list=prompt_text_list if prompt_text_list else None,
-            temperature=temperature,
-            topk=topk
-        )
-        for audio_chunk in audio_generator:
-            all_audio_tensors.append(audio_chunk)
+        if cfg_wav:
+            if isinstance(cfg_wav, dict):
+                wav_path = cfg_wav.get(emotion) or cfg_wav.get("default")
+                if not wav_path and len(cfg_wav) > 0:
+                    wav_path = list(cfg_wav.values())[0]
+                if wav_path and os.path.exists(wav_path):
+                    prompt_wav = wav_path
+                    prompt_text = str(cfg_text) if cfg_text else ""
+            elif isinstance(cfg_wav, str) and os.path.exists(cfg_wav):
+                prompt_wav = cfg_wav
+                prompt_text = str(cfg_text) if cfg_text else ""
+        
+        # Use example prompt if no voice prompt configured
+        if not prompt_wav:
+            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            prompt_wav = os.path.join(root_dir, "FireRedTTS2", "examples", "prompt_1.wav")
+            prompt_text = "对，所以说你现在的话，这个账单的话，你既然说能处理，那你就想办法处理掉。"
+        
+        if not os.path.exists(prompt_wav):
+            print(f"[ERROR] Prompt wav not found: {prompt_wav}")
+            return np.array([])
+        
+        # Call synthesize
+        try:
+            audio_tensor = self.model.synthesize(
+                prompt_wav=prompt_wav,
+                prompt_text=prompt_text,
+                text=text,
+                lang="zh",
+                use_tn=True
+            )
             
-        if all_audio_tensors:
-             # Cat then numpy
-             full_tensor = torch.cat(all_audio_tensors, dim=1)
-             return full_tensor.squeeze().cpu().numpy()
-             
-        return np.array([])
+            if audio_tensor is not None:
+                return audio_tensor.squeeze().cpu().numpy()
+            else:
+                return np.array([])
+                
+        except Exception as e:
+            print(f"[ERROR] TTS synthesize failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return np.array([])
     
     def stop_playing(self):
         """Stop audio playback."""

@@ -19,6 +19,7 @@ from config import APP_NAME, WINDOW_WIDTH, WINDOW_HEIGHT
 from .chat_widget import ChatWidget
 from .control_panel import ControlPanel
 from .settings_dialog import SettingsDialog
+from .entertainment_widget import EntertainmentWidget, MediaLibrary
 
 
 class ModelLoaderThread(QThread):
@@ -27,10 +28,11 @@ class ModelLoaderThread(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
     
-    def __init__(self, stt_service, tts_service):
+    def __init__(self, stt_service, tts_service, rag_service=None):
         super().__init__()
         self.stt_service = stt_service
         self.tts_service = tts_service
+        self.rag_service = rag_service
         
     def run(self):
         try:
@@ -41,6 +43,11 @@ class ModelLoaderThread(QThread):
             # Load TTS model  
             self.progress.emit("正在加载语音合成模型...")
             self.tts_service.load_model(progress_callback=lambda x: self.progress.emit(x))
+            
+            # Warmup RAG service
+            if self.rag_service:
+                self.progress.emit("正在加载专业知识库...")
+                self.rag_service.warmup()
             
             self.finished.emit(True, "模型加载完成!")
         except Exception as e:
@@ -57,12 +64,13 @@ class ConversationThread(QThread):
     tts_finished = pyqtSignal(object)  # numpy array
     error = pyqtSignal(str)
     
-    def __init__(self, stt_service, llm_service, tts_service, audio_data):
+    def __init__(self, stt_service, llm_service, tts_service, audio_data, rag_service=None):
         super().__init__()
         self.stt_service = stt_service
         self.llm_service = llm_service
         self.tts_service = tts_service
         self.audio_data = audio_data
+        self.rag_service = rag_service
         
     def run(self):
         try:
@@ -74,15 +82,21 @@ class ConversationThread(QThread):
                 return
             self.transcription_ready.emit(text)
             
-            # Step 2: LLM response (streaming)
+            # Step 2: RAG retrieval (if available)
+            system_suffix = None
+            if self.rag_service:
+                self.status_update.emit("📚 正在检索专业知识...")
+                system_suffix = self.rag_service.get_system_suffix(text)
+            
+            # Step 3: LLM response (streaming)
             self.status_update.emit("🤔 正在思考...")
             full_response = ""
-            for chunk in self.llm_service.chat(text):
+            for chunk in self.llm_service.chat(text, system_suffix=system_suffix):
                 full_response += chunk
                 self.llm_chunk.emit(chunk)
             self.llm_finished.emit(full_response)
             
-            # Step 3: TTS (streaming playback)
+            # Step 4: TTS (streaming playback)
             self.status_update.emit("🔊 正在播放...")
             audio = self.tts_service.generate_and_play(full_response)
             self.tts_finished.emit(audio)
@@ -118,6 +132,7 @@ class MainWindow(QMainWindow):
         self.stt_service = None
         self.llm_service = None
         self.tts_service = None
+        self.rag_service = None
         self.data_manager = None
         
         self.models_loaded = False
@@ -170,9 +185,14 @@ class MainWindow(QMainWindow):
         self.chat_view = self._create_chat_view()
         self.stack.addWidget(self.chat_view)
         
-        # Video view (placeholder)
+        # Video view
         self.video_view = self._create_video_view()
         self.stack.addWidget(self.video_view)
+        
+        # Entertainment view
+        self.media_library = MediaLibrary()
+        self.entertainment_view = EntertainmentWidget(self.media_library)
+        self.stack.addWidget(self.entertainment_view)
         
         content_layout.addWidget(self.stack, 1)
         
@@ -208,6 +228,10 @@ class MainWindow(QMainWindow):
         self.video_btn = SidebarButton("放松训练", "🎬")
         self.video_btn.clicked.connect(lambda: self._switch_view(1))
         layout.addWidget(self.video_btn)
+        
+        self.entertainment_btn = SidebarButton("娱乐", "🎮")
+        self.entertainment_btn.clicked.connect(lambda: self._switch_view(2))
+        layout.addWidget(self.entertainment_btn)
         
         layout.addStretch()
         
@@ -361,6 +385,11 @@ class MainWindow(QMainWindow):
         # Update button states
         self.chat_btn.setChecked(index == 0)
         self.video_btn.setChecked(index == 1)
+        self.entertainment_btn.setChecked(index == 2)
+        
+        # Stop music when leaving entertainment view
+        if index != 2 and hasattr(self, 'entertainment_view'):
+            self.entertainment_view.stop_music()
         
     def _load_stylesheet(self):
         """Load the QSS stylesheet."""
@@ -413,18 +442,20 @@ class MainWindow(QMainWindow):
         from services.stt_service import get_stt_service
         from services.llm_service import get_llm_service
         from services.tts_service import get_tts_service
+        from services.rag_service import get_rag_service
         from data.data_manager import get_data_manager
         
         self.stt_service = get_stt_service()
         self.llm_service = get_llm_service()
         self.tts_service = get_tts_service()
+        self.rag_service = get_rag_service()
         self.data_manager = get_data_manager()
         
         # Start loading models
         self.control_panel.set_enabled(False)
         self.control_panel.set_status("正在加载模型...", True)
         
-        self.loader_thread = ModelLoaderThread(self.stt_service, self.tts_service)
+        self.loader_thread = ModelLoaderThread(self.stt_service, self.tts_service, self.rag_service)
         self.loader_thread.progress.connect(lambda msg: self.control_panel.set_status(msg, True))
         self.loader_thread.finished.connect(self._on_models_loaded)
         self.loader_thread.start()
@@ -465,7 +496,8 @@ class MainWindow(QMainWindow):
             self.stt_service, 
             self.llm_service, 
             self.tts_service,
-            audio
+            audio,
+            self.rag_service
         )
         self.conv_thread.status_update.connect(lambda msg: self.control_panel.set_status(msg, True))
         self.conv_thread.transcription_ready.connect(self._on_transcription)
@@ -529,4 +561,6 @@ class MainWindow(QMainWindow):
         # Cleanup
         if self.tts_service:
             self.tts_service.cleanup()
+        if hasattr(self, 'entertainment_view'):
+            self.entertainment_view.stop_music()
         event.accept()

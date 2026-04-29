@@ -23,6 +23,7 @@ from services.tts_service import TTSService
 from services.video_service import get_video_player
 from services.report_service import ReportService, EndType, END_PATTERNS
 from services.report_generator import get_pdf_generator
+from services.rag_service import get_rag_service
 from data.data_manager import DataManager
 import hashlib
 import soundfile as sf
@@ -35,6 +36,7 @@ class VoiceChatApp:
         self.tts_service = None
         self.data_manager = None
         self.report_service = None  # Report generation service
+        self.rag_service = None  # RAG service for knowledge retrieval
         
         self.is_recording = False
         self.models_loaded = False
@@ -584,6 +586,14 @@ class VoiceChatApp:
             self.report_service.start_session()
             self.session_ended = False
             
+            # Initialize RAG service
+            try:
+                self.rag_service = get_rag_service()
+                print("[INFO] RAG service initialized")
+            except Exception as e:
+                print(f"[WARNING] Failed to initialize RAG service: {e}")
+                self.rag_service = None
+            
             self.processing_queue.put(("loading_progress", 100))
             self.processing_queue.put(("loading_step", "✅ 加载完成！"))
             self.processing_queue.put(("status", "准备就绪"))
@@ -608,6 +618,10 @@ class VoiceChatApp:
     def startRec(self):
         if not self.models_loaded:
             return
+        
+        # Stop any playing TTS to avoid recording AI's voice
+        if self.tts_service:
+            self.tts_service.stop_playing()
         
         # Check if user info is confirmed
         if not self.info_confirmed:
@@ -716,14 +730,23 @@ class VoiceChatApp:
             current_rounds = self.report_service.get_round_count()
             allow_relaxation = (current_rounds >= MIN_ROUNDS_FOR_RELAXATION)
             
-            system_suffix = None
+            system_suffix = ""
             if not allow_relaxation:
                 system_suffix = f"【系统警告】当前仅第{current_rounds}轮对话（少于{MIN_ROUNDS_FOR_RELAXATION}轮）。无论用户说了什么，你绝对禁止推荐放松训练！禁止诱导用户看左边按钮！继续通过对话建立关系。"
                 print(f"[DEBUG] Blocking relaxation recommendation (Round {current_rounds}/{MIN_ROUNDS_FOR_RELAXATION})")
             
+            # Get RAG context (intent routing is built-in, no overhead for chit-chat)
+            if self.rag_service:
+                rag_suffix = self.rag_service.get_system_suffix(text)
+                if rag_suffix:
+                    system_suffix += "\n" + rag_suffix
+            
+            # Convert empty string to None for LLM service
+            final_suffix = system_suffix if system_suffix.strip() else None
+            
             # Creating a generator for LLM
             start_time = time.time()
-            llm_gen = self.llm_service.chat(text, system_suffix=system_suffix)
+            llm_gen = self.llm_service.chat(text, system_suffix=final_suffix)
             
             # Smart Streaming Implementation
             full_response = ""
@@ -1873,9 +1896,9 @@ class VoiceChatApp:
             # 1. Generate transition text
             rec_text = f"等等，在结束之前，我留意到你还是有点紧张。要不咱们先做个{relaxation_tag}放松训练？只需几分钟，效果很好的。"
             
-            # 2. Play and Show
-            self.append_to_chat("ai", rec_text) # Use robust append
-            self.processing_queue.put(("stream_chat", "\n")) # Ensure newline
+            # 2. Play and Show (use queue for thread safety)
+            self.processing_queue.put(("append_chat", ("ai", rec_text)))
+            self.processing_queue.put(("stream_chat", "\n"))
             
             # Play TTS
             self.processing_queue.put(("status", "🔊 正在播放建议..."))
@@ -2179,7 +2202,7 @@ class VoiceChatApp:
                 # Generate complete audio first (no streaming)
                 def update_progress(msg):
                     try:
-                        loading_label.config(text=msg)
+                        self.root.after(0, lambda: loading_label.config(text=msg))
                     except:
                         pass
                 
@@ -2563,60 +2586,47 @@ class VoiceChatApp:
         self._play_opening_greeting()
 
     def exitApp(self):
-        """Handle manual application exit."""
+        """Silent exit: hide UI immediately, generate report in background, then exit process."""
         if self.session_ended:
             self.root.quit()
             self.root.destroy()
             sys.exit(0)
-            
-        # Show generating report message
-        popup = tk.Toplevel(self.root)
-        popup.title("正在退出")
-        popup.geometry("300x100")
-        # Center popup
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 150
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 50
-        popup.geometry(f"+{x}+{y}")
         
-        label = tk.Label(popup, text="正在退出...", font=("Microsoft YaHei", 12))
-        label.pack(expand=True, pady=20)
-        popup.update()
+        # 1. Hide main window immediately - user sees instant close
+        self.root.withdraw()
         
-        # Trigger session end logic with QUIT type
-        # We need to run this in a thread but wait for it or just run it and let the thread close the app
-        # Since _handle_session_end is largely threaded, we can modify it to callback or we can just run the sync part here
-        
-        # Ideally we should use _handle_session_end but it puts results in queue to update UI
-        # For exit, we just want to generate and save.
-        
-        def exit_task():
+        # 2. Background task for data saving and report generation (no UI operations)
+        def silent_exit_task():
             try:
+                # Stop any ongoing recording
                 if self.stt_service:
                     try:
                         self.stt_service.stop_recording()
                     except:
                         pass
                 
-                # Manually trigger the report generation part
+                # Trigger report generation logic
                 user_id = self.user_id_entry.get().strip() or "default_user"
                 current_user_info = getattr(self, "user_info", {})
                 conversation_history = self.llm_service.conversation_history
                 
-                if conversation_history: # Only generate if there is chat
-                    print("[INFO] Exiting: Generating final report...")
+                if conversation_history:  # Only generate if there is chat history
+                    print("[INFO] Exiting: Generating final report in background...")
                     relax_str = self._get_relaxation_info_str()
+                    
+                    # Generate LLM summary
                     researcher_report = self.report_service.generate_researcher_report(
                         conversation_history, user_id, EndType.QUIT, user_info=current_user_info,
                         relaxation_info=relax_str
                     )
                     
-                    self.data_manager.save_session_report(
+                    # Save JSON report
+                    save_result = self.data_manager.save_session_report(
                         researcher_report, "User Exited", EndType.QUIT.value
                     )
                     
-                    # PDF
+                    # Generate final PDF
                     try:
-                         # Prepare PDF data
                         pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
                         if "subject_id" not in pdf_data:
                             pdf_data["subject_id"] = user_id
@@ -2628,7 +2638,6 @@ class VoiceChatApp:
                             "end_type": EndType.QUIT.value,
                         })
                         
-                        save_result = self.data_manager.save_session_report(researcher_report, "User Exited", EndType.QUIT.value)
                         session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
                         
                         if session_folder and os.path.isdir(session_folder):
@@ -2637,25 +2646,31 @@ class VoiceChatApp:
                             if pdf_path:
                                 print(f"[INFO] Exit PDF generated: {pdf_path}")
                                 
-                                # Clean up interim PDF
+                                # Clean up previous interim PDF
                                 interim_pdf = getattr(self, '_interim_pdf_path', None)
                                 if interim_pdf and os.path.exists(interim_pdf) and interim_pdf != pdf_path:
                                     try:
-                                        print(f"[INFO] Replacing interim PDF (deleting old): {interim_pdf}")
                                         os.remove(interim_pdf)
-                                    except Exception as del_e:
-                                        print(f"[WARNING] Failed to delete interim PDF: {del_e}")
+                                    except:
+                                        pass
                     except Exception as e:
-                        print(f"[ERROR] Exit PDF generation failed: {e}")
+                        print(f"[ERROR] Silent Exit PDF generation failed: {e}")
                         
             except Exception as e:
-                print(f"[ERROR] Exit cleanup failed: {e}")
+                print(f"[ERROR] Silent Exit cleanup failed: {e}")
+                
             finally:
-                self.root.quit()
-                self.root.destroy()
-                sys.exit(0)
+                # 3. Report done, notify main thread to destroy and exit safely
+                import os
+                def final_kill():
+                    self.root.quit()
+                    self.root.destroy()
+                    os._exit(0)  # Force kill process to prevent lingering background threads
+                
+                self.root.after(0, final_kill)
         
-        threading.Thread(target=exit_task, daemon=True).start()
+        # Start silent exit thread
+        threading.Thread(target=silent_exit_task, daemon=True).start()
 
     def _confirm_user_info(self):
         """Validate and confirm user info, then start session."""

@@ -17,9 +17,9 @@ _BASE_DIR = PROGRAM_ROOT
 # Path: d:\program\qwen\CosyVoice\pretrained_models\Fun-ASR-Nano-2512
 FUNASR_MODEL_PATH = os.path.join(PROGRAM_ROOT, "qwen", "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512")
 
-# FireRedTTS2 Model (absolute path)
-# Path: d:\program\FireRedTTS2\pretrained_models\pretrained_models\FireRedTTS2
-FIREREDTTS2_MODEL_PATH = os.path.join(PROGRAM_ROOT, "FireRedTTS2", "pretrained_models", "pretrained_models", "FireRedTTS2")
+# FireRedTTS Model (absolute path)
+# Path: E:\数据库\代码\Data\PDCH\FireRedTTS2\pretrained_models\pretrained_models
+FIREREDTTS2_MODEL_PATH = os.path.join(PROGRAM_ROOT, "FireRedTTS2", "pretrained_models", "pretrained_models")
 
 # CosyVoice3 Model
 # Path: d:\program\qwen\CosyVoice
@@ -252,7 +252,7 @@ SUGGESTIONS_PROMPT = ADVICE_PROMPT = """你是温和专业的心理咨询师。�
 
 # ============== Relaxation Training Thresholds ==============
 # Minimum rounds before recommending relaxation training
-MIN_ROUNDS_FOR_RELAXATION = 10
+MIN_ROUNDS_FOR_RELAXATION = 8
 
 # Post-relaxation continue chat timeout (seconds)
 POST_RELAXATION_TIMEOUT = 60
@@ -333,6 +333,40 @@ DEFAULT_BACKGROUND = None  # Path to background image or None for solid color
 MAX_CONVERSATION_ROUNDS = 15        # Maximum conversation rounds before soft limit
 MAX_CONVERSATION_MINUTES = 45       # Maximum session duration in minutes
 TIME_WARNING_MINUTES = 40           # Show warning at this point (5 min before limit)
+
+# ============== Agent (qwen-agent) ==============
+AGENT_ENABLED = True
+AGENT_MODEL = OLLAMA_MODEL
+AGENT_MODEL_SERVER = OLLAMA_HOST.rstrip('/') + '/v1'
+AGENT_API_KEY = 'EMPTY'
+
+AGENT_SYSTEM_MESSAGE = """你是一个智能娱乐助手，集成在心理咨询对话系统中。你的职责是：
+1. 识别娱乐意图：当用户在对话中表达想听音乐、看电影、需要娱乐放松等意图时，主动调用相应工具。
+2. 推荐内容：根据用户的心情和需求，推荐合适的音乐或电影。
+3. 自然对话：用温和、自然的口吻与用户交流，像朋友一样推荐和引导。
+
+重要规则：
+- 当用户说"我想听歌"、"放首歌"、"来点音乐"等，调用 play_music 工具
+- 当用户说"我想看电影"、"放个电影"等，调用 play_movie 工具
+- 当用户说"有什么歌"、"有哪些电影"等，调用 list_music 或 list_movies 工具
+- 当用户说"推荐首歌"、"不知道看什么"等，调用 recommend_music 或 recommend_movie 工具
+- 如果用户指定了名称，在调用工具时传入 name 参数
+- 回复要简短自然，像朋友聊天，不要使用专业术语
+- 你总是用中文回复"""
+
+AGENT_ENTERTAINMENT_KEYWORDS = [
+    "听歌", "听音乐", "放歌", "放音乐", "播放音乐", "播放歌",
+    "看电影", "看视频", "放电影", "播放电影", "放个电影",
+    "推荐歌", "推荐音乐", "推荐电影", "有什么歌", "有什么电影",
+    "来点音乐", "来首歌", "来个电影", "想听", "想看",
+    "无聊", "想放松", "想娱乐", "消遣", "解闷",
+    "歌单", "音乐列表", "电影列表", "有什么可以看",
+    "有什么可以听", "不知道看什么", "不知道听什么",
+]
+
+MEDIA_LIBRARY_PATH = os.path.join(APP_ROOT, "media_library")
+MUSIC_SCAN_DIRS = []
+MOVIE_SCAN_DIRS = []
 
 # ============== Crisis Resources ==============
 CRISIS_HOTLINES = {

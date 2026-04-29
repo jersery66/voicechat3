@@ -342,12 +342,8 @@ class ReportService:
         """
         llm = self._get_llm_service()
         
-        # We need a specific prompt for session summary which might be different from visitor feedback
-        # reusing visitor feedback prompt logic for now but customized
-        
         formatted_history = self._format_conversation(conversation_history)
         
-        # Use dedicated SESSION_SUMMARY_PROMPT
         prompt = SESSION_SUMMARY_PROMPT.format(
             conversation=formatted_history,
             suggestions=suggestions or "无特定推荐"
@@ -370,8 +366,6 @@ class ReportService:
                             content = chunk["message"]["content"]
                             full_text += content
                             yield content
-                    # We might want to return full text at end too? 
-                    # But generator only yields. The caller constructs full text.
                 return stream_generator()
             else:
                 response = client.chat(
@@ -387,6 +381,49 @@ class ReportService:
             if stream:
                 def fallback_gen(): yield fallback
                 return fallback_gen()
+            return fallback
+    
+    def generate_session_summary_async(self, conversation_history: List[Dict], callback=None) -> str:
+        """
+        Generate session summary in a non-blocking way.
+        This method is designed to be called from a separate thread.
+        
+        Args:
+            conversation_history: List of messages
+            callback: Optional callback function(summary_text)
+            
+        Returns:
+            Summary text string
+        """
+        formatted_history = self._format_conversation(conversation_history)
+        
+        prompt = SESSION_SUMMARY_PROMPT.format(
+            conversation=formatted_history,
+            suggestions="本次会话无特定建议"
+        )
+        
+        import ollama
+        client = ollama.Client(host=OLLAMA_HOST)
+        
+        try:
+            response = client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                stream=False
+            )
+            summary = response["message"]["content"]
+            summary = self._clean_for_tts(summary)
+            
+            if callback:
+                callback(summary)
+                
+            return summary
+            
+        except Exception as e:
+            print(f"[ERROR] generate_session_summary_async failed: {e}")
+            fallback = "本次会话顺利完成。来访者表现出一定的开放态度，建议后续继续跟进。"
+            if callback:
+                callback(fallback)
             return fallback
     def generate_suggestions(self, conversation_history: List[Dict]) -> str:
         """
