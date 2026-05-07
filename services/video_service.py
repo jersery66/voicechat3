@@ -1,5 +1,7 @@
 import os
 import time
+import hashlib
+import numpy as np
 import pygame
 from moviepy import VideoFileClip
 import threading
@@ -56,7 +58,6 @@ class VideoPlayer:
 
             # Prepare Audio
             # We use a hash of the file path to cache the audio, avoiding re-extraction delays
-            import hashlib
             file_hash = hashlib.md5(file_path.encode()).hexdigest()
             temp_dir = os.path.join(os.path.dirname(file_path), "temp")
             if not os.path.exists(temp_dir):
@@ -132,8 +133,7 @@ class VideoPlayer:
                 # Transpose needed: No, MoviePy (y,x) vs Pygame (x,y)
                 # Actually, pygame.surfarray.make_surface requires (W, H, 3).
                 # MoviePy yields (H, W, 3). So we need swapaxes(0,1).
-                
-                import numpy as np
+
                 frame_surface = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
                 
                 # Blit centered

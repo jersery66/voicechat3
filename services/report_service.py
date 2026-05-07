@@ -80,12 +80,18 @@ class ReportService:
         self.round_count = 0
         self.time_warning_shown = False
         self.completed_relaxation = None
+        self.game_results = None
         
     def record_relaxation(self, relaxation_name: str):
         """Record that a relaxation session was completed."""
         self.completed_relaxation = relaxation_name
         print(f"[INFO] ReportService recorded relaxation: {relaxation_name}")
-        
+
+    def record_game_session(self, game_results: dict):
+        """Record therapeutic game session results."""
+        self.game_results = game_results
+        print(f"[INFO] ReportService recorded game session: {game_results}")
+
     def increment_round(self):
         """Increment conversation round count."""
         self.round_count += 1

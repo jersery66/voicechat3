@@ -2,6 +2,7 @@
 
 import os
 import sys
+import re
 import queue
 import threading
 import numpy as np
@@ -129,9 +130,7 @@ class TTSService:
         """Normalize text for TTS: replace problematic punctuation and strip internal tags."""
         if not text:
             return ""
-            
-        import re
-        
+
         # 0. Preserve Speaker Tag if present (e.g. [S1]) which is required by FireRedTTS
         speaker_tag = ""
         match = re.match(r'^(\[S\d+\])\s*', text)

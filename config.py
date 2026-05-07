@@ -2,35 +2,27 @@
 
 import os
 
-# Current file: d:\program\voice_chat_app\config.py
-# APP_ROOT should be d:\program\voice_chat_app
+# Application root (this file's directory)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# PROGRAM_ROOT should be d:\program (Parent of voice_chat_app)
+# Parent directory (for sibling model folders)
 PROGRAM_ROOT = os.path.dirname(APP_ROOT)
 
-# _BASE_DIR alias for backward compatibility if needed, but we'll try to use APP_ROOT/PROGRAM_ROOT
+# _BASE_DIR alias for backward compatibility
 _BASE_DIR = PROGRAM_ROOT
 
 # ============== Paths ==============
 # FunASR STT Model
-# Path: d:\program\qwen\CosyVoice\pretrained_models\Fun-ASR-Nano-2512
 FUNASR_MODEL_PATH = os.path.join(PROGRAM_ROOT, "qwen", "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512")
 
-# FireRedTTS Model (absolute path)
-# Path: E:\数据库\代码\Data\PDCH\FireRedTTS2\pretrained_models\pretrained_models
+# FireRedTTS Model
 FIREREDTTS2_MODEL_PATH = os.path.join(PROGRAM_ROOT, "FireRedTTS2", "pretrained_models", "pretrained_models")
 
 # CosyVoice3 Model
-# Path: d:\program\qwen\CosyVoice
 COSYVOICE_BASE_DIR = os.path.join(PROGRAM_ROOT, "qwen", "CosyVoice")
-# Using shared model (Pretrained path detected via search)
-# Path: d:\program\qwen\CosyVoice\pretrained_models\Fun-CosyVoice3-0.5B
 COSYVOICE_MODEL_PATH = os.path.join(COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B")
 
-# Data Storage Root (absolute path)
-# Path: d:\program\voice_chat_data (Wait, original was os.path.join(_BASE_DIR, "voice_chat_data"))
-# If original _BASE_DIR was d:\program, then data root was d:\program\voice_chat_data
+# Data Storage Root
 DATA_ROOT = os.path.join(PROGRAM_ROOT, "voice_chat_data")
 
 # ============== Ollama ==============

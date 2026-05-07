@@ -13,6 +13,7 @@ from PIL import Image, ImageTk, ImageFilter, ImageEnhance
 import re
 import hashlib # Added for cache hash
 import json # Added for report
+import traceback
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,11 +22,11 @@ from services.stt_service import STTService
 from services.llm_service import LLMService
 from services.tts_service import TTSService
 from services.video_service import get_video_player
+from services.game_service import get_game_service
 from services.report_service import ReportService, EndType, END_PATTERNS
 from services.report_generator import get_pdf_generator
 from services.rag_service import get_rag_service
 from data.data_manager import DataManager
-import hashlib
 import soundfile as sf
 from config import APP_NAME, CRISIS_HOTLINES, GREETING_MESSAGE, GREETING_VARIANTS, POST_RELAXATION_MESSAGE, FILL_INFO_PROMPT, TRANSITION_PROMPT, SUGGESTIONS_PROMPT, CONTINUE_CHAT_MESSAGE, MIN_ROUNDS_FOR_RELAXATION, POST_RELAXATION_TIMEOUT, TIMEOUT_END_MESSAGE, VOICE_PROMPT_PATH, VOICE_PROMPT_TEXT
 
@@ -365,7 +366,9 @@ class VoiceChatApp:
         self.btn_meditation = tk.Button(self.control_frame, text="冥想放松训练", width=20, height=1,
                                         command=lambda: self._play_video_with_animation(self.btn_meditation, "#9575CD", "冥想训练.mp4"),
                                     bg="#9575CD", fg="white", font=("Arial", 10))
-        # self.btn_stop_video removed as requested
+        self.btn_game = tk.Button(self.control_frame, text="心理互动游戏", width=20, height=1,
+                                  command=lambda: self._play_game_with_animation(self.btn_game, "#FF8A65"),
+                                  bg="#FF8A65", fg="white", font=("Arial", 10))
         
         self.btn_clear = tk.Button(self.control_frame, text="清除对话历史", width=20, height=2,
                                    command=self.clearHistory, bg="#E0E0E0")
@@ -383,7 +386,7 @@ class VoiceChatApp:
         self.btn_breathing.pack(pady=2)
         self.btn_muscle.pack(pady=2)
         self.btn_meditation.pack(pady=2)
-        # self.btn_stop_video.pack(pady=5) - Removed
+        self.btn_game.pack(pady=2)
 
         self.btn_clear.pack(pady=10)
         self.btn_exit.pack(pady=10) # Added more padding for visibility
@@ -538,34 +541,51 @@ class VoiceChatApp:
         self.root.after(50, self.process_queue) # Faster UI update for typing effect
 
     def loadModels(self):
-        """Load all models with progress updates."""
+        """Load all models with progress updates. STT and TTS load in parallel."""
         try:
-            # Step 1: STT Model (0-30%)
-            self.processing_queue.put(("loading_step", "步骤 1/4: 语音识别模块"))
-            self.processing_queue.put(("status", "正在加载语音识别模型..."))
+            # Step 1+2: Load STT and TTS models in parallel (0-50%)
+            self.processing_queue.put(("loading_step", "步骤 1/3: 语音模块加载中"))
+            self.processing_queue.put(("status", "正在并行加载语音识别与合成模型..."))
             self.processing_queue.put(("loading_progress", 5))
+
             self.stt_service = STTService()
-            self.stt_service.load_model()
-            self.processing_queue.put(("loading_progress", 15))
+            self.tts_service = TTSService()
+
+            # Parallel model loading threads
+            stt_loaded = threading.Event()
+            tts_loaded = threading.Event()
+
+            def load_stt():
+                self.stt_service.load_model()
+                stt_loaded.set()
+
+            def load_tts():
+                self.tts_service.load_model(use_streaming=True)
+                tts_loaded.set()
+
+            t_stt = threading.Thread(target=load_stt, daemon=True)
+            t_tts = threading.Thread(target=load_tts, daemon=True)
+            t_stt.start()
+            t_tts.start()
+
+            # Wait for both to finish loading
+            t_stt.join()
+            t_tts.join()
+            self.processing_queue.put(("loading_progress", 40))
+
+            # Sequential warmup (GPU-sensitive, one at a time)
             self.processing_queue.put(("status", "正在预热语音识别..."))
             self.stt_service.warmup()
-            self.processing_queue.put(("loading_progress", 25))
-            
-            # Step 2: TTS Model (30-70%)
-            self.processing_queue.put(("loading_step", "步骤 2/4: 语音合成模块"))
-            self.processing_queue.put(("status", "正在加载语音合成模型..."))
-            self.processing_queue.put(("loading_progress", 30))
-            self.tts_service = TTSService()
-            self.tts_service.load_model(use_streaming=True)
             self.processing_queue.put(("loading_progress", 50))
+
             self.processing_queue.put(("status", "正在预热语音合成..."))
             self.tts_service.warmup()
-            self.processing_queue.put(("loading_progress", 70))
+            self.processing_queue.put(("loading_progress", 65))
             
-            # Step 3: LLM Service (70-90%)
-            self.processing_queue.put(("loading_step", "步骤 3/4: 智能对话模块"))
+            # Step 3: LLM Service (65-90%)
+            self.processing_queue.put(("loading_step", "步骤 2/3: 智能对话模块"))
             self.processing_queue.put(("status", "正在连接智能助手..."))
-            self.processing_queue.put(("loading_progress", 75))
+            self.processing_queue.put(("loading_progress", 70))
             self.llm_service = LLMService()
             if not self.llm_service.test_connection():
                 self.processing_queue.put(("error", "无法连接到 Ollama 服务"))
@@ -574,9 +594,9 @@ class VoiceChatApp:
             self.processing_queue.put(("status", "正在预热智能助手..."))
             self.llm_service.warmup()
             self.processing_queue.put(("loading_progress", 90))
-            
+
             # Step 4: Data Manager & Report Service (90-100%)
-            self.processing_queue.put(("loading_step", "步骤 4/4: 初始化数据"))
+            self.processing_queue.put(("loading_step", "步骤 3/3: 初始化数据"))
             self.processing_queue.put(("status", "正在初始化数据管理..."))
             self.data_manager = DataManager()
             self.data_manager.start_new_session()
@@ -611,7 +631,6 @@ class VoiceChatApp:
             self.processing_queue.put(("start_keepalive", None))
             
         except Exception as e:
-            import traceback
             traceback.print_exc()
             self.processing_queue.put(("error", f"模型加载失败: {str(e)}"))
 
@@ -760,7 +779,7 @@ class VoiceChatApp:
             
             # Streaming Filter Logic
             stream_buffer = ""
-            possible_tags = ["[REC_BREATHING]", "[REC_MUSCLE]", "[REC_MEDITATION]", 
+            possible_tags = ["[REC_BREATHING]", "[REC_MUSCLE]", "[REC_MEDITATION]", "[REC_GAME]",
                              "[END_GOAL_ACHIEVED]", "[END_TIME_LIMIT]", "[END_SAFETY]", "[END_INVALID]", "[END_QUIT]"]
             
             def stream_and_filter(text_chunk):
@@ -774,7 +793,6 @@ class VoiceChatApp:
                 #    If so, check if we have a complete tag to remove.
                 
                 # Defined strict tags to remove immediately
-                import re
                 stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer)
                 stream_buffer = re.sub(r'\[END_[A-Z_]+\]', '', stream_buffer)
                 stream_buffer = re.sub(r'【.*?】', '', stream_buffer)
@@ -890,7 +908,8 @@ class VoiceChatApp:
             control_tags = {
                 "[REC_BREATHING]": "呼吸",
                 "[REC_MUSCLE]": "肌肉",
-                "[REC_MEDITATION]": "冥想"
+                "[REC_MEDITATION]": "冥想",
+                "[REC_GAME]": "游戏"
             }
             
             # Check round threshold
@@ -926,22 +945,11 @@ class VoiceChatApp:
                     
                     # ALWAYS strip the tag from spoken text
                     spoken_text = spoken_text.replace(tag, "").strip()
-            
-             # Heuristic: If allowed and no tag detected, but text implies recommendation, INFER tag
-            if allow_relaxation and not detected_tag:
-                 if "呼吸" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-                     detected_tag = "[REC_BREATHING]"
-                     print(f"[DEBUG] Inferred relaxation tag from text: {detected_tag}")
-                     self._last_relaxation_recommendation_round = current_rounds
-                 elif "肌肉" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-                     detected_tag = "[REC_MUSCLE]"
-                     print(f"[DEBUG] Inferred relaxation tag from text: {detected_tag}")
-                     self._last_relaxation_recommendation_round = current_rounds
-                 elif "冥想" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-                     detected_tag = "[REC_MEDITATION]"
-                     print(f"[DEBUG] Inferred relaxation tag from text: {detected_tag}")
-                     self._last_relaxation_recommendation_round = current_rounds
-            
+
+            # Heuristic: If allowed and no tag detected, but text implies recommendation, INFER tag
+            if not detected_tag:
+                detected_tag = self._infer_relaxation_tag(spoken_text, allow_relaxation, current_rounds)
+
             # Also strip session end tags from spoken text
             for pattern in END_PATTERNS.values():
                 spoken_text = re.sub(pattern, '', spoken_text).strip()
@@ -982,7 +990,6 @@ class VoiceChatApp:
             # Code removed as it duplicates streaming logic
             
             # FINAL SAFETY CHECK for TTS: Strip any analysis tags that leaked through
-                # Robust regex for Chinese full-width brackets
             safe_spoken_text = re.sub(r'【.*?】', '', spoken_text)
             # Also strip any remaining [REC_...] or [END_...] tags just in case
             safe_spoken_text = re.sub(r'\[REC_[A-Z_]+\]', '', safe_spoken_text)
@@ -1012,24 +1019,11 @@ class VoiceChatApp:
                 self.data_manager.save_assistant_message(tts_audio_data, full_response)
             else:
                  print("Warning: No audio generated for saving.")
-            
-            # FALLBACK: Keyword Inference (Task 23 improvement/User req)
-            # If no tag detected but we see "Meditation/Breathing" keywords in text,
-            # and relaxation is allowed, we infer it.
-            if not detected_tag and allow_relaxation:
-                 if "冥想" in spoken_text:
-                     detected_tag = "[REC_MEDITATION]"
-                     print("[DEBUG] Inferred relaxation tag: [REC_MEDITATION] from text content")
-                     self._last_relaxation_recommendation_round = current_rounds
-                 elif "呼吸" in spoken_text:
-                     detected_tag = "[REC_BREATHING]"
-                     print("[DEBUG] Inferred relaxation tag: [REC_BREATHING] from text content")
-                     self._last_relaxation_recommendation_round = current_rounds
-                 elif "肌肉" in spoken_text:
-                     detected_tag = "[REC_MUSCLE]"
-                     print("[DEBUG] Inferred relaxation tag: [REC_MUSCLE] from text content")
-                     self._last_relaxation_recommendation_round = current_rounds
-            
+
+            # FALLBACK: Keyword Inference (re-run after TTS with cleaned text)
+            if not detected_tag:
+                detected_tag = self._infer_relaxation_tag(spoken_text, allow_relaxation, current_rounds)
+
             # 9. Handle session end if detected
             if end_type != EndType.NONE:
                 self._handle_session_end(end_type, detected_tag)
@@ -1052,7 +1046,6 @@ class VoiceChatApp:
             self.processing_queue.put(("set_buttons_state", "normal"))
 
         except Exception as e:
-            import traceback
             traceback.print_exc()
             self.processing_queue.put(("error", f"处理失败: {str(e)}"))
 
@@ -1167,6 +1160,7 @@ class VoiceChatApp:
             "呼吸": (self.btn_breathing, "#64B5F6"),
             "肌肉": (self.btn_muscle, "#4DD0E1"),
             "冥想": (self.btn_meditation, "#9575CD"),
+            "游戏": (self.btn_game, "#FF8A65"),
         }
         
         # Get the button for the exact keyword match
@@ -1215,7 +1209,6 @@ class VoiceChatApp:
     
     def _play_opening_greeting(self):
         """Play opening greeting when session starts."""
-        import random
         # Ensure fresh randomness
         random.seed(time.time())
         
@@ -1281,7 +1274,6 @@ class VoiceChatApp:
                 
             except Exception as e:
                 print(f"[WARNING] 问候播放失败: {e}")
-                import traceback
                 traceback.print_exc()
                 self.processing_queue.put(("status", "✅ 就绪 - 点击录音开始对话"))
                 self.processing_queue.put(("set_buttons_state", "normal"))
@@ -1370,7 +1362,6 @@ class VoiceChatApp:
                 
                 # Wait for background generation to complete (max 60 seconds)
                 # OPTIMIZATION: Only wait for CONTENT, not PDF report
-                import time
                 wait_start = time.time()
                 while not getattr(self, '_content_generation_complete', True):
                     if time.time() - wait_start > 60:
@@ -1439,7 +1430,6 @@ class VoiceChatApp:
                 
             except Exception as e:
                 print(f"[ERROR] Post-relaxation flow failed: {e}")
-                import traceback
                 traceback.print_exc()
                 self.processing_queue.put(("status", "✅ 就绪"))
                 self.processing_queue.put(("set_buttons_state", "normal"))
@@ -1510,35 +1500,15 @@ class VoiceChatApp:
                 print(f"[INFO] Interim report saved: {save_result}")
                 
                 # Generate interim PDF
-                # Check if pre-generated in background
                 pre_pdf = getattr(self, '_interim_pdf_path', None)
                 if pre_pdf and os.path.exists(pre_pdf):
                      print(f"[INFO] Using pre-generated interim PDF: {pre_pdf}")
-                     # It's already generated, we don't need to do anything heavy.
                 else:
-                    # Fallback if not pre-generated
                     print("[INFO] generating PDF now (fallback)...")
-                    pdf_generator = get_pdf_generator()
-                    pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
-                    if "subject_id" not in pdf_data:
-                        pdf_data["subject_id"] = user_id
-                    
-                    pdf_data.update({
-                        "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                        "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                        "conversation_rounds": self.report_service.round_count,
-                        "end_type": "RELAXATION_CHECKPOINT",
-                    })
-                    
-                    session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
-                    if session_folder and os.path.isdir(session_folder):
-                        pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
-                        if pdf_path:
-                            print(f"[INFO] Interim PDF generated: {pdf_path}")
+                    self._generate_and_save_pdf(researcher_report, user_id, "RELAXATION_CHECKPOINT", save_result)
                         
             except Exception as e:
                 print(f"[ERROR] Interim PDF generation failed: {e}")
-                import traceback
                 traceback.print_exc()
         
         threading.Thread(target=save_interim_report, daemon=True).start()
@@ -1562,7 +1532,6 @@ class VoiceChatApp:
     
     def _clean_text_for_ui(self, text):
         """Remove control tags and TTS emotion tags for UI display."""
-        import re
         if not text: return ""
         # Remove psychological analysis tags in brackets like 【情绪识别】
         text = re.sub(r'【.*?】', '', text)
@@ -1596,6 +1565,93 @@ class VoiceChatApp:
              clean_type = raw_type.replace(".mp4", "")
              return relax_map.get(clean_type, clean_type)
         return "未进行"
+
+    def _generate_and_save_pdf(self, researcher_report, user_id, end_type, save_result=None):
+        """Common PDF generation logic used across multiple session end flows.
+
+        Args:
+            researcher_report: The report dict from report_service
+            user_id: Subject ID string
+            end_type: EndType enum or string
+            save_result: Optional dict with 'report_path' key for determining session folder
+
+        Returns:
+            Path to generated PDF, or None on failure
+        """
+        try:
+            pdf_generator = get_pdf_generator()
+            pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
+            if "subject_id" not in pdf_data:
+                pdf_data["subject_id"] = user_id
+
+            end_type_value = end_type.value if hasattr(end_type, 'value') else str(end_type)
+            pdf_data.update({
+                "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
+                "session_duration_minutes": self.report_service.get_session_duration_minutes(),
+                "conversation_rounds": self.report_service.round_count,
+                "end_type": end_type_value,
+            })
+
+            # Inject game clinical data if available
+            game_results = getattr(self, '_game_results', None)
+            if game_results:
+                pdf_data["game_performance"] = game_results
+
+            # Determine session folder
+            session_folder = None
+            if save_result:
+                session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
+            if not session_folder or not os.path.isdir(session_folder):
+                session_folder = getattr(self.data_manager, 'session_dir', None)
+
+            if session_folder and os.path.isdir(session_folder):
+                pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
+                if pdf_path:
+                    print(f"[INFO] PDF报告已生成: {pdf_path}")
+                    return pdf_path
+            else:
+                print("[WARNING] 无法确定会话文件夹，跳过PDF生成")
+        except Exception as e:
+            print(f"[WARNING] PDF生成失败: {e}")
+            traceback.print_exc()
+        return None
+
+    def _infer_relaxation_tag(self, spoken_text, allow_relaxation, current_rounds):
+        """Infer relaxation recommendation tag from spoken text keywords.
+
+        Args:
+            spoken_text: The AI's spoken response text
+            allow_relaxation: Whether relaxation is allowed at this point
+            current_rounds: Current conversation round number
+
+        Returns:
+            Detected tag string (e.g. "[REC_BREATHING]") or None
+        """
+        if not allow_relaxation:
+            return None
+
+        # Strict inference: keyword + "按钮"/"练习" (more confident)
+        if "呼吸" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+            tag = "[REC_BREATHING]"
+        elif "肌肉" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+            tag = "[REC_MUSCLE]"
+        elif "冥想" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+            tag = "[REC_MEDITATION]"
+        # Loose inference: keyword only (fallback)
+        elif "游戏" in spoken_text:
+            tag = "[REC_GAME]"
+        elif "冥想" in spoken_text:
+            tag = "[REC_MEDITATION]"
+        elif "呼吸" in spoken_text:
+            tag = "[REC_BREATHING]"
+        elif "肌肉" in spoken_text:
+            tag = "[REC_MUSCLE]"
+        else:
+            return None
+
+        print(f"[DEBUG] Inferred relaxation tag from text: {tag}")
+        self._last_relaxation_recommendation_round = current_rounds
+        return tag
 
     def _end_session_after_relaxation(self):
         """End session after relaxation, generate final report."""
@@ -1642,8 +1698,7 @@ class VoiceChatApp:
                         # No, stream_chat just appends.
                         # Pragramtic fix: strip known tags from chunk. If a tag is split, it might show garbage.
                         # But removing the duplication is the main fix.
-                        
-                        import re
+
                         clean_chunk = chunk
                         clean_chunk = re.sub(r'\[REC_[A-Z_]+\]', '', clean_chunk)
                         clean_chunk = re.sub(r'\[END_[A-Z_]+\]', '', clean_chunk) 
@@ -1694,7 +1749,6 @@ class VoiceChatApp:
 
                 except Exception as e:
                     print(f"[ERROR] Failed to generate session summary: {e}")
-                    import traceback
                     traceback.print_exc()
                     
                     # Dynamic Fallback
@@ -1755,38 +1809,19 @@ class VoiceChatApp:
                         
                         # Generate PDF
                         try:
-                            # OPTIMIZATION: Reuse pre-generated PDF if available
                             pre_pdf = getattr(self, '_interim_pdf_path', None)
                             if pre_pdf and os.path.exists(pre_pdf):
                                 print(f"[INFO] Using pre-generated final PDF: {pre_pdf}")
-                                # It's already generated.
                             else:
                                 print("[INFO] generating Final PDF now (fallback)...")
-                                pdf_generator = get_pdf_generator()
-                                pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
-                                if "subject_id" not in pdf_data:
-                                    pdf_data["subject_id"] = user_id
-                                
-                                pdf_data.update({
-                                    "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                                    "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                                    "conversation_rounds": self.report_service.round_count,
-                                    "end_type": "RELAXATION_COMPLETED",
-                                })
-                                
-                                session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
-                                if session_folder and os.path.isdir(session_folder):
-                                    pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
-                                    if pdf_path:
-                                        print(f"[INFO] Final PDF generated: {pdf_path}")
+                                self._generate_and_save_pdf(researcher_report, user_id, "RELAXATION_COMPLETED", save_result)
                         except Exception as e:
                             print(f"[ERROR] PDF generation failed: {e}")
-                            
+
                         self.session_ended = True
                         self.processing_queue.put(("status", "✅ 会话结束，报告已生成 - 请下一位来访者录入信息"))
                     except Exception as e:
                          print(f"[ERROR] Background report generation failed: {e}")
-                         import traceback
                          traceback.print_exc()
 
                 threading.Thread(target=save_final_report_background, daemon=True).start()
@@ -1799,7 +1834,6 @@ class VoiceChatApp:
                 
             except Exception as e:
                 print(f"[ERROR] End session failed: {e}")
-                import traceback
                 traceback.print_exc()
                 self.processing_queue.put(("status", "✅ 就绪"))
                 self.processing_queue.put(("set_buttons_state", "normal"))
@@ -1835,15 +1869,16 @@ class VoiceChatApp:
         """Start periodic Ollama warmup to prevent model unloading."""
         # Keep-alive interval: 3 minutes (180000 ms)
         KEEPALIVE_INTERVAL_MS = 180000
-        
+
         def keepalive_ping():
             if self.models_loaded and self.llm_service:
                 try:
-                    # Send a minimal request to keep model loaded
-                    self.llm_service.client.chat(
+                    # Use generate endpoint (lightweight, no chat history pollution)
+                    self.llm_service.client.generate(
                         model=self.llm_service.model,
-                        messages=[{"role": "user", "content": "ping"}],
-                        stream=False
+                        prompt="hi",
+                        options={"num_predict": 1},
+                        keep_alive="5m",
                     )
                     print("[INFO] Ollama keep-alive ping successful")
                 except Exception as e:
@@ -1967,9 +2002,6 @@ class VoiceChatApp:
                     # Start streaming feedback
                     self.processing_queue.put(("append_chat", ("ai_start", "[反馈] ")))
                     
-                    # Ensure re is imported locally
-                    import re
-
                     stream_gen = self.report_service.generate_visitor_feedback(
                         conversation_history, end_type, relaxation_rec, stream=True
                     )
@@ -2092,48 +2124,17 @@ class VoiceChatApp:
                 
                 # ===== STEP 5: Generate PDF Report =====
                 print("[INFO] 生成PDF报告...")
-                try:
-                    pdf_generator = get_pdf_generator()
-                    
-                    # Prepare PDF data from researcher report (which now contains user_info)
-                    pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
-                    
-                    # Ensure basic stats fields are present if not already
-                    if "subject_id" not in pdf_data:
-                        pdf_data["subject_id"] = user_id
-                    
-                    # Add session stats
-                    pdf_data.update({
-                        "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                        "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                        "conversation_rounds": self.report_service.round_count,
-                        "end_type": end_type.value,
-                    })
-                    
-                    # Get session folder path
-                    session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
-                    if session_folder and os.path.isdir(session_folder):
-                        pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
-                        if pdf_path:
-                            print(f"[INFO] PDF报告已生成: {pdf_path}")
-                            
-                            # REQUIREMENT: If we generated a new final report after continuing chat,
-                            # replace (delete) the old interim report.
-                            interim_pdf = getattr(self, '_interim_pdf_path', None)
-                            if interim_pdf and os.path.exists(interim_pdf) and interim_pdf != pdf_path:
-                                try:
-                                    print(f"[INFO] Replacing interim PDF (deleting old): {interim_pdf}")
-                                    os.remove(interim_pdf)
-                                    # Clear the pointer so we don't delete it again
-                                    self._interim_pdf_path = None
-                                except Exception as del_e:
-                                    print(f"[WARNING] Failed to delete interim PDF: {del_e}")
-                    else:
-                        print("[WARNING] 无法确定会话文件夹，跳过PDF生成")
-                except Exception as pdf_error:
-                    print(f"[WARNING] PDF生成失败: {pdf_error}")
-                    import traceback
-                    traceback.print_exc()
+                pdf_path = self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
+                if pdf_path:
+                    # Delete old interim PDF if we generated a new final report
+                    interim_pdf = getattr(self, '_interim_pdf_path', None)
+                    if interim_pdf and os.path.exists(interim_pdf) and interim_pdf != pdf_path:
+                        try:
+                            print(f"[INFO] Replacing interim PDF (deleting old): {interim_pdf}")
+                            os.remove(interim_pdf)
+                            self._interim_pdf_path = None
+                        except Exception as del_e:
+                            print(f"[WARNING] Failed to delete interim PDF: {del_e}")
                 
                 # Report generation finished
                 self.processing_queue.put(("status", "✅ 会话已结束 - 可点击'修改信息'开始新会话"))
@@ -2145,7 +2146,6 @@ class VoiceChatApp:
                 self.root.after(0, unlock_modify)
                 
             except Exception as e:
-                import traceback
                 traceback.print_exc()
                 self.processing_queue.put(("error", f"报告生成失败: {str(e)}"))
         
@@ -2390,7 +2390,6 @@ class VoiceChatApp:
             self.chat_text.config(state=tk.DISABLED)
             
             # Schedule next char (randomized slightly for natural feel)
-            import random
             delay = random.randint(30, 50)
             self.root.after(delay, lambda: self._typewriter_effect(index, text, current_pos + 1))
         else:
@@ -2413,6 +2412,95 @@ class VoiceChatApp:
             
         self.chat_text.see(tk.END)
         self.chat_text.config(state=tk.DISABLED)
+
+    def _play_game_with_animation(self, button, original_color):
+        """Play therapeutic game with button press animation effect."""
+        self._stop_highlight_animation()
+
+        def press_effect():
+            button.config(relief=tk.SUNKEN, bg="#a0a0a0")
+            self.root.after(100, release_effect)
+
+        def release_effect():
+            button.config(relief=tk.RAISED, bg=original_color)
+            self.root.after(80, launch_game)
+
+        def launch_game():
+            self._launch_therapeutic_game()
+
+        press_effect()
+
+    def _launch_therapeutic_game(self):
+        """Launch the therapeutic game in fullscreen mode."""
+        # Get session folder for clinical data
+        user_id = self.user_id_entry.get().strip() or "default_user"
+        session_folder = getattr(self, '_session_folder', None)
+        if not session_folder:
+            from datetime import datetime
+            session_folder = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "data", "sessions", f"{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            os.makedirs(session_folder, exist_ok=True)
+            self._session_folder = session_folder
+
+        self.status_var.set("🎮 正在启动心理互动游戏...")
+        self.append_to_chat("system", "心理互动游戏启动中...")
+
+        # Disable buttons during game
+        self._set_buttons_state("disabled")
+
+        def run_game():
+            try:
+                game_service = get_game_service()
+                results = game_service.play_game(session_folder)
+
+                # Store results for report generation
+                self._game_results = results
+
+                # Update UI on main thread
+                self.root.after(0, lambda: self._on_game_complete(results))
+            except Exception as e:
+                print(f"[ERROR] Game failed: {e}")
+                import traceback
+                traceback.print_exc()
+                self.root.after(0, lambda: self._on_game_error(str(e)))
+
+        thread = threading.Thread(target=run_game, daemon=True)
+        thread.start()
+
+    def _on_game_complete(self, results):
+        """Handle game completion on main thread."""
+        self._set_buttons_state("normal")
+        accuracy = results.get("go_nogo_accuracy", 0)
+        breathing_rate = results.get("breathing_completion_rate", 0)
+        camps = results.get("camp_structures_built", 0)
+
+        summary = (f"游戏完成！反应准确率: {accuracy}%，"
+                   f"呼吸完成率: {breathing_rate}%，"
+                   f"建造营地: {camps}个")
+        self.status_var.set(f"🎮 {summary}")
+        self.append_to_chat("system", summary)
+
+        # Record in report service
+        if self.report_service:
+            self.report_service.record_game_session(results)
+
+    def _on_game_error(self, error_msg):
+        """Handle game error on main thread."""
+        self._set_buttons_state("normal")
+        self.status_var.set(f"❌ 游戏启动失败: {error_msg}")
+        self.append_to_chat("system", f"游戏启动失败: {error_msg}")
+
+    def _set_buttons_state(self, state):
+        """Enable or disable main buttons."""
+        for btn in [self.btn_start, self.btn_stop, self.btn_breathing,
+                    self.btn_muscle, self.btn_meditation, self.btn_game,
+                    self.btn_clear]:
+            try:
+                btn.config(state=state)
+            except:
+                pass
 
     def _play_video_with_animation(self, button, original_color, filename):
         """Play video with button press animation effect."""
@@ -2483,7 +2571,6 @@ class VoiceChatApp:
                     print("[INFO] Background CONTENT generation complete!")
                 except Exception as e:
                     print(f"[ERROR] Content generation failed: {e}")
-                    import traceback
                     traceback.print_exc()
                     self._content_generation_complete = True # Unblock UI
             
@@ -2517,23 +2604,7 @@ class VoiceChatApp:
                     
                     # 5. Generate interim PDF
                     print("[INFO] Generating interim PDF report in background...")
-                    pdf_generator = get_pdf_generator()
-                    pdf_data = self._interim_report.copy() if isinstance(self._interim_report, dict) else {}
-                    if "subject_id" not in pdf_data:
-                        pdf_data["subject_id"] = user_id
-                    
-                    pdf_data.update({
-                        "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                        "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                        "conversation_rounds": self.report_service.round_count,
-                        "end_type": "RELAXATION_CHECKPOINT",
-                    })
-                    
-                    # Use current session dir
-                    session_folder = self.data_manager.session_dir
-                    if session_folder and os.path.exists(session_folder):
-                         self._interim_pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
-                         print(f"[INFO] Interim PDF pre-generated at: {self._interim_pdf_path}")
+                    self._interim_pdf_path = self._generate_and_save_pdf(self._interim_report, user_id, "RELAXATION_CHECKPOINT")
                     
                 except Exception as e:
                     print(f"[ERROR] Background REPORT generation failed: {e}")
@@ -2626,42 +2697,21 @@ class VoiceChatApp:
                     )
                     
                     # Generate final PDF
-                    try:
-                        pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
-                        if "subject_id" not in pdf_data:
-                            pdf_data["subject_id"] = user_id
-                        
-                        pdf_data.update({
-                            "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                            "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                            "conversation_rounds": self.report_service.round_count,
-                            "end_type": EndType.QUIT.value,
-                        })
-                        
-                        session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
-                        
-                        if session_folder and os.path.isdir(session_folder):
-                            pdf_generator = get_pdf_generator()
-                            pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
-                            if pdf_path:
-                                print(f"[INFO] Exit PDF generated: {pdf_path}")
-                                
-                                # Clean up previous interim PDF
-                                interim_pdf = getattr(self, '_interim_pdf_path', None)
-                                if interim_pdf and os.path.exists(interim_pdf) and interim_pdf != pdf_path:
-                                    try:
-                                        os.remove(interim_pdf)
-                                    except:
-                                        pass
-                    except Exception as e:
-                        print(f"[ERROR] Silent Exit PDF generation failed: {e}")
+                    pdf_path = self._generate_and_save_pdf(researcher_report, user_id, EndType.QUIT, save_result)
+                    if pdf_path:
+                        # Clean up previous interim PDF
+                        interim_pdf = getattr(self, '_interim_pdf_path', None)
+                        if interim_pdf and os.path.exists(interim_pdf) and interim_pdf != pdf_path:
+                            try:
+                                os.remove(interim_pdf)
+                            except:
+                                pass
                         
             except Exception as e:
                 print(f"[ERROR] Silent Exit cleanup failed: {e}")
                 
             finally:
                 # 3. Report done, notify main thread to destroy and exit safely
-                import os
                 def final_kill():
                     self.root.quit()
                     self.root.destroy()
@@ -2793,33 +2843,10 @@ class VoiceChatApp:
                     researcher_report = self.report_service.generate_researcher_report(
                         conversation_history, user_id, EndType.QUIT, user_info=current_user_info
                     )
-                    self.data_manager.save_session_report(
+                    save_result = self.data_manager.save_session_report(
                         researcher_report, "User Switched", EndType.QUIT.value
                     )
-                    
-                    # Generate PDF
-                    try:
-                        pdf_generator = get_pdf_generator()
-                        pdf_data = researcher_report.copy() if isinstance(researcher_report, dict) else {}
-                        if "subject_id" not in pdf_data:
-                            pdf_data["subject_id"] = user_id
-                            
-                        pdf_data.update({
-                            "report_date": self.report_service.get_session_start_time().strftime("%Y年%m月%d日") if self.report_service.session_start_time else "未知",
-                            "session_duration_minutes": self.report_service.get_session_duration_minutes(),
-                            "conversation_rounds": self.report_service.round_count,
-                            "end_type": EndType.QUIT.value,
-                        })
-                        
-                        save_result = self.data_manager.save_session_report(researcher_report, "User Switched", EndType.QUIT.value)
-                        session_folder = os.path.dirname(save_result.get("report_path", "")) if save_result else None
-                        
-                        if session_folder and os.path.isdir(session_folder):
-                            pdf_generator.generate_report(pdf_data, session_folder)
-                            print("[INFO] Switch User PDF generated.")
-                            
-                    except Exception as e:
-                        print(f"[ERROR] Switch User PDF failed: {e}")
+                    self._generate_and_save_pdf(researcher_report, user_id, EndType.QUIT, save_result)
                     
                     # Reset after generation
                     self.root.after(0, self._reset_ui_for_new_session)
