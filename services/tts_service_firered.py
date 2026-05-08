@@ -8,7 +8,10 @@ import threading
 import numpy as np
 import torch
 import torchaudio
-import pyaudio
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
 import soundfile as sf
 import tempfile
 import uuid
@@ -58,6 +61,7 @@ class TTSService:
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_audio")
         if not os.path.exists(self.temp_dir):
             os.makedirs(self.temp_dir, exist_ok=True)
+        self._cleanup_old_temps(max_age_seconds=3600)  # Clean files older than 1 hour
             
         # Streaming state
         self.streaming_mode = False
@@ -65,7 +69,18 @@ class TTSService:
         self.streaming_playback_queue = None
         self.streaming_stop_event = None
         self.streaming_threads = []
-        
+
+    def _cleanup_old_temps(self, max_age_seconds: int = 3600):
+        """Remove temp WAV files older than max_age_seconds."""
+        try:
+            now = time.time()
+            for f in os.listdir(self.temp_dir):
+                fp = os.path.join(self.temp_dir, f)
+                if os.path.isfile(fp) and (now - os.path.getmtime(fp)) > max_age_seconds:
+                    os.remove(fp)
+        except Exception as e:
+            print(f"[WARNING] Temp cleanup failed: {e}")
+
     def load_model(self, progress_callback=None, **kwargs):
         """Load the FireRedTTS model."""
         if progress_callback:

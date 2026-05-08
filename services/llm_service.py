@@ -79,7 +79,7 @@ class LLMService:
                 messages=messages,
                 stream=True,
                 options={
-                    "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "\n\n", "心医生:", "心医生："]
+                    "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "心医生:", "心医生："]
                 }
             )
             
@@ -90,9 +90,10 @@ class LLMService:
                     yield content
                     
         except Exception as e:
-            # Log error to console but DO NOT yield it as chat text
+            # Rollback: remove the user message since we got no assistant reply
+            if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+                self.conversation_history.pop()
             print(f"[ERROR] LLM Generation Failed: {e}")
-            # Raise exception so main pipeline can handle it (or ignore)
             raise e
             
         # Add assistant response to history

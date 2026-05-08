@@ -257,3 +257,4 @@ x-transformers==2.12.2
 xxhash==3.6.0
 yarl==1.22.0
 zipp==3.23.0
+PySide6>=6.5.0

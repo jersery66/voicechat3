@@ -89,10 +89,13 @@ class DataManager:
         existing_profile.update(profile)
         existing_profile["subject_id"] = self.current_subject_id
         existing_profile["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        with open(profile_path, 'w', encoding='utf-8') as f:
-            json.dump(existing_profile, f, ensure_ascii=False, indent=2)
-            
+
+        try:
+            with open(profile_path, 'w', encoding='utf-8') as f:
+                json.dump(existing_profile, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARNING] Failed to save user profile: {e}")
+
         return str(profile_path)
     
     def load_user_profile(self, subject_id: str = None) -> Dict[str, Any]:
@@ -163,10 +166,13 @@ class DataManager:
         }
         summaries_data["sessions"].append(session_entry)
         summaries_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            json.dump(summaries_data, f, ensure_ascii=False, indent=2)
-            
+
+        try:
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                json.dump(summaries_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARNING] Failed to save session summary: {e}")
+
         return str(summary_path)
     
     def load_session_summaries(self, subject_id: str = None, limit: int = 5) -> List[Dict[str, Any]]:
@@ -331,8 +337,11 @@ class DataManager:
     def _save_metadata(self, metadata: Dict[str, Any]):
         """Save session metadata."""
         metadata_path = self._get_session_path() / "metadata.json"
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        try:
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARNING] Failed to save metadata: {e}")
             
     def _load_metadata(self) -> Dict[str, Any]:
         """Load session metadata."""
@@ -345,42 +354,46 @@ class DataManager:
     def save_user_message(self, audio: np.ndarray, text: str) -> Dict[str, str]:
         """
         Save user audio and transcription.
-        
+
         Returns:
             Dict with paths to saved files
         """
         if self.current_folder_name is None:
             self.start_new_session()
-            
+
         self.message_counter += 1
         prefix = f"{self.message_counter:03d}_user"
-        
+
         session_path = self._get_session_path()
         audio_path = session_path / f"{prefix}.wav"
         text_path = session_path / f"{prefix}.txt"
-        
-        # Save audio
-        self._save_wav(audio_path, audio)
-        
-        # Get timestamp with millisecond precision
+
+        # Save audio (may be None in text-only mode)
+        if audio is not None:
+            self._save_wav(audio_path, audio)
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        
-        # Save text with timestamp
-        with open(text_path, 'w', encoding='utf-8') as f:
-            f.write(f"[{timestamp}]\n{text}")
-            
-        # Update metadata
-        metadata = self._load_metadata()
-        metadata["messages"].append({
-            "type": "user",
-            "index": self.message_counter,
-            "audio_file": str(audio_path.name),
-            "text_file": str(text_path.name),
-            "text": text,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # Millisecond precision
-        })
-        self._save_metadata(metadata)
-        
+
+        try:
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(f"[{timestamp}]\n{text}")
+        except Exception as e:
+            print(f"[WARNING] Failed to save user text: {e}")
+
+        try:
+            metadata = self._load_metadata()
+            metadata["messages"].append({
+                "type": "user",
+                "index": self.message_counter,
+                "audio_file": str(audio_path.name) if audio is not None else None,
+                "text_file": str(text_path.name),
+                "text": text,
+                "timestamp": timestamp
+            })
+            self._save_metadata(metadata)
+        except Exception as e:
+            print(f"[WARNING] Failed to update metadata: {e}")
+
         return {
             "audio_path": str(audio_path),
             "text_path": str(text_path)
@@ -389,41 +402,46 @@ class DataManager:
     def save_assistant_message(self, audio: np.ndarray, text: str, sample_rate: int = 24000) -> Dict[str, str]:
         """
         Save assistant audio and response text.
-        
+
         Returns:
             Dict with paths to saved files
         """
         if self.current_folder_name is None:
             self.start_new_session()
-            
+
         prefix = f"{self.message_counter:03d}_assistant"
-        
+
         session_path = self._get_session_path()
         audio_path = session_path / f"{prefix}.wav"
         text_path = session_path / f"{prefix}.txt"
-        
+
         # Save audio (TTS uses 24000 sample rate)
-        self._save_wav(audio_path, audio, sample_rate=sample_rate)
-        
+        if audio is not None:
+            self._save_wav(audio_path, audio, sample_rate=sample_rate)
+
         # Get timestamp with millisecond precision
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        
-        # Save text with timestamp
-        with open(text_path, 'w', encoding='utf-8') as f:
-            f.write(f"[{timestamp}]\n{text}")
-            
-        # Update metadata
-        metadata = self._load_metadata()
-        metadata["messages"].append({
-            "type": "assistant",
-            "index": self.message_counter,
-            "audio_file": str(audio_path.name),
-            "text_file": str(text_path.name),
-            "text": text,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # Millisecond precision
-        })
-        self._save_metadata(metadata)
-        
+
+        try:
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(f"[{timestamp}]\n{text}")
+        except Exception as e:
+            print(f"[WARNING] Failed to save assistant text: {e}")
+
+        try:
+            metadata = self._load_metadata()
+            metadata["messages"].append({
+                "type": "assistant",
+                "index": self.message_counter,
+                "audio_file": str(audio_path.name) if audio is not None else None,
+                "text_file": str(text_path.name),
+                "text": text,
+                "timestamp": timestamp
+            })
+            self._save_metadata(metadata)
+        except Exception as e:
+            print(f"[WARNING] Failed to update metadata: {e}")
+
         return {
             "audio_path": str(audio_path),
             "text_path": str(text_path)
@@ -431,17 +449,20 @@ class DataManager:
     
     def _save_wav(self, filepath: Path, audio: np.ndarray, sample_rate: int = SAMPLE_RATE):
         """Save numpy array as WAV file."""
-        # Normalize to int16
-        if audio.dtype == np.float32 or audio.dtype == np.float64:
-            audio = (audio * 32767).astype(np.int16)
-        elif audio.dtype != np.int16:
-            audio = audio.astype(np.int16)
-            
-        with wave.open(str(filepath), 'wb') as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)  # 16-bit
-            wav.setframerate(sample_rate)
-            wav.writeframes(audio.tobytes())
+        try:
+            # Normalize to int16
+            if audio.dtype == np.float32 or audio.dtype == np.float64:
+                audio = (audio * 32767).astype(np.int16)
+            elif audio.dtype != np.int16:
+                audio = audio.astype(np.int16)
+
+            with wave.open(str(filepath), 'wb') as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)  # 16-bit
+                wav.setframerate(sample_rate)
+                wav.writeframes(audio.tobytes())
+        except Exception as e:
+            print(f"[WARNING] Failed to save WAV {filepath}: {e}")
     
     def get_session_history(self) -> list:
         """Get all messages in current session."""
@@ -506,21 +527,30 @@ class DataManager:
         report_path = session_path / "researcher_report.json"
         researcher_report["end_type"] = end_type
         researcher_report["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(researcher_report, f, ensure_ascii=False, indent=2)
-        
+        try:
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(researcher_report, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARNING] Failed to save researcher report: {e}")
+
         # Save visitor feedback as text
         feedback_path = session_path / "visitor_feedback.txt"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        with open(feedback_path, 'w', encoding='utf-8') as f:
-            f.write(f"[{timestamp}]\n{visitor_feedback}")
-        
+        try:
+            with open(feedback_path, 'w', encoding='utf-8') as f:
+                f.write(f"[{timestamp}]\n{visitor_feedback}")
+        except Exception as e:
+            print(f"[WARNING] Failed to save visitor feedback: {e}")
+
         # Update metadata with report info
-        metadata = self._load_metadata()
-        metadata["report_generated"] = True
-        metadata["end_type"] = end_type
-        metadata["end_time"] = timestamp
-        self._save_metadata(metadata)
+        try:
+            metadata = self._load_metadata()
+            metadata["report_generated"] = True
+            metadata["end_type"] = end_type
+            metadata["end_time"] = timestamp
+            self._save_metadata(metadata)
+        except Exception as e:
+            print(f"[WARNING] Failed to update metadata for report: {e}")
         
         return {
             "report_path": str(report_path),

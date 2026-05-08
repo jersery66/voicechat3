@@ -53,7 +53,7 @@ class RAGService:
         "失眠": ["睡眠障碍", "入睡困难"],
         "早醒": ["睡眠障碍", "失眠"],
         "多梦": ["睡眠障碍", "噩梦"],
-        "噩梦": ["睡眠障碍", "创伤"],
+        "噩梦": ["睡眠障碍", "失眠"],
         "睡不好": ["失眠", "睡眠障碍"],
         "翻来覆去": ["失眠", "入睡困难"],
         "半夜醒": ["早醒", "睡眠障碍"],
@@ -64,6 +64,13 @@ class RAGService:
 
         # === Anxiety related ===
         "心里堵": ["焦虑", "情绪困扰", "心理压力"],
+        "心情不好": ["情绪低落", "抑郁", "情绪困扰"],
+        "心情差": ["情绪低落", "抑郁"],
+        "不开心": ["情绪低落", "抑郁"],
+        "不高兴": ["情绪低落", "情绪困扰"],
+        "心里不舒服": ["情绪困扰", "心理压力", "焦虑"],
+        "心里难受": ["情绪困扰", "心理痛苦"],
+        "不好受": ["情绪困扰", "心理痛苦"],
         "烦得很": ["焦虑", "烦躁", "情绪困扰"],
         "脑子乱": ["焦虑", "思维混乱", "注意力不集中"],
         "心慌": ["焦虑", "恐慌", "心悸"],
@@ -188,6 +195,13 @@ class RAGService:
         "不在自己身上": ["解离", "现实解体"],
 
         # === Relationship related ===
+        "被人欺负": ["人际冲突", "创伤", "欺凌"],
+        "有人欺负": ["人际冲突", "欺凌"],
+        "被欺负": ["人际冲突", "欺凌"],
+        "受委屈": ["情绪困扰", "人际冲突"],
+        "什么都不想干": ["抑郁", "兴趣减退", "行为退缩"],
+        "什么都不想做": ["抑郁", "兴趣减退", "行为退缩"],
+        "啥都不想干": ["抑郁", "兴趣减退"],
         "没人理解": ["孤独", "社会支持", "人际关系"],
         "孤独": ["孤独感", "社会支持"],
         "不想说话": ["社交退缩", "抑郁", "人际关系"],
@@ -213,7 +227,9 @@ class RAGService:
         "不舒服": ["躯体化", "身体不适"],
 
         # === Work/Study related ===
-        "压力大": ["压力", "焦虑", "工作压力"],
+        "压力大": ["压力", "焦虑", "心理压力"],
+        "压力好大": ["压力", "焦虑", "心理压力"],
+        "好大压力": ["压力", "焦虑"],
         "学不进去": ["注意力", "学习困难", "焦虑"],
         "工作不顺": ["工作压力", "职业困扰"],
         "干不下去": ["职业倦怠", "压力"],
@@ -253,6 +269,7 @@ class RAGService:
         self._jieba = None
         self._query_cache: Dict[str, Set[str]] = {}  # Cache expanded queries
         self._search_cache: Dict[str, List[Dict]] = {}  # Cache search results
+        self._MAX_CACHE_SIZE = 256
         self._load_core_knowledge()
 
     def _get_default_kb_path(self) -> Path:
@@ -343,7 +360,7 @@ class RAGService:
                 "content": "针对戒毒人员失眠问题，可采用以下干预技术：\n1. 睡眠卫生教育：保持规律作息，按照所内作息时间上床和起床\n2. 刺激控制疗法：床只用于睡眠，躺下20分钟仍睡不着就坐起来做深呼吸\n3. 放松训练：睡前在床铺上进行腹式呼吸或渐进式肌肉放松\n4. 着陆技术(Grounding)：关注当下环境，寻找房间里的5种颜色、4种触感、3种声音"
             },
             {
-                "keywords": ["焦虑", "紧张", "心慌", "害怕", "恐惧"],
+                "keywords": ["焦虑", "紧张", "心慌", "害怕", "恐惧", "压力"],
                 "title": "焦虑情绪干预",
                 "content": "针对焦虑情绪的干预技术：\n1. 深呼吸练习：4-7-8呼吸法（吸气4秒，屏息7秒，呼气8秒），可坐在床铺或椅子上进行\n2. 着陆技术：5-4-3-2-1感官练习（看5样东西，摸4样，听3种声音，闻2种气味，尝1种味道）\n3. 认知重构：识别并挑战灾难化思维，把担心的事写在纸上逐条分析\n4. 渐进式肌肉放松：坐在椅子上从头到脚依次紧张-放松各肌肉群"
             },
@@ -358,7 +375,7 @@ class RAGService:
                 "content": "针对戒断症状的应对策略：\n1. 接纳不适感：理解这是身体恢复的正常过程，戒断反应会随时间减轻\n2. 转移注意力：在活动室做俯卧撑、仰卧起坐，或进行手工制作、抄写\n3. 社会支持：与同宿舍的人交流，或找管教民警谈话\n4. 放松技巧：深呼吸、冥想、用冷水洗脸刺激感官\n5. 正念练习：观察而不评判当下的感受，关注呼吸\n6. 医疗支持：如症状严重，立即向值班医生或管教民警报告"
             },
             {
-                "keywords": ["抑郁", "情绪低落", "没意思", "不想活", "绝望"],
+                "keywords": ["抑郁", "情绪低落", "没意思", "不想活", "绝望", "心情不好", "不想动", "累"],
                 "title": "抑郁情绪干预",
                 "content": "针对抑郁情绪的干预策略：\n1. 行为激活：鼓励参与所内日常活动，哪怕只是整理内务、打扫卫生\n2. 正念练习：关注当下，不做评判，在宿舍里做呼吸练习\n3. 社会连接：与信任的同戒人员或管教民警交流\n4. 规律作息：严格按照所内作息时间保持睡眠和饮食规律\n5. 集体活动：在规定活动时间参加集体锻炼、学习和劳动\n6. 危机干预：如有自杀念头，立即向管教民警报告，安排专业心理干预和24小时看护"
             },
@@ -440,28 +457,56 @@ class RAGService:
                 expanded.update(self.SYNONYM_MAP[seg])
             expanded.add(seg)
 
+        if len(self._query_cache) >= self._MAX_CACHE_SIZE:
+            self._query_cache.clear()
         self._query_cache[text] = expanded
         return expanded
+
+    # Common emotional expressions for intent routing (broader than SYNONYM_MAP)
+    _EMOTIONAL_PHRASES = [
+        "心情不好", "心情差", "心情糟糕", "不开心", "高兴不起来",
+        "不舒服", "不痛快", "不对劲", "不好受", "不高兴",
+        "心里不舒服", "心里难受", "心里不痛快", "心里堵得慌",
+        "浑身不自在", "浑身没劲", "浑身难受", "浑身无力",
+        "什么都不想干", "什么都不想做", "啥都不想干", "啥都不想做",
+        "干啥都没意思", "做啥都没意思", "活着没意思", "活着没劲",
+        "不想活", "想死", "想不开", "活够了", "死了算了",
+        "想家", "想回去", "想回家", "想爸妈", "想孩子",
+        "睡不着", "睡不好", "睡不踏实", "失眠", "做噩梦",
+        "心里慌", "心慌", "喘不过气", "胸闷",
+        "脾气大", "想发火", "忍不住", "控制不住",
+        "头疼", "胃疼", "肚子疼", "浑身疼",
+        "压力大", "压力好大", "太累了", "好累",
+        "没人理", "没人关心", "孤独", "一个人",
+        "被人欺负", "有人欺负", "受欺负", "被欺负",
+        "瘾来了", "犯瘾", "想吸毒", "忍不住想",
+    ]
 
     def _intent_routing(self, text: str) -> bool:
         """
         Determine if knowledge base search is needed.
-        Uses synonym map + jieba for better coverage.
+        Uses synonym map + emotional phrases + jieba for broad coverage.
         Returns True if search should be performed.
         """
-        # Check synonym map keys (covers colloquial expressions)
+        # 1. Check synonym map keys (covers colloquial expressions)
         for colloquial in self.SYNONYM_MAP.keys():
             if colloquial in text:
                 return True
 
-        # Check jieba segments against psychology terms
+        # 2. Check common emotional phrases (substring match)
+        for phrase in self._EMOTIONAL_PHRASES:
+            if phrase in text:
+                return True
+
+        # 3. Check jieba segments against psychology terms
         segments = self._segment_text(text)
         psychology_indicators = {
             "焦虑", "抑郁", "失眠", "幻觉", "戒断", "复吸", "渴求", "自杀",
             "自残", "恐惧", "愤怒", "冲动", "解离", "躯体化", "创伤",
             "放松", "冥想", "呼吸", "量表", "评估", "家庭", "孤独",
             "压力", "紧张", "害怕", "担心", "心慌", "头疼", "难受",
-            "痛苦", "绝望", "无助", "烦躁", "生气", "愤怒",
+            "痛苦", "绝望", "无助", "烦躁", "生气", "愤怒", "心情",
+            "欺负", "委屈", "噩梦", "累", "烦", "闷", "慌",
         }
         for seg in segments:
             if seg in psychology_indicators:
@@ -471,7 +516,7 @@ class RAGService:
 
     def _score_entry(self, entry: Dict, expanded_keywords: Set[str], query: str) -> float:
         """Score a single knowledge entry against the expanded query.
-        Uses short-circuit: skip content scan if keywords/title have no hits."""
+        Keywords/title hits are required for a good score; content-only matches get penalized."""
         score = 0.0
         keywords = entry.get("keywords", [])
         title = entry.get("title", "")
@@ -480,13 +525,14 @@ class RAGService:
 
         # Domain boost: knowledge.json entries are highest quality
         if not entry_id or entry_id.startswith("entry_"):
-            domain_boost = 2.0  # knowledge.json (no id or default id)
+            domain_boost = 3.0  # knowledge.json (no id or default id)
         elif entry_id.startswith("cpsycounr"):
-            domain_boost = 0.5  # case studies
+            domain_boost = 0.3  # case studies
         else:
             domain_boost = 0.0  # psyqa, emollm - lower priority
 
         has_keyword_hit = False
+        has_title_hit = False
 
         # A. Keywords field matching (highest weight: 3.0 per hit)
         if isinstance(keywords, list):
@@ -508,14 +554,12 @@ class RAGService:
                         has_keyword_hit = True
                         break
                     # Keyword is substring of expanded (e.g., "焦虑" in "焦虑情绪")
-                    # Only if keyword is at least 3 chars to avoid false positives
                     if len(kw_lower) >= 3 and kw_lower in expanded:
                         score += 2.0
                         has_keyword_hit = True
                         break
 
         # B. Title matching (medium weight: 1.5 per hit)
-        has_title_hit = False
         if title:
             title_lower = title.lower()
             for expanded in expanded_keywords:
@@ -523,20 +567,19 @@ class RAGService:
                     score += 1.5
                     has_title_hit = True
 
-        # C. Content matching (lower weight: 0.2 per hit, max 1.0)
-        # Short-circuit: skip expensive content scan if no keyword/title hits
-        # unless domain_boost is high enough to matter on its own
-        if content and (has_keyword_hit or has_title_hit or domain_boost >= 2.0):
+        # C. Content matching (lower weight: 0.3 per hit, max 1.5)
+        # Only boost if there's already a keyword or title hit
+        if content and (has_keyword_hit or has_title_hit):
             content_lower = content.lower()
             content_hits = 0
             for expanded in expanded_keywords:
-                # Require at least 2 chars for content matching to reduce false positives
                 if len(expanded) >= 2 and expanded in content_lower:
                     content_hits += 1
-            score += min(content_hits * 0.2, 1.0)
+            score += min(content_hits * 0.3, 1.5)
 
-        # Apply domain boost
-        score += domain_boost
+        # Apply domain boost only if there's some relevance signal
+        if has_keyword_hit or has_title_hit:
+            score += domain_boost
 
         return score
 
@@ -558,7 +601,7 @@ class RAGService:
 
     def _simple_search(self, query: str, top_k: int = 3) -> List[Dict[str, str]]:
         """Keyword-based search with synonym expansion and content matching.
-        Returns core knowledge first, then supplementary from large datasets."""
+        Core knowledge is preferred; lazy files only supplement when core has no strong match."""
         query_lower = query.lower()
 
         # Check search cache
@@ -568,35 +611,35 @@ class RAGService:
 
         # Expand query with synonyms and jieba
         expanded_keywords = self._expand_query(query_lower)
-
         if not expanded_keywords:
             expanded_keywords = {query_lower}
 
-        # Phase 1: Search ONLY core knowledge (knowledge.json entries)
+        # Phase 1: Search core knowledge (knowledge.json entries)
         core_results = self._search_entries(
             self.knowledge_base[:self._core_count], expanded_keywords, query_lower
         )
 
-        # If core has strong matches (score >= 5.0), use those
-        if core_results and core_results[0]["score"] >= 5.0:
+        # If core has good matches (score >= 3.0 = at least one keyword hit), use those
+        if core_results and core_results[0]["score"] >= 3.0:
             result = core_results[:top_k]
+            if len(self._search_cache) >= self._MAX_CACHE_SIZE:
+                self._search_cache.clear()
             self._search_cache[cache_key] = result
             return result
 
-        # Phase 2: Search lazy-loaded files incrementally
-        extended_results = []
+        # Phase 2: Search lazy-loaded files to supplement
         for filename in self.LAZY_FILES:
             self._load_lazy_file(filename)
 
-        # Search all currently loaded lazy entries
-        seen_ids = set()
+        extended_results = []
+        seen_titles = set()
         for entry in self.knowledge_base[self._core_count:]:
-            entry_id = entry.get("id", "")
-            if entry_id in seen_ids:
+            entry_title = entry.get("title", "")
+            if entry_title in seen_titles:
                 continue
-            seen_ids.add(entry_id)
+            seen_titles.add(entry_title)
             score = self._score_entry(entry, expanded_keywords, query_lower)
-            if score > 2.0:
+            if score > 3.0:  # Require at least a keyword-level hit
                 extended_results.append({
                     "title": entry.get("title", ""),
                     "content": entry.get("content", ""),
@@ -605,32 +648,18 @@ class RAGService:
                 })
         extended_results.sort(key=lambda x: x["score"], reverse=True)
 
-        # If we found good results in lazy files, no need to load more
-        if not extended_results:
-            # Load remaining files and try again
-            self._ensure_lazy_loaded()
-            for entry in self.knowledge_base[self._core_count:]:
-                entry_id = entry.get("id", "")
-                if entry_id in seen_ids:
-                    continue
-                seen_ids.add(entry_id)
-                score = self._score_entry(entry, expanded_keywords, query_lower)
-                if score > 2.0:
-                    extended_results.append({
-                        "title": entry.get("title", ""),
-                        "content": entry.get("content", ""),
-                        "score": score,
-                        "id": entry_id
-                    })
-            extended_results.sort(key=lambda x: x["score"], reverse=True)
-
-        # Merge: 1 core + 2 extended, or all core if no extended
-        merged = []
-        if core_results:
-            merged.append(core_results[0])
-        merged.extend(extended_results[:top_k - len(merged)])
+        # Merge: prefer core, supplement with extended
+        merged = list(core_results[:top_k])  # Include all core results even if low score
+        for ext in extended_results:
+            if len(merged) >= top_k:
+                break
+            # Don't duplicate if core already has same title
+            if not any(m["title"] == ext["title"] for m in merged):
+                merged.append(ext)
 
         result = merged[:top_k]
+        if len(self._search_cache) >= self._MAX_CACHE_SIZE:
+            self._search_cache.clear()
         self._search_cache[cache_key] = result
         return result
 

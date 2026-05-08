@@ -431,17 +431,6 @@ class PDFReportGenerator:
             import traceback
             traceback.print_exc()
             return None
-    
-    def _translate_end_type(self, end_type: str) -> str:
-        """Translate end type to Chinese."""
-        translations = {
-            "GOAL_ACHIEVED": "目标达成",
-            "TIME_LIMIT": "时间到达",
-            "SAFETY": "安全干预",
-            "INVALID": "无效对话",
-            "NONE": "未知",
-        }
-        return translations.get(end_type, end_type or "未知")
 
 
 # Singleton instance

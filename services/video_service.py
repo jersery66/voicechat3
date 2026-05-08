@@ -3,7 +3,10 @@ import time
 import hashlib
 import numpy as np
 import pygame
-from moviepy import VideoFileClip
+try:
+    from moviepy import VideoFileClip
+except ImportError:
+    from moviepy.editor import VideoFileClip
 import threading
 
 class VideoPlayer:

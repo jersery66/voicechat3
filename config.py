@@ -1,6 +1,7 @@
 # Voice Chat Application Configuration
 
 import os
+import glob as _glob
 
 # Application root (this file's directory)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -11,23 +12,158 @@ PROGRAM_ROOT = os.path.dirname(APP_ROOT)
 # _BASE_DIR alias for backward compatibility
 _BASE_DIR = PROGRAM_ROOT
 
-# ============== Paths ==============
+
+# ============== Auto-detect Models ==============
+def _find_dir(base, *candidates):
+    """Return the first existing directory from candidates under base."""
+    for c in candidates:
+        p = os.path.join(base, c) if not os.path.isabs(c) else c
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def _detect_funasr():
+    """Search for FunASR model in common locations."""
+    search_bases = [PROGRAM_ROOT, os.path.join(PROGRAM_ROOT, "CosyVoice")]
+    patterns = [
+        os.path.join("**", "Fun-ASR-Nano-2512"),
+        os.path.join("**", "FunASR*"),
+        os.path.join("**", "funasr*"),
+    ]
+    for base in search_bases:
+        for pat in patterns:
+            matches = _glob.glob(os.path.join(base, pat), recursive=True)
+            for m in matches:
+                if os.path.isdir(m) and os.path.exists(os.path.join(m, "model.py")):
+                    return m
+    return None
+
+
+def _detect_cosyvoice():
+    """Search for CosyVoice model directory."""
+    cosyvoice_base = _find_dir(PROGRAM_ROOT, "CosyVoice",
+                                os.path.join("qwen", "CosyVoice"))
+    if not cosyvoice_base:
+        return None, None
+    pretrained = os.path.join(cosyvoice_base, "pretrained_models")
+    if not os.path.isdir(pretrained):
+        return cosyvoice_base, None
+    # Prefer Fun-CosyVoice3-0.5B variants
+    for name in sorted(os.listdir(pretrained), reverse=True):
+        if "Fun-CosyVoice3" in name or "CosyVoice3" in name:
+            return cosyvoice_base, os.path.join(pretrained, name)
+    # Fallback to any model
+    for name in os.listdir(pretrained):
+        p = os.path.join(pretrained, name)
+        if os.path.isdir(p):
+            return cosyvoice_base, p
+    return cosyvoice_base, None
+
+
+def _detect_fireredtts():
+    """Search for FireRedTTS2 pretrained model."""
+    tts_root = _find_dir(PROGRAM_ROOT, "FireRedTTS2")
+    if not tts_root:
+        return None
+    # Check nested pretrained_models/pretrained_models first (contains .bin files)
+    nested = os.path.join(tts_root, "pretrained_models", "pretrained_models")
+    if os.path.isdir(nested) and any(f.endswith('.bin') for f in os.listdir(nested)):
+        return nested
+    # Check flat pretrained_models
+    flat = os.path.join(tts_root, "pretrained_models")
+    if os.path.isdir(flat) and any(f.endswith('.bin') for f in os.listdir(flat)):
+        return flat
+    return None
+
+
+def _detect_voice_prompt():
+    """Search for TTS voice prompt audio files."""
+    tts_root = _find_dir(PROGRAM_ROOT, "FireRedTTS2")
+    if not tts_root:
+        return None
+    # Check config-defined path first
+    candidates = [
+        os.path.join(tts_root, "examples", "chat_prompt", "zh", "S1.flac"),
+        os.path.join(tts_root, "examples", "prompt_1.wav"),
+        os.path.join(tts_root, "examples", "prompt_2.wav"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    # Search for any audio file in examples
+    for ext in ("*.flac", "*.wav"):
+        matches = _glob.glob(os.path.join(tts_root, "examples", "**", ext), recursive=True)
+        if matches:
+            return matches[0]
+    return None
+
+
+def _detect_ollama_model():
+    """Try to get the first available Ollama model."""
+    try:
+        import ollama
+        client = ollama.Client(host=OLLAMA_HOST)
+        models = client.list()
+        names = [m["name"] for m in models.get("models", [])]
+        if names:
+            return names[0]
+    except Exception:
+        pass
+    return None
+
+
+# --- Run detection ---
+_FUNASR_DETECTED = _detect_funasr()
+_COSYVOICE_BASE_DETECTED, _COSYVOICE_MODEL_DETECTED = _detect_cosyvoice()
+_FIREREDTTS_DETECTED = _detect_fireredtts()
+_VOICE_PROMPT_DETECTED = _detect_voice_prompt()
+_OLLAMA_DETECTED = _detect_ollama_model()
+
+
+# ============== Paths (auto-detected with fallbacks) ==============
 # FunASR STT Model
-FUNASR_MODEL_PATH = os.path.join(PROGRAM_ROOT, "qwen", "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512")
+FUNASR_MODEL_PATH = _FUNASR_DETECTED or os.path.join(
+    PROGRAM_ROOT, "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512")
 
 # FireRedTTS Model
-FIREREDTTS2_MODEL_PATH = os.path.join(PROGRAM_ROOT, "FireRedTTS2", "pretrained_models", "pretrained_models")
+FIREREDTTS2_MODEL_PATH = _FIREREDTTS_DETECTED or os.path.join(
+    PROGRAM_ROOT, "FireRedTTS2", "pretrained_models", "pretrained_models")
 
 # CosyVoice3 Model
-COSYVOICE_BASE_DIR = os.path.join(PROGRAM_ROOT, "qwen", "CosyVoice")
-COSYVOICE_MODEL_PATH = os.path.join(COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B")
+COSYVOICE_BASE_DIR = _COSYVOICE_BASE_DETECTED or os.path.join(PROGRAM_ROOT, "CosyVoice")
+COSYVOICE_MODEL_PATH = _COSYVOICE_MODEL_DETECTED or os.path.join(
+    COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B")
+
+# Voice prompt audio for TTS voice cloning
+VOICE_PROMPT_PATH = _VOICE_PROMPT_DETECTED or os.path.join(
+    PROGRAM_ROOT, "FireRedTTS2", "examples", "prompt_1.wav")
 
 # Data Storage Root
 DATA_ROOT = os.path.join(PROGRAM_ROOT, "voice_chat_data")
 
 # ============== Ollama ==============
-OLLAMA_MODEL = "qwen2.5:72b"
+OLLAMA_MODEL = _OLLAMA_DETECTED or "gemma4:e2b"
 OLLAMA_HOST = "http://localhost:11434"
+
+
+def print_model_status():
+    """Print detected model configuration."""
+    print("=" * 50)
+    print("Model Auto-Detection Results")
+    print("=" * 50)
+
+    def _status(path, label):
+        exists = os.path.exists(path) if path else False
+        tag = "OK" if exists else "MISSING"
+        print(f"  [{tag}] {label}: {path or 'not found'}")
+
+    _status(FUNASR_MODEL_PATH, "FunASR STT")
+    _status(FIREREDTTS2_MODEL_PATH, "FireRedTTS2")
+    _status(COSYVOICE_MODEL_PATH, "CosyVoice3")
+    _status(VOICE_PROMPT_PATH, "Voice Prompt")
+    print(f"  [{'OK' if _OLLAMA_DETECTED else 'FALLBACK'}] Ollama Model: {OLLAMA_MODEL}")
+    print("=" * 50)
 SYSTEM_PROMPT = """
 ## 核心定位与目标
 你代号**心医生**，是强制隔离戒毒所里经验丰富的心理咨询师；当前场景为**面对面私密谈话室**，对话对象是戒毒人员；核心目标是**建立安全依恋关系，降低对方防御心理**，**严禁教育或说教**。
@@ -217,7 +353,7 @@ TRANSITION_PROMPT = """你是温和的心理咨询师。来访者刚做完一段
 
 只输出过渡语本身，不要任何解释。"""
  
-SUGGESTIONS_PROMPT = ADVICE_PROMPT = """你是温和专业的心理咨询师。来访者目前身处全封闭的戒治环境（无手机、无网络、活动受限）。
+SUGGESTIONS_PROMPT = """你是温和专业的心理咨询师。来访者目前身处全封闭的戒治环境（无手机、无网络、活动受限）。
 请根据对话记录，给来访者4-6条简短建议。
 
 【对话记录】
@@ -303,15 +439,8 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 CHUNK_SIZE = 1024
 
-# Path to reference audio files (wav/flac) for voice cloning.
-# Supports Dictionary for multiple emotions or String for single prompt.
-# If Dictionary: Keys must match emotion tags (e.g., 'happy', 'sad', 'comfort', 'concern').
-# 'default' key is required as fallback.
-VOICE_PROMPT_PATH = os.path.join(PROGRAM_ROOT, "FireRedTTS2", "examples", "chat_prompt", "zh", "S1.flac")
-
-# Text content of the reference audio file. 
-# Should ideally match the emotional tone, but we use generic text for now.
-VOICE_PROMPT_TEXT = "[S1]当阳光穿过斑驳的树影，洒向地面，属于洱海的浪漫邂逅，就此蔓延。"
+# VOICE_PROMPT_PATH is auto-detected above. Fallback text for voice cloning:
+VOICE_PROMPT_TEXT = "当阳光穿过斑驳的树影，洒向地面，属于洱海的浪漫邂逅，就此蔓延。"
 
 # ============== UI ==============
 APP_NAME = "心医生聊天室"
