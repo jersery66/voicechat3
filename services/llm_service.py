@@ -12,14 +12,16 @@ from config import OLLAMA_MODEL, OLLAMA_HOST, SYSTEM_PROMPT
 
 class LLMService:
     """LLM service using Ollama for text generation."""
-    
+
+    MAX_HISTORY_TURNS = 20  # Summarize when conversation exceeds this many turns
+
     def __init__(self, model: str = None, host: str = OLLAMA_HOST):
         self.host = host
         self.client = ollama.Client(host=host)
         self.conversation_history: List[Dict[str, str]] = []
         self.system_prompt = SYSTEM_PROMPT
         self.history_context: str = ""
-        
+
         # Auto-detect model if not specified
         if model is None:
             available = self.get_available_models()
@@ -101,7 +103,28 @@ class LLMService:
             "role": "assistant",
             "content": full_response
         })
+
+        # Compress history if too long
+        self._maybe_summarize()
         
+    def _maybe_summarize(self):
+        """Compress conversation history using 3B agent when it gets too long."""
+        if len(self.conversation_history) < self.MAX_HISTORY_TURNS * 2:
+            return  # Not long enough yet
+
+        try:
+            from services.agent_service import get_agent_service
+            agent = get_agent_service()
+            summary = agent.summarize_history(self.conversation_history)
+            if summary:
+                # Keep last 4 turns + replace older history with summary
+                recent = self.conversation_history[-8:]
+                self.history_context = f"\n\n【之前的对话摘要】\n{summary}"
+                self.conversation_history = recent
+                print(f"[AGENT] History compressed: {len(self.conversation_history) + 8} turns → summary + {len(recent)} recent turns")
+        except Exception as e:
+            print(f"[WARNING] History summarization failed: {e}")
+
     def chat_sync(self, user_message: str) -> str:
         """
         Send a message and return the complete response.

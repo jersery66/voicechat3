@@ -1,4 +1,4 @@
 # TTS Service - Switcher
-# This file currently redirects to the FireRedTTS2 implementation.
+# This file currently redirects to the CosyVoice3 implementation.
 
-from services.tts_service_firered import TTSService, get_tts_service
+from services.tts_service_cosyvoice import TTSService, get_tts_service

@@ -22,7 +22,7 @@ from config import (
     APP_NAME, CRISIS_HOTLINES, GREETING_MESSAGE, GREETING_VARIANTS,
     POST_RELAXATION_MESSAGE, FILL_INFO_PROMPT, TRANSITION_PROMPT,
     SUGGESTIONS_PROMPT, CONTINUE_CHAT_MESSAGE, MIN_ROUNDS_FOR_RELAXATION,
-    POST_RELAXATION_TIMEOUT, TIMEOUT_END_MESSAGE, VOICE_PROMPT_PATH, VOICE_PROMPT_TEXT
+    POST_RELAXATION_TIMEOUT, TIMEOUT_END_MESSAGE
 )
 
 from .control_panel import ControlPanel
@@ -48,6 +48,8 @@ class MainWindow(QMainWindow):
         self.data_manager = None
         self.report_service = None
         self.rag_service = None
+        self.agent_service = None
+        self.session_emotions = []  # Accumulated emotion tags for report
 
         # State
         self.is_recording = False
@@ -294,8 +296,8 @@ class MainWindow(QMainWindow):
                 self.data_manager.set_user_id(user_id)
                 self.data_manager.save_user_message(audio_data, text)
 
-            # 3. LLM generation
-            self.processing_queue.put(("status", "正在思考..."))
+            # Intent + Emotion: parallel 3B calls
+            intent, emotion_result = self._classify_intent_and_emotion(text)
 
             system_suffix = ""
             current_rounds = self.report_service.get_round_count() if self.report_service else 0
@@ -331,6 +333,7 @@ class MainWindow(QMainWindow):
                 stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer)
                 stream_buffer = re.sub(r'\[END_[A-Z_]+\]', '', stream_buffer)
                 stream_buffer = re.sub(r'【.*?】', '', stream_buffer)
+                stream_buffer = re.sub(r'\[(?:breath|laughter)\]', '', stream_buffer)
 
                 # Split on |||
                 if not found_separator and '|||' in stream_buffer:
@@ -363,6 +366,12 @@ class MainWindow(QMainWindow):
             clean_spoken = re.sub(r'【.*?】', '', clean_spoken).strip()
 
             self.processing_queue.put(("clean_last_ai", clean_spoken))
+
+            # TTS text: keep [breath]/[laughter] for CosyVoice, strip the rest
+            tts_text = re.sub(r'\[REC_[A-Z_]+\]', '', spoken_text)
+            tts_text = re.sub(r'\[END_[A-Z_]+\]', '', tts_text)
+            tts_text = re.sub(r'<\|[^|]+\|>', '', tts_text)
+            tts_text = re.sub(r'【.*?】', '', tts_text).strip()
 
             # Check for session end tags
             end_patterns = {
@@ -399,9 +408,9 @@ class MainWindow(QMainWindow):
 
             # 4. TTS
             self.processing_queue.put(("status", "正在播放..."))
-            if self.tts_service and clean_spoken:
+            if self.tts_service and tts_text:
                 try:
-                    self.tts_service.generate_and_play(clean_spoken)
+                    self.tts_service.generate_and_play(tts_text)
                 except Exception as e:
                     print(f"TTS error: {e}")
 
@@ -446,8 +455,8 @@ class MainWindow(QMainWindow):
                 self.data_manager.set_user_id(user_id)
                 self.data_manager.save_user_message(None, text)
 
-            # LLM generation
-            self.processing_queue.put(("status", "正在思考..."))
+            # Intent + Emotion: parallel 3B calls
+            intent, emotion_result = self._classify_intent_and_emotion(text)
 
             system_suffix = ""
             current_rounds = self.report_service.get_round_count() if self.report_service else 0
@@ -478,6 +487,7 @@ class MainWindow(QMainWindow):
                 stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer)
                 stream_buffer = re.sub(r'\[END_[A-Z_]+\]', '', stream_buffer)
                 stream_buffer = re.sub(r'【.*?】', '', stream_buffer)
+                stream_buffer = re.sub(r'\[(?:breath|laughter)\]', '', stream_buffer)
 
                 if not found_separator and '|||' in stream_buffer:
                     parts = stream_buffer.split('|||', 1)
@@ -722,13 +732,25 @@ class MainWindow(QMainWindow):
             self.llm_service.warmup()
             self.processing_queue.put(("loading_progress", 90))
 
+            # Step 2.5: Agent (3B routing model)
+            try:
+                from services.agent_service import get_agent_service
+                self.agent_service = get_agent_service()
+                if self.agent_service.is_available():
+                    print("[INFO] Agent service (3B) ready")
+                else:
+                    print("[WARNING] 3B agent model not available, using keyword fallback")
+            except Exception as e:
+                print(f"[WARNING] Agent service init failed: {e}")
+                self.agent_service = None
+
             # Step 3: Data + Report + RAG
             self.processing_queue.put(("loading_step", "步骤 3/3: 初始化数据"))
             self.processing_queue.put(("status", "正在初始化数据管理..."))
             self.data_manager = DataManager()
             self.data_manager.start_new_session()
 
-            self.report_service = ReportService(self.llm_service)
+            self.report_service = ReportService(self.llm_service, agent_service=self.agent_service)
             self.report_service.start_session()
             self.session_ended = False
 
@@ -764,6 +786,7 @@ class MainWindow(QMainWindow):
 
     def _start_new_session(self):
         self.chat_panel.clear_chat()
+        self.session_emotions = []
         if self.llm_service:
             self.llm_service.reset_conversation()
         if self.data_manager:
@@ -841,12 +864,14 @@ class MainWindow(QMainWindow):
                 print(f"Greeting TTS error: {e}")
 
     def _play_post_relaxation_greeting(self):
+        import random
         if self.tts_service and POST_RELAXATION_MESSAGE:
-            self.chat_panel.add_system_message(POST_RELAXATION_MESSAGE)
+            message = random.choice(POST_RELAXATION_MESSAGE)
+            self.chat_panel.add_system_message(message)
             try:
                 threading.Thread(
                     target=self.tts_service.generate_and_play,
-                    args=(POST_RELAXATION_MESSAGE,), daemon=True
+                    args=(message,), daemon=True
                 ).start()
             except Exception as e:
                 print(f"Post-relaxation TTS error: {e}")
@@ -915,6 +940,7 @@ class MainWindow(QMainWindow):
         text = re.sub(r'\[REC_[A-Z_]+\]', '', text)
         text = re.sub(r'\s*<\|[^>]+\|>\s*', '', text)
         text = re.sub(r'\[END_[A-Z_]+\]', '', text)
+        text = re.sub(r'\[(?:breath|laughter)\]', '', text)
         return text.strip()
 
     def _get_relaxation_info_str(self):
@@ -965,28 +991,64 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
         return None
 
+    def _classify_intent_and_emotion(self, text: str) -> tuple:
+        """Run intent + emotion classification in parallel via 3B agent. Returns (intent_str, emotion_result)."""
+        intent_result = {"intent": "counseling", "confidence": 1.0}
+        emotion_result = {"emotion": "neutral", "intensity": 0.0}
+        if self.agent_service:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {
+                    executor.submit(self.agent_service.classify_intent, text): "intent",
+                    executor.submit(self.agent_service.detect_emotion, text): "emotion",
+                }
+                for future in as_completed(futures):
+                    tag = futures[future]
+                    try:
+                        result = future.result()
+                        if tag == "intent":
+                            intent_result = result
+                        else:
+                            emotion_result = result
+                            self.session_emotions.append({"role": "user", **emotion_result})
+                    except Exception as e:
+                        print(f"[WARNING] {tag} detection failed: {e}")
+        intent = intent_result.get("intent", "counseling")
+        print(f"[AGENT] Intent: {intent} ({intent_result.get('confidence', 0):.2f}) | Emotion: {emotion_result.get('emotion', 'neutral')} ({emotion_result.get('intensity', 0):.2f})")
+        return intent, emotion_result
+
     def _infer_relaxation_tag(self, spoken_text, allow_relaxation, current_rounds):
-        """Infer relaxation recommendation tag from spoken text."""
+        """Infer relaxation recommendation tag from spoken text using 3B agent."""
         if not allow_relaxation:
             return None
-        if "呼吸" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-            tag = "[REC_BREATHING]"
-        elif "肌肉" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-            tag = "[REC_MUSCLE]"
-        elif "冥想" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-            tag = "[REC_MEDITATION]"
-        elif "游戏" in spoken_text:
-            tag = "[REC_GAME]"
-        elif "冥想" in spoken_text:
-            tag = "[REC_MEDITATION]"
-        elif "呼吸" in spoken_text:
-            tag = "[REC_BREATHING]"
-        elif "肌肉" in spoken_text:
-            tag = "[REC_MUSCLE]"
-        else:
-            return None
-        print(f"[DEBUG] Inferred relaxation tag: {tag}")
-        self._last_relaxation_recommendation_round = current_rounds
+        # Try 3B agent first, fallback to keyword matching
+        tag = None
+        if self.agent_service:
+            try:
+                tag = self.agent_service.infer_relaxation_tag(spoken_text)
+            except Exception as e:
+                print(f"[WARNING] Agent relaxation inference failed: {e}")
+
+        if tag is None:
+            # Keyword fallback
+            if "呼吸" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+                tag = "[REC_BREATHING]"
+            elif "肌肉" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+                tag = "[REC_MUSCLE]"
+            elif "冥想" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
+                tag = "[REC_MEDITATION]"
+            elif "游戏" in spoken_text:
+                tag = "[REC_GAME]"
+            elif "冥想" in spoken_text:
+                tag = "[REC_MEDITATION]"
+            elif "呼吸" in spoken_text:
+                tag = "[REC_BREATHING]"
+            elif "肌肉" in spoken_text:
+                tag = "[REC_MUSCLE]"
+
+        if tag:
+            print(f"[DEBUG] Inferred relaxation tag: {tag}")
+            self._last_relaxation_recommendation_round = current_rounds
         return tag
 
     def _handle_session_end(self, end_type, relaxation_tag=None):
@@ -1032,13 +1094,15 @@ class MainWindow(QMainWindow):
                 self.processing_queue.put(("start_ai_message", None))
                 full_feedback = ""
                 stream_gen = self.report_service.generate_visitor_feedback(
-                    conversation_history, end_type, relaxation_rec, stream=True
+                    conversation_history, end_type, relaxation_rec, stream=True,
+                    session_emotions=self.session_emotions
                 )
                 for chunk in stream_gen:
                     full_feedback += chunk
                     clean = re.sub(r'<\|[^>]+\|>', '', chunk)
                     clean = re.sub(r'\[REC_[A-Z_]+\]', '', clean)
                     clean = re.sub(r'\[END_[A-Z_]+\]', '', clean)
+                    clean = re.sub(r'\[(?:breath|laughter)\]', '', clean)
                     if clean:
                         self.processing_queue.put(("stream_text", clean))
                 self.processing_queue.put(("finish_streaming", None))
@@ -1047,7 +1111,8 @@ class MainWindow(QMainWindow):
                 relax_str = self._get_relaxation_info_str()
                 researcher_report = self.report_service.generate_researcher_report(
                     conversation_history, user_id, end_type,
-                    user_info=current_user_info, relaxation_info=relax_str
+                    user_info=current_user_info, relaxation_info=relax_str,
+                    session_emotions=self.session_emotions
                 )
                 if isinstance(researcher_report, dict):
                     researcher_report["relaxation_completed"] = True

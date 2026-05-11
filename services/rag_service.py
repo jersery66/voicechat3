@@ -644,7 +644,7 @@ class RAGService:
                     "title": entry.get("title", ""),
                     "content": entry.get("content", ""),
                     "score": score,
-                    "id": entry_id
+                    "id": entry.get("id", "")
                 })
         extended_results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -673,8 +673,27 @@ class RAGService:
         Returns:
             Context string to inject into LLM prompt, or None if not needed
         """
-        if not self._intent_routing(user_text):
-            return None
+        # Fast rule-based check first, then 3B agent for ambiguous cases
+        if self._intent_routing(user_text):
+            pass  # Rule-based matched, proceed to search
+        else:
+            # Pre-filter: skip 3B call for trivial inputs
+            stripped = user_text.strip()
+            if len(stripped) < 5:
+                return None
+            # Common casual responses that don't need RAG
+            _CASUAL = {"嗯", "好的", "是的", "对", "不是", "没有", "好吧", "知道了", "明白", "哦", "嗯嗯", "哈哈", "呵呵"}
+            if stripped in _CASUAL:
+                return None
+            # Rule-based didn't match — try 3B agent for implicit emotions
+            try:
+                from services.agent_service import get_agent_service
+                agent = get_agent_service()
+                if not agent.classify_rag_intent(user_text):
+                    return None
+            except Exception as e:
+                print(f"[WARNING] Agent RAG routing failed: {e}")
+                return None
 
         print(f"[INFO] RAG triggered for: {user_text[:50]}...")
 

@@ -61,44 +61,6 @@ def _detect_cosyvoice():
     return cosyvoice_base, None
 
 
-def _detect_fireredtts():
-    """Search for FireRedTTS2 pretrained model."""
-    tts_root = _find_dir(PROGRAM_ROOT, "FireRedTTS2")
-    if not tts_root:
-        return None
-    # Check nested pretrained_models/pretrained_models first (contains .bin files)
-    nested = os.path.join(tts_root, "pretrained_models", "pretrained_models")
-    if os.path.isdir(nested) and any(f.endswith('.bin') for f in os.listdir(nested)):
-        return nested
-    # Check flat pretrained_models
-    flat = os.path.join(tts_root, "pretrained_models")
-    if os.path.isdir(flat) and any(f.endswith('.bin') for f in os.listdir(flat)):
-        return flat
-    return None
-
-
-def _detect_voice_prompt():
-    """Search for TTS voice prompt audio files."""
-    tts_root = _find_dir(PROGRAM_ROOT, "FireRedTTS2")
-    if not tts_root:
-        return None
-    # Check config-defined path first
-    candidates = [
-        os.path.join(tts_root, "examples", "chat_prompt", "zh", "S1.flac"),
-        os.path.join(tts_root, "examples", "prompt_1.wav"),
-        os.path.join(tts_root, "examples", "prompt_2.wav"),
-    ]
-    for p in candidates:
-        if os.path.isfile(p):
-            return p
-    # Search for any audio file in examples
-    for ext in ("*.flac", "*.wav"):
-        matches = _glob.glob(os.path.join(tts_root, "examples", "**", ext), recursive=True)
-        if matches:
-            return matches[0]
-    return None
-
-
 def _detect_ollama_model():
     """Try to get the first available Ollama model."""
     try:
@@ -116,8 +78,6 @@ def _detect_ollama_model():
 # --- Run detection ---
 _FUNASR_DETECTED = _detect_funasr()
 _COSYVOICE_BASE_DETECTED, _COSYVOICE_MODEL_DETECTED = _detect_cosyvoice()
-_FIREREDTTS_DETECTED = _detect_fireredtts()
-_VOICE_PROMPT_DETECTED = _detect_voice_prompt()
 _OLLAMA_DETECTED = _detect_ollama_model()
 
 
@@ -126,18 +86,13 @@ _OLLAMA_DETECTED = _detect_ollama_model()
 FUNASR_MODEL_PATH = _FUNASR_DETECTED or os.path.join(
     PROGRAM_ROOT, "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512")
 
-# FireRedTTS Model
-FIREREDTTS2_MODEL_PATH = _FIREREDTTS_DETECTED or os.path.join(
-    PROGRAM_ROOT, "FireRedTTS2", "pretrained_models", "pretrained_models")
-
 # CosyVoice3 Model
 COSYVOICE_BASE_DIR = _COSYVOICE_BASE_DETECTED or os.path.join(PROGRAM_ROOT, "CosyVoice")
 COSYVOICE_MODEL_PATH = _COSYVOICE_MODEL_DETECTED or os.path.join(
-    COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B")
+    COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B-2512")
 
-# Voice prompt audio for TTS voice cloning
-VOICE_PROMPT_PATH = _VOICE_PROMPT_DETECTED or os.path.join(
-    PROGRAM_ROOT, "FireRedTTS2", "examples", "prompt_1.wav")
+# Voice prompt audio for TTS voice cloning (CosyVoice zero-shot)
+VOICE_PROMPT_PATH = os.path.join(PROGRAM_ROOT, "voicechat", "data", "s1.mp3")
 
 # Data Storage Root
 DATA_ROOT = os.path.join(PROGRAM_ROOT, "voice_chat_data")
@@ -159,7 +114,6 @@ def print_model_status():
         print(f"  [{tag}] {label}: {path or 'not found'}")
 
     _status(FUNASR_MODEL_PATH, "FunASR STT")
-    _status(FIREREDTTS2_MODEL_PATH, "FireRedTTS2")
     _status(COSYVOICE_MODEL_PATH, "CosyVoice3")
     _status(VOICE_PROMPT_PATH, "Voice Prompt")
     print(f"  [{'OK' if _OLLAMA_DETECTED else 'FALLBACK'}] Ollama Model: {OLLAMA_MODEL}")
@@ -176,7 +130,7 @@ SYSTEM_PROMPT = """
 3.  如需推荐放松训练，**必须在口语回复的最末尾加上对应的控制标签（[REC_BREATHING], [REC_MUSCLE], [REC_MEDITATION]）**，否则系统无法识别！
 
 **正确示例**：
-【情绪识别】焦虑、身体紧张【状态评估】防御中【变革话语】无【策略选择】情感反映+推荐放松训练|||<|emotion_comfort|>身上紧得很是吧？<|breath|>试试左边的呼吸放松按钮。[REC_BREATHING]
+【情绪识别】焦虑、身体紧张【状态评估】防御中【变革话语】无【策略选择】情感反映+推荐放松训练|||身上紧得很是吧？[breath]试试左边的呼吸放松按钮。[REC_BREATHING]
 **错误示例**：
 - 仅输出口语内容（缺少 `|||` 及左侧分析）
 - 口语内容放在 `|||` 左侧
@@ -220,31 +174,11 @@ SYSTEM_PROMPT = """
 3.  **放大反映 (Amplified Reflection)**：对抗拒强烈的用户，用夸张话术促使用户反驳，示例“听上去你觉得这辈子除了吸毒，别的啥都没劲儿了，是这个意思吗？”
 4.  **摘要 (Summaries)**：用户表述较多时，做简短情感摘要，示例“你刚才说在这儿待着憋得慌，还想家，是吧？”
 
-### （三） TTS 情绪与副语言标记使用规范
-1.  **语气标记使用规则**
-    - 位置要求：**必须作为 ||| 右侧口语内容的首个元素**，紧跟 `|||` 之后，不可插入句中
-    - 数量限制：**仅限1个**，与用户当前情绪匹配
-    - 可选类型及适用场景：
-      - `<|emotion_neutral|>`：常规对话、无明显情绪波动时（默认）
-      - `<|emotion_sad|>`：共情用户痛苦经历、悲伤无助时
-      - `<|emotion_comfort|>`：安抚情绪低落、焦虑、委屈的用户时
-      - `<|emotion_concern|>`：关切询问用户身体感受、状态时；危机干预时（替代严肃语气，更具包容性）
-      - `<|emotion_neutral|>`：强调安全规则、严肃沟通时（替代serious，保持平稳）
-      - `<|emotion_confuse|>`：用户表达困惑、不解时
-      - `<|emotion_angry|>`：用户情绪愤怒、不满，需共情而非对抗时
-      - `<|emotion_surprise|>`：用户分享意外情况、突发感受时
-      - `<|emotion_nervous|>`：用户表现紧张、心慌时
-      - `<|emotion_apology|>`：需要表达歉意、共情愧疚感时
-2.  **副语言标记使用规则**
-    - 位置要求：可嵌入文本中间的对应语义位置，模拟自然发声
-    - 数量限制：**最多使用2个**，适度添加，不用每句都加
-    - 可选类型及适用场景：
-      - `<|breath|>`：停顿思考、温和回应、舒缓氛围时
-      - `<|quick_breath|>`：共情用户紧张、急促、心慌状态时
-      - `<|sigh|>`：共情用户无奈、委屈、压抑的感受时
-      - `<|hem|>`：转移话题、轻轻引起用户注意时
-      - `<|laugh_speak|>文本<|/laugh_speak|>`：轻松鼓励用户、缓解对话紧张感时（成对使用，包裹短句）
-3.  **标记使用禁忌**：禁止使用规范外的自定义标记；禁止 `laugh_speak` 标签不成对出现
+### （三） 语音合成标记使用规范
+你的回复在 `|||` 之后的部分会被语音合成。可以使用以下 CosyVoice 原生标记增强语音表现力：
+- `[breath]`：在需要停顿、换气、思考的位置插入，模拟自然呼吸
+- `[laughter]`：在需要轻松笑声的位置插入，缓解对话紧张感
+**限制**：每句最多使用1-2个标记，适度添加，不用每句都加。禁止使用其他标记。
 
 ### （四） 特殊场景应对策略
 1.  **放松训练推荐（生理放松需求）**
@@ -290,7 +224,7 @@ SYSTEM_PROMPT = """
 
 2.  **结束方式要求**
     - 口语话术：温暖总结交流+1-2个具体建议，口语化像老朋友道别
-    - 正确示例：用户说“好多了” → 回复“<|emotion_happy|>嗯，能感觉到你松快了不少。以后感觉紧的时候，就像今天这样深呼吸，管用的。有事儿随时来找我唠。[END_GOAL_ACHIEVED]”
+    - 正确示例：用户说”好多了” → 回复”嗯，能感觉到你松快了不少。以后感觉紧的时候，就像今天这样深呼吸，管用的。有事儿随时来找我唠。[END_GOAL_ACHIEVED]”
     - 禁止话术：“哪部分最有帮助？”“结束前你感觉如何？”等生硬提问
 
 3.  **结束标签（5选1，放口语回复末尾）**
@@ -313,25 +247,25 @@ SYSTEM_PROMPT = """
 
 # Opening greeting message - AI introduces itself when session starts
 GREETING_VARIANTS = [
-    "<|emotion_neutral|> 你好啊，我是心医生。今天有啥想聊的，或者身上哪儿不痛快？就随便唠唠。",
-    "<|emotion_comfort|> 来了啊，我是心医生。今儿感觉怎么样？",
-    "<|emotion_neutral|> 你好，我是心医生。咱们就当闲聊，聊点开心的不开心的都行。",
-    "<|emotion_comfort|> 我是心医生，你好。心里有啥堵得慌的事儿，跟我说说？",
-    "<|emotion_neutral|> 咱们又见面了，我是心医生。别拘束，跟老朋友聊天，说说最近咋样？"
+    "你好啊，我是心医生。今天有啥想聊的，或者身上哪儿不痛快？就随便唠唠。",
+    "来了啊，我是心医生。今儿感觉怎么样？",
+    "你好，我是心医生。咱们就当闲聊，聊点开心的不开心的都行。",
+    "我是心医生，你好。心里有啥堵得慌的事儿，跟我说说？",
+    "咱们又见面了，我是心医生。别拘束，跟老朋友聊天，说说最近咋样？"
 ]
 GREETING_MESSAGE = GREETING_VARIANTS[0] # Fallback for legacy code
 
 # Post-relaxation greeting - AI asks about the experience after relaxation training
 # Post-relaxation greeting - AI asks about the experience after relaxation training
 POST_RELAXATION_MESSAGE = [
-    "<|emotion_comfort|> 做完啦，身上有没有舒服点呀？",
-    "<|emotion_comfort|> <|breath|> 现在心里没那么乱了吧？",
-    "<|emotion_neutral|> 这么一练，紧绷的劲儿下去点没？",
-    "<|emotion_concern|> 现在身体有没有松快些呀？",
-    "<|emotion_comfort|> 感觉怎么样，没那么憋得慌了吧？",
-    "<|emotion_neutral|> 做完这轮，肩颈那块松点了没？",
-    "<|emotion_comfort|> <|sigh|> 这会儿是不是舒坦点儿了？",
-    "<|emotion_comfort|> 缓过来没？身上没那么僵了吧？"
+    "做完啦，身上有没有舒服点呀？",
+    "[breath] 现在心里没那么乱了吧？",
+    "这么一练，紧绷的劲儿下去点没？",
+    "现在身体有没有松快些呀？",
+    "感觉怎么样，没那么憋得慌了吧？",
+    "做完这轮，肩颈那块松点了没？",
+    "[breath] 这会儿是不是舒坦点儿了？",
+    "缓过来没？身上没那么僵了吧？"
 ]
 FILL_INFO_PROMPT = "麻烦您先填一下左边的基本信息，填完之后点个确认，咱们就开始聊天。"
 
@@ -345,11 +279,10 @@ TRANSITION_PROMPT = """你是温和的心理咨询师。来访者刚做完一段
 2. 语气温和自然
 3. 询问感受并引出建议
 4. 禁止Emoji和Markdown
-5. 必须在开头嵌入1个TTS语气标记，如 `<|emotion_comfort|>`
 
 示例：
-"<|emotion_comfort|> 做完感觉怎么样？给你几点回去可以试试。"
-"<|emotion_comfort|> 身上松快点了吧？给你几个小建议。"
+"做完感觉怎么样？给你几点回去可以试试。"
+"身上松快点了吧？给你几个小建议。"
 
 只输出过渡语本身，不要任何解释。"""
  
@@ -366,15 +299,11 @@ SUGGESTIONS_PROMPT = """你是温和专业的心理咨询师。来访者目前�
 4. 每条12-15字，总长度40-800字
 5. 语气温和自然，像聊天，禁用专业术语
 6. 不要编号，用"、"分隔所有建议，适配口语朗读节奏
-7. 必须在建议开头嵌入1个TTS语气标记，固定使用 `<|emotion_comfort|>`（贴合戒治场景安抚需求）
-8. 可在任意2条建议中嵌入1个副语言标记（增强语音自然度），可选：
-   - `<|breath|>`：停顿舒缓处使用
-   - `<|sigh|>`：共情理解处使用
 
 【不同情绪场景参考示例】
-1. 来访者情绪低落/压抑：<|emotion_comfort|>晨起慢深呼吸5分钟缓心情<|sigh|>、难过时写日记撕掉释放、每天做10分钟室内慢走、睡前读几页书平静思绪
-2. 来访者焦虑/身体紧绷：<|emotion_comfort|>心慌时做3轮深呼吸<|breath|>、肩颈紧就做室内拉伸、烦躁时闭眼冥想2分钟、固定时间作息稳状态
-3. 来访者情绪平稳/有改变意愿：<|emotion_comfort|>每天抽10分钟室内活动<|breath|>、写日记记录小感受、早晚各1次短冥想、规律吃饭不熬夜
+1. 来访者情绪低落/压抑：晨起慢深呼吸5分钟缓心情、难过时写日记撕掉释放、每天做10分钟室内慢走、睡前读几页书平静思绪
+2. 来访者焦虑/身体紧绷：心慌时做3轮深呼吸、肩颈紧就做室内拉伸、烦躁时闭眼冥想2分钟、固定时间作息稳状态
+3. 来访者情绪平稳/有改变意愿：每天抽10分钟室内活动、写日记记录小感受、早晚各1次短冥想、规律吃饭不熬夜
 
 只输出建议，不要任何前缀。"""
 
@@ -387,24 +316,24 @@ POST_RELAXATION_TIMEOUT = 60
 
 # Message when user chooses to continue chatting after relaxation (with ending hint)
 CONTINUE_CHAT_MESSAGE = [
-    "<|emotion_neutral|> <|breath|> 那咱接着唠会儿。时间快到了，还有啥想说的不？",
-    "<|emotion_comfort|> 想继续聊的话也行。不过时间差不多了，你还有啥要说的？",
-    "<|emotion_neutral|> 那继续聊聊呗。时间快到啦，还有想说的吗？",
-    "<|emotion_neutral|> 行，那咱接着说。时间不早了，还有啥想唠的不？",
-    "<|emotion_neutral|> <|hem|> 那继续聊会儿吧。快到时间了，你还有啥想说的？"
+    "[breath] 那咱接着唠会儿。时间快到了，还有啥想说的不？",
+    "想继续聊的话也行。不过时间差不多了，你还有啥要说的？",
+    "那继续聊聊呗。时间快到啦，还有想说的吗？",
+    "行，那咱接着说。时间不早了，还有啥想唠的不？",
+    "那继续聊会儿吧。快到时间了，你还有啥想说的？"
 ]
 
 # Timeout auto-end message
 TIMEOUT_END_MESSAGE = [
-    "<|emotion_comfort|> <|sigh|> 看你没啥想说的了，今天就先到这儿吧。有事随时来找我唠。",
-    "<|emotion_neutral|> 好像没啥要聊的了哈，那今天就先这样吧。想说话了随时再来。",
-    "<|emotion_comfort|> 你这会儿没动静了，那今天就到这儿吧。有事随时来。",
-    "<|emotion_comfort|> 看你挺安静的，那今天就先唠到这。想聊了随时再来找我。",
-    "<|emotion_neutral|> 没啥别的要说的话，今天就先到这儿吧。随时都能来找我唠嗑。"
+    "[breath] 看你没啥想说的了，今天就先到这儿吧。有事随时来找我唠。",
+    "好像没啥要聊的了哈，那今天就先这样吧。想说话了随时再来。",
+    "你这会儿没动静了，那今天就到这儿吧。有事随时来。",
+    "看你挺安静的，那今天就先唠到这。想聊了随时再来找我。",
+    "没啥别的要说的话，今天就先到这儿吧。随时都能来找我唠嗑。"
 ]
 
 # Session summary prompt - LLM generates comprehensive ending feedback
-SESSION_SUMMARY_PROMPT = """你是温和的心理咨询师。来访者刚做完放松训练，会话即将结束。
+SESSION_SUMMARY_PROMPT = “””你是温和的心理咨询师。来访者刚做完放松训练，会话即将结束。
 请根据对话记录和后续建议，生成一段会话总结，作为告别语朗读给来访者。
 
 【对话记录】
@@ -415,24 +344,19 @@ SESSION_SUMMARY_PROMPT = """你是温和的心理咨询师。来访者刚做完�
 
 【要求】
 1.  **内容详实且具体**：总结长度100-200字即可，关键是要言之有物。
-2.  **必须结合聊天内容**：具体引用对话中来访者提到的1-2个具体困扰或话题（例如“刚才你提到的关于家庭的压力...”），不要只说空泛的套话。
-3.  **必须结合后续建议**：自然地将【后续建议】中的核心点（如“深呼吸”、“写日记”等）融入到总结中，作为临别嘱托。
+2.  **必须结合聊天内容**：具体引用对话中来访者提到的1-2个具体困扰或话题（例如”刚才你提到的关于家庭的压力...”），不要只说空泛的套话。
+3.  **必须结合后续建议**：自然地将【后续建议】中的核心点（如”深呼吸”、”写日记”等）融入到总结中，作为临别嘱托。
 4.  包含三部分层层递进：
     - 情感反馈（肯定来访者的表达，点出其积极的一面）
     - 建议嘱托（结合上述后续建议，温和地提醒回去试试）
     - 温暖告别（像老朋友一样，给予希望和支持，欢迎随时回来）
 5.  语气温和自然，像老朋友唠嗑，不要有播音腔。
 6.  禁止Emoji和Markdown。
-7.  必须在总结文字**开头**嵌入1个TTS语气标记，适配告别场景，可选标记及适用场景如下：
-    - `<|emotion_comfort|>`：来访者情绪低落、焦虑时使用
-    - `<|emotion_neutral|>`：来访者情绪平稳时使用
-    - `<|emotion_happy|>`：来访者流露积极改变信号时使用
-8.  可在适当位置自然嵌入1-2个副语言标记（如`<|breath|>`或`<|sigh|>`）增强真实感。
 
 【输出示例】
-<|emotion_comfort|>今天咱们聊了不少，我知道你最近因为想家心里挺难受的，那种滋味确实不好过。<|breath|>但你能坐在这儿跟我说出来，已经很勇敢了。刚才给你的建议，比如晨起深呼吸和睡前写写感受，回去记得试试，哪怕每天几分钟也行。这里面的日子虽然慢，但别一直一个人憋着，随时都可以来找我唠。我会一直在这儿陪着你。相信自己，能熬过去的。
+今天咱们聊了不少，我知道你最近因为想家心里挺难受的，那种滋味确实不好过。但你能坐在这儿跟我说出来，已经很勇敢了。刚才给你的建议，比如晨起深呼吸和睡前写写感受，回去记得试试，哪怕每天几分钟也行。这里面的日子虽然慢，但别一直一个人憋着，随时都可以来找我唠。我会一直在这儿陪着你。相信自己，能熬过去的。
 
-只输出总结文字，不要任何前缀。"""
+只输出总结文字，不要任何前缀。”””
 
 # ============== Audio ==============
 SAMPLE_RATE = 16000
@@ -440,7 +364,7 @@ CHANNELS = 1
 CHUNK_SIZE = 1024
 
 # VOICE_PROMPT_PATH is auto-detected above. Fallback text for voice cloning:
-VOICE_PROMPT_TEXT = "当阳光穿过斑驳的树影，洒向地面，属于洱海的浪漫邂逅，就此蔓延。"
+VOICE_PROMPT_TEXT = "好的请找个舒适的位置坐下，闭上眼睛深吸一口气，然后慢慢呼出。"
 
 # ============== UI ==============
 APP_NAME = "心医生聊天室"
@@ -457,23 +381,116 @@ TIME_WARNING_MINUTES = 40           # Show warning at this point (5 min before l
 
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
-AGENT_MODEL = OLLAMA_MODEL
+AGENT_MODEL = "qwen2.5:3b-instruct"          # 小模型做路由/报告
 AGENT_MODEL_SERVER = OLLAMA_HOST.rstrip('/') + '/v1'
 AGENT_API_KEY = 'EMPTY'
 
-AGENT_SYSTEM_MESSAGE = """你是一个智能娱乐助手，集成在心理咨询对话系统中。你的职责是：
-1. 识别娱乐意图：当用户在对话中表达想听音乐、看电影、需要娱乐放松等意图时，主动调用相应工具。
-2. 推荐内容：根据用户的心情和需求，推荐合适的音乐或电影。
-3. 自然对话：用温和、自然的口吻与用户交流，像朋友一样推荐和引导。
+AGENT_INTENT_SYSTEM_MESSAGE = """你是一个意图分类器。根据用户的输入，判断用户的主要意图类别。
 
-重要规则：
-- 当用户说"我想听歌"、"放首歌"、"来点音乐"等，调用 play_music 工具
-- 当用户说"我想看电影"、"放个电影"等，调用 play_movie 工具
-- 当用户说"有什么歌"、"有哪些电影"等，调用 list_music 或 list_movies 工具
-- 当用户说"推荐首歌"、"不知道看什么"等，调用 recommend_music 或 recommend_movie 工具
-- 如果用户指定了名称，在调用工具时传入 name 参数
-- 回复要简短自然，像朋友聊天，不要使用专业术语
-- 你总是用中文回复"""
+分类规则：
+- counseling: 用户在表达情绪困扰、心理问题、寻求帮助（焦虑、抑郁、失眠、戒断、家庭问题等）
+- entertainment: 用户想听音乐、看电影、玩游戏、放松娱乐
+- crisis: 用户表达自杀念头、自残行为、严重危机
+- chitchat: 用户在闲聊、打招呼、说无关紧要的话
+- relaxation: 用户想做放松训练（呼吸、肌肉、冥想）
+
+只返回JSON格式：{"intent": "类别名", "confidence": 0.0-1.0, "reason": "简短理由"}"""
+
+AGENT_REPORT_SYSTEM_MESSAGE = """你是一位专业的心理咨询报告生成助手。请严格按照要求生成结构化输出。"""
+
+AGENT_RAG_ROUTING_SYSTEM_MESSAGE = """你是一个心理咨询知识库路由判断器。判断用户输入是否涉及心理咨询相关话题，是否需要检索知识库。
+
+需要检索（返回true）的情况：
+- 用户表达情绪困扰（焦虑、抑郁、恐惧、愤怒、悲伤等）
+- 用户提到心理症状（失眠、噩梦、食欲变化、注意力问题等）
+- 用户提到戒毒相关（戒断、复吸、渴求、诱惑等）
+- 用户提到人际关系问题（家庭、朋友、冲突、孤独等）
+- 用户提到创伤经历或压力
+- 用户想了解放松训练（呼吸、肌肉放松、冥想等）
+
+不需要检索（返回false）的情况：
+- 纯粹打招呼或闲聊
+- 娱乐请求（听歌、看电影等）
+- 与心理无关的日常话题
+
+只返回JSON格式：{"need_rag": true/false, "reason": "简短理由"}"""
+
+AGENT_RELAXATION_SYSTEM_MESSAGE = """你是一个放松训练类型分类器。根据AI心理咨询师的回复文本，判断推荐了哪种放松训练。
+
+分类规则：
+- BREATHING: 提到呼吸训练、深呼吸、腹式呼吸、吸气呼气等
+- MUSCLE: 提到肌肉放松、渐进式放松、绷紧放松、身体放松等
+- MEDITATION: 提到冥想、正念、专注、观想、静坐等
+- GAME: 提到游戏、互动小游戏等
+- NONE: 没有明确推荐任何放松训练
+
+只返回JSON格式：{"tag": "BREATHING|MUSCLE|MEDITATION|GAME|NONE", "confidence": 0.0-1.0}"""
+
+AGENT_EMOTION_SYSTEM_MESSAGE = """你是一个情绪分析器。分析用户或AI的文本，提取主要情绪状态。
+
+情绪类别：
+- neutral: 平静、中性
+- anxious: 焦虑、紧张、不安
+- depressed: 抑郁、低落、悲伤
+- angry: 愤怒、烦躁、生气
+- fearful: 恐惧、害怕、担心
+- hopeful: 有希望、积极、期待
+- grateful: 感激、感谢
+- lonely: 孤独、寂寞
+- confused: 困惑、迷茫
+- stressed: 压力大、疲惫
+
+只返回JSON格式：{"emotion": "类别名", "intensity": 0.0-1.0, "keywords": ["触发词"]}"""
+
+AGENT_SUMMARY_SYSTEM_MESSAGE = """你是一个对话摘要压缩器。将心理咨询对话历史压缩为简洁的上下文摘要，保留关键信息：
+1. 来访者的主要问题和情绪状态
+2. 已经讨论过的话题
+3. 已经尝试过的干预方法
+4. 来访者的变化和进展
+5. 需要后续关注的要点
+
+摘要应该简洁（150字以内），用第三人称描述，供后续对话参考。"""
+
+AGENT_TIMEOUT = 10           # 意图分类超时（秒）
+AGENT_REPORT_TIMEOUT = 60    # 报告生成超时（秒）
+
+# ============== Media Scene Mapping ==============
+# 情绪 → 影音场景映射（优先放松训练，影音仅在主动提出时推荐）
+EMOTION_SCENE_MAP = {
+    "anxious":    ["breathing_exercise", "muscle_relaxation", "nature_sounds"],
+    "depressed":  ["meditation", "nature_sounds"],
+    "angry":      ["breathing_exercise", "muscle_relaxation"],
+    "fearful":    ["breathing_exercise", "meditation"],
+    "lonely":     ["meditation", "nature_sounds"],
+    "stressed":   ["muscle_relaxation", "breathing_exercise"],
+    "confused":   ["meditation", "nature_sounds"],
+    "hopeful":    [],
+    "grateful":   [],
+    "neutral":    [],
+}
+
+# 意图 → 影音场景映射（只有 entertainment 意图才推荐影音）
+INTENT_SCENE_MAP = {
+    "relaxation":     ["breathing_exercise", "muscle_relaxation", "meditation"],
+    "entertainment":  ["entertainment"],  # 仅主动提出时
+    "counseling":     [],  # 不推荐影音，由 72B 决定是否建议放松训练
+    "chitchat":       [],
+    "crisis":         ["breathing_exercise"],
+}
+
+# 影音场景显示名
+SCENE_NAMES = {
+    "anxiety_relief":      "焦虑缓解",
+    "depression_support":  "情绪提振",
+    "anger_calm":          "愤怒平复",
+    "sleep_aid":           "助眠放松",
+    "meditation":          "冥想正念",
+    "breathing_exercise":  "呼吸训练",
+    "muscle_relaxation":   "肌肉放松",
+    "nature_sounds":       "自然白噪音",
+    "entertainment":       "日常娱乐",
+    "motivation":          "振奋激励",
+}
 
 AGENT_ENTERTAINMENT_KEYWORDS = [
     "听歌", "听音乐", "放歌", "放音乐", "播放音乐", "播放歌",
@@ -506,6 +523,7 @@ RESEARCHER_REPORT_PROMPT = """你是一位资深心理咨询督导。请基于�
 - 对话轮次: {total_rounds}轮
 - 结束类型: {end_type}
 - 完成放松训练: {relaxation_info}
+{emotion_summary}
 
 【对话记录】
 {conversation}
@@ -538,6 +556,7 @@ VISITOR_FEEDBACK_PROMPT = CLOSING_RESPONSE_PROMPT = """你是一位温暖的心�
 
 【结束类型】{end_type}
 【推荐的放松训练】{relaxation_recommendation}
+{emotion_summary}
 
 【对话记录】
 {conversation}
@@ -553,17 +572,9 @@ VISITOR_FEEDBACK_PROMPT = CLOSING_RESPONSE_PROMPT = """你是一位温暖的心�
 6. 如有推荐放松训练，自然引导用户点击按钮。
 7. 保持连接感，告知可以再回来。
 8. 总长度150-250字左右，说透彻一点，不要太仓促。
-9. 必须在结束语开头嵌入1个TTS语气标记，根据对话情绪选择：
-   - `<|emotion_comfort|>`：来访者情绪低落/焦虑时
-   - `<|emotion_neutral|>`：来访者情绪平稳时
-   - `<|emotion_happy|>`：来访者有积极改变/放松效果好时
-10. 可在文本适配位置嵌入1个副语言标记（增强语音自然度）：
-    - `<|breath|>`：停顿/温和回应时
-    - `<|sigh|>`：共情/舒缓氛围时
-    - `<|laugh_speak|>文本<|/laugh_speak|>`：鼓励/轻松场景时
 
 只输出结束语本身，不要任何标签或解释。
 【参考示例】
-<|emotion_comfort|><|sigh|>今天跟你聊了这么多，能感觉到你现在确实挺不容易的。特别是刚才你说的那种无力感，其实很多人在这种环境里都会有。但今天你能坐在这儿跟我把这些话说出来，这就是个很好的开始。既然觉得心里堵，那以后咱们就多试着把那股劲儿给疏通疏通。回去之后，要是觉得胸口闷或者心慌，就别硬扛着，试试左手边那个呼吸放松按钮，跟着做几遍，能缓解不少。别忘了，我会一直在这儿，随时等着你来。
+今天跟你聊了这么多，能感觉到你现在确实挺不容易的。特别是刚才你说的那种无力感，其实很多人在这种环境里都会有。但今天你能坐在这儿跟我把这些话说出来，这就是个很好的开始。既然觉得心里堵，那以后咱们就多试着把那股劲儿给疏通疏通。回去之后，要是觉得胸口闷或者心慌，就别硬扛着，试试左手边那个呼吸放松按钮，跟着做几遍，能缓解不少。别忘了，我会一直在这儿，随时等着你来。
 """
 

@@ -15,19 +15,19 @@
 - **📚 RAG 专家知识库**：内置数万条临床心理学数据。当检测到特定症状（如幻觉、自杀倾向、失眠）时，系统自动调取专业干预方案。
 - **🎙️ 极致语音交互**：
   - **STT**: 集成 FunASR 毫秒级转写。
-  - **TTS**: 搭载 FireRedTTS2，支持情绪标记（如 `<|emotion_comfort|>`）与副语言（呼吸声、叹气）合成，声音充满人情味。
+  - **TTS**: 搭载 CosyVoice3，支持语音克隆与流式合成，可通过 `[breath]`、`[laughter]` 等原生标记增强表现力。
 - **⌨️ 双模输入**：支持语音录入和键盘文字输入两种交互方式，灵活适配不同场景。
 - **🌊 交互式放松康复**：系统会根据对话逻辑，适时推荐并自动播放呼吸、肌肉、冥想等放松训练视频。
 - **📊 自动化专业审计报告**：会话结束秒级生成符合临床标准的 PDF/JSON 报告，包含风险评警、情绪变化轨迹及干预建议。
 - **🎨 现代化 PySide6 UI**：基于 PySide6 (Qt) 实现的 **毛玻璃 (Frosted Glass)** 视觉特效，左右分栏布局，营造宁静、解压的咨询氛围。
-- **🔍 模型自动检测**：启动时自动识别 Ollama 可用模型、FunASR 及 FireRedTTS2 模型路径，零配置即可运行。
+- **🔍 模型自动检测**：启动时自动识别 Ollama 可用模型、FunASR 及 CosyVoice3 模型路径，零配置即可运行。
 
 ## 🛠️ 技术底座
 
 - **核心大脑**: [Ollama](https://ollama.com/) (Qwen2.5:72b / gemma4 / deepseek-v3 等，可在 `config.py` 切换)
 - **语音引擎**:
   - 识别: [FunASR](https://github.com/alibaba-damo-academy/FunASR) (SenseVoiceSmall)
-  - 合成: [FireRedTTS2](https://github.com/FireRedTeam/FireRedTTS)
+  - 合成: [CosyVoice3](https://github.com/FunAudioLLM/CosyVoice) (Fun-CosyVoice3-0.5B)
 - **前端架构**: Python + PySide6 (Qt for Python)
 - **知识检索**: 基于 jieba 分词 + 同义词扩展的加权关键词检索系统 (Local RAG)
 - **数据管理**: 基于会话 ID 的全流程录音与日志持久化
@@ -41,7 +41,7 @@ voicechat/
 ├── services/
 │   ├── llm_service.py       # Ollama 流式交互封装
 │   ├── stt_service.py       # 实时录音与 FunASR 识别
-│   ├── tts_service_firered.py  # FireRedTTS2 流式语音合成
+│   ├── tts_service_cosyvoice.py  # CosyVoice3 流式语音合成 + 语音克隆
 │   ├── rag_service.py       # 意图路由与专家知识检索
 │   ├── report_service.py    # 情绪追踪与会话生命周期管理
 │   ├── report_generator.py  # PDF 报告生成
@@ -96,7 +96,7 @@ python main.py
 系统在 `config.py` 中定义了极高的咨询伦理准则：
 - **[RED_WARNING]**：自动识别自杀/脱逃风险。
 - **[OARS_ONLY]**：强制限制回复长度与句式，模拟自然聊天。
-- **[EMOTION_TAGS]**：自动在回复中插入 `<|breath|>` 等标记以增强共情。
+- **[EMOTION_TAGS]**：自动在回复中插入 `[breath]`、`[laughter]` 等 CosyVoice 原生标记以增强共情。
 
 ---
 

@@ -1,6 +1,65 @@
 {
-  "music_dirs": [],
-  "movie_dirs": [],
-  "music": [],
-  "movies": []
+  "version": 2,
+  "scenes": {
+    "anxiety_relief": {
+      "name": "焦虑缓解",
+      "description": "缓解焦虑、紧张、恐慌情绪",
+      "music": [],
+      "videos": []
+    },
+    "depression_support": {
+      "name": "情绪提振",
+      "description": "低落、悲伤时的温暖陪伴",
+      "music": [],
+      "videos": []
+    },
+    "anger_calm": {
+      "name": "愤怒平复",
+      "description": "烦躁、愤怒时的冷静引导",
+      "music": [],
+      "videos": []
+    },
+    "sleep_aid": {
+      "name": "助眠放松",
+      "description": "失眠、入睡困难时使用",
+      "music": [],
+      "videos": []
+    },
+    "meditation": {
+      "name": "冥想正念",
+      "description": "冥想、正念练习背景",
+      "music": [],
+      "videos": []
+    },
+    "breathing_exercise": {
+      "name": "呼吸训练",
+      "description": "呼吸训练引导视频",
+      "music": [],
+      "videos": []
+    },
+    "muscle_relaxation": {
+      "name": "肌肉放松",
+      "description": "渐进式肌肉放松引导",
+      "music": [],
+      "videos": []
+    },
+    "nature_sounds": {
+      "name": "自然白噪音",
+      "description": "雨声、海浪、鸟鸣等自然声音",
+      "music": [],
+      "videos": []
+    },
+    "entertainment": {
+      "name": "日常娱乐",
+      "description": "日常休闲、消遣",
+      "music": [],
+      "videos": []
+    },
+    "motivation": {
+      "name": "振奋激励",
+      "description": "需要力量和希望时",
+      "music": [],
+      "videos": []
+    }
+  }
 }

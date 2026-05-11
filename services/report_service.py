@@ -15,7 +15,7 @@ from config import (
     OLLAMA_HOST, OLLAMA_MODEL,
     MAX_CONVERSATION_ROUNDS, MAX_CONVERSATION_MINUTES, TIME_WARNING_MINUTES,
     CRISIS_HOTLINES, RESEARCHER_REPORT_PROMPT, VISITOR_FEEDBACK_PROMPT,
-    SESSION_SUMMARY_PROMPT
+    SESSION_SUMMARY_PROMPT, AGENT_REPORT_TIMEOUT
 )
 
 
@@ -51,15 +51,18 @@ class ReportService:
     - Safety resources output
     """
     
-    def __init__(self, llm_service=None):
+    def __init__(self, llm_service=None, agent_service=None):
         """
         Initialize report service.
-        
+
         Args:
             llm_service: Optional LLM service for report generation.
                         If not provided, will import when needed.
+            agent_service: Optional 3B agent service for report generation.
+                          Falls back to llm_service (72B) on failure.
         """
         self.llm_service = llm_service
+        self.agent_service = agent_service
         self.session_start_time: Optional[datetime] = None
         self.round_count: int = 0
         self.time_warning_shown: bool = False
@@ -71,7 +74,41 @@ class ReportService:
             from services.llm_service import get_llm_service
             self.llm_service = get_llm_service()
         return self.llm_service
-    
+
+    def _get_agent_service(self):
+        """Lazy load agent service if not provided."""
+        if self.agent_service is None:
+            from services.agent_service import get_agent_service
+            self.agent_service = get_agent_service()
+        return self.agent_service
+
+    def _format_emotion_summary(self, session_emotions: list) -> str:
+        """Format accumulated emotion data into a prompt section."""
+        if not session_emotions:
+            return ""
+        _EMOTION_CN = {
+            "neutral": "平静", "anxious": "焦虑", "depressed": "低落",
+            "angry": "愤怒", "fearful": "恐惧", "hopeful": "有希望",
+            "grateful": "感激", "lonely": "孤独", "confused": "困惑",
+            "stressed": "压力大",
+        }
+        counts = {}
+        for e in session_emotions:
+            emo = e.get("emotion", "neutral")
+            counts[emo] = counts.get(emo, 0) + 1
+        dominant = sorted(counts.items(), key=lambda x: -x[1])[:3]
+        parts = []
+        for emo, _ in dominant:
+            cn = _EMOTION_CN.get(emo, emo)
+            parts.append(cn)
+        trajectory = "、".join(parts)
+        last = session_emotions[-1].get("emotion", "neutral")
+        last_cn = _EMOTION_CN.get(last, last)
+        return (
+            f"- 情绪追踪轨迹: {trajectory}\n"
+            f"- 最终情绪状态: {last_cn}"
+        )
+
     # ==================== Session Tracking ====================
     
     def start_session(self):
@@ -171,12 +208,13 @@ class ReportService:
     
     # ==================== Report Generation ====================
     
-    def generate_researcher_report(self, 
+    def generate_researcher_report(self,
                                    conversation_history: List[Dict],
                                    subject_id: str,
                                    end_type: EndType,
                                    user_info: Optional[Dict[str, Any]] = None,
-                                   relaxation_info: str = "未进行") -> Dict[str, Any]:
+                                   relaxation_info: str = "未进行",
+                                   session_emotions: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Generate researcher report (JSON format).
         
@@ -186,7 +224,8 @@ class ReportService:
             end_type: How the session ended
             user_info: Optional dictionary containing user demographics
             relaxation_info: Description of completed relaxation training
-            
+            session_emotions: Accumulated emotion detection results from 3B agent
+
         Returns:
             Structured report dict
         """
@@ -201,26 +240,34 @@ class ReportService:
         if actual_relaxation != "未进行":
             formatted_history += f"\n【系统记录】来访者刚刚完成了{actual_relaxation}，目前状态应该有所缓解。"
         
+        emotion_summary = self._format_emotion_summary(session_emotions)
         prompt = RESEARCHER_REPORT_PROMPT.format(
             conversation=formatted_history,
             subject_id=subject_id,
             duration_minutes=int(self.get_session_duration_minutes()),
             total_rounds=self.round_count,
             end_type=end_type.value,
-            relaxation_info=relaxation_info if relaxation_info != "未进行" else (self.completed_relaxation or "未进行")
+            relaxation_info=relaxation_info if relaxation_info != "未进行" else (self.completed_relaxation or "未进行"),
+            emotion_summary=emotion_summary
         )
         
         # Get analysis from LLM (use separate context to not pollute main conversation)
-        import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
-        
         try:
-            response = client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False
-            )
-            analysis_text = response["message"]["content"]
+            # Try 3B agent first, fallback to 72B
+            try:
+                agent = self._get_agent_service()
+                analysis_text = agent.generate_report(prompt, timeout=AGENT_REPORT_TIMEOUT)
+                print("[AGENT] Report generated by 3B model")
+            except Exception as agent_err:
+                print(f"[WARNING] 3B report failed, falling back to 72B: {agent_err}")
+                import ollama
+                client = ollama.Client(host=OLLAMA_HOST)
+                response = client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                analysis_text = response["message"]["content"]
             
             # Attempt to parse as JSON, or wrap in structure
             report = self._parse_report_json(analysis_text, subject_id, end_type)
@@ -266,11 +313,12 @@ class ReportService:
                 report["user_info"] = user_info
             return report
     
-    def generate_visitor_feedback(self, 
+    def generate_visitor_feedback(self,
                                   conversation_history: List[Dict],
                                   end_type: EndType,
                                   relaxation_rec: Optional[str] = None,
-                                  stream: bool = False) -> Any:
+                                  stream: bool = False,
+                                  session_emotions: Optional[List[Dict]] = None) -> Any:
         """
         Generate oral-style feedback for the visitor (TTS).
         
@@ -294,39 +342,51 @@ class ReportService:
         }
         rec_str = rec_map.get(relaxation_rec, "无") if relaxation_rec else "无"
         
+        emotion_summary = self._format_emotion_summary(session_emotions)
         prompt = VISITOR_FEEDBACK_PROMPT.format(
             conversation=formatted_history,
             end_type=end_type.value,
-            relaxation_recommendation=rec_str
+            relaxation_recommendation=rec_str,
+            emotion_summary=emotion_summary
         )
-        
-        import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
-        
+
         try:
-            if stream:
-                def stream_generator():
-                    stream_response = client.chat(
+            # Try 3B agent first, fallback to 72B
+            try:
+                agent = self._get_agent_service()
+                if stream:
+                    def clean_stream(gen):
+                        for chunk in gen:
+                            yield self._clean_for_tts(chunk)
+                    return clean_stream(agent.generate_report_stream(prompt, timeout=AGENT_REPORT_TIMEOUT))
+                else:
+                    feedback = agent.generate_report(prompt, timeout=AGENT_REPORT_TIMEOUT)
+                    print("[AGENT] Visitor feedback generated by 3B model")
+                    return self._clean_for_tts(feedback)
+            except Exception as agent_err:
+                print(f"[WARNING] 3B feedback failed, falling back to 72B: {agent_err}")
+                import ollama
+                client = ollama.Client(host=OLLAMA_HOST)
+                if stream:
+                    def stream_generator():
+                        stream_response = client.chat(
+                            model=OLLAMA_MODEL,
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=True
+                        )
+                        for chunk in stream_response:
+                            if "message" in chunk and "content" in chunk["message"]:
+                                yield self._clean_for_tts(chunk["message"]["content"])
+                    return stream_generator()
+                else:
+                    response = client.chat(
                         model=OLLAMA_MODEL,
                         messages=[{"role": "user", "content": prompt}],
-                        stream=True
+                        stream=False
                     )
-                    full_text = ""
-                    for chunk in stream_response:
-                        if "message" in chunk and "content" in chunk["message"]:
-                            content = chunk["message"]["content"]
-                            full_text += content
-                            yield content
-                return stream_generator()
-            else:
-                response = client.chat(
-                    model=OLLAMA_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=False
-                )
-                feedback = response["message"]["content"]
-                return self._clean_for_tts(feedback)
-                
+                    feedback = response["message"]["content"]
+                    return self._clean_for_tts(feedback)
+
         except Exception as e:
             fallback = "今天聊得不错，辛苦你了。如果觉得不舒服，随时可以进行放松训练。再见。"
             if stream:
@@ -354,34 +414,44 @@ class ReportService:
             conversation=formatted_history,
             suggestions=suggestions or "无特定推荐"
         )
-        
-        import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
-        
+
         try:
-            if stream:
-                def stream_generator():
-                    stream_response = client.chat(
+            # Try 3B agent first, fallback to 72B
+            try:
+                agent = self._get_agent_service()
+                if stream:
+                    def clean_stream(gen):
+                        for chunk in gen:
+                            yield self._clean_for_tts(chunk)
+                    return clean_stream(agent.generate_report_stream(prompt, timeout=AGENT_REPORT_TIMEOUT))
+                else:
+                    summary = agent.generate_report(prompt, timeout=AGENT_REPORT_TIMEOUT)
+                    print("[AGENT] Session summary generated by 3B model")
+                    return self._clean_for_tts(summary)
+            except Exception as agent_err:
+                print(f"[WARNING] 3B summary failed, falling back to 72B: {agent_err}")
+                import ollama
+                client = ollama.Client(host=OLLAMA_HOST)
+                if stream:
+                    def stream_generator():
+                        stream_response = client.chat(
+                            model=OLLAMA_MODEL,
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=True
+                        )
+                        for chunk in stream_response:
+                            if "message" in chunk and "content" in chunk["message"]:
+                                yield self._clean_for_tts(chunk["message"]["content"])
+                    return stream_generator()
+                else:
+                    response = client.chat(
                         model=OLLAMA_MODEL,
                         messages=[{"role": "user", "content": prompt}],
-                        stream=True
+                        stream=False
                     )
-                    full_text = ""
-                    for chunk in stream_response:
-                        if "message" in chunk and "content" in chunk["message"]:
-                            content = chunk["message"]["content"]
-                            full_text += content
-                            yield content
-                return stream_generator()
-            else:
-                response = client.chat(
-                    model=OLLAMA_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=False
-                )
-                feedback = response["message"]["content"]
-                return self._clean_for_tts(feedback)
-                
+                    feedback = response["message"]["content"]
+                    return self._clean_for_tts(feedback)
+
         except Exception as e:
             fallback = "今天聊了不少，辛苦你了。回去记得试试那几条建议，有事儿随时再来找我。"
             if stream:
@@ -407,17 +477,23 @@ class ReportService:
             conversation=formatted_history,
             suggestions="本次会话无特定建议"
         )
-        
-        import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
-        
+
         try:
-            response = client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False
-            )
-            summary = response["message"]["content"]
+            # Try 3B agent first, fallback to 72B
+            try:
+                agent = self._get_agent_service()
+                summary = agent.generate_report(prompt, timeout=AGENT_REPORT_TIMEOUT)
+                print("[AGENT] Session summary (async) generated by 3B model")
+            except Exception as agent_err:
+                print(f"[WARNING] 3B summary_async failed, falling back to 72B: {agent_err}")
+                import ollama
+                client = ollama.Client(host=OLLAMA_HOST)
+                response = client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                summary = response["message"]["content"]
             summary = self._clean_for_tts(summary)
             
             if callback:
@@ -448,22 +524,28 @@ class ReportService:
         formatted_history = self._format_conversation(conversation_history)
         
         prompt = SUGGESTIONS_PROMPT.format(conversation=formatted_history)
-        
-        import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
-        
+
         try:
-            response = client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False
-            )
-            suggestions = response["message"]["content"]
-            
+            # Try 3B agent first, fallback to 72B
+            try:
+                agent = self._get_agent_service()
+                suggestions = agent.generate_report(prompt, timeout=AGENT_REPORT_TIMEOUT)
+                print("[AGENT] Suggestions generated by 3B model")
+            except Exception as agent_err:
+                print(f"[WARNING] 3B suggestions failed, falling back to 72B: {agent_err}")
+                import ollama
+                client = ollama.Client(host=OLLAMA_HOST)
+                response = client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                suggestions = response["message"]["content"]
+
             # Clean up for TTS
             suggestions = self._clean_for_tts(suggestions)
             return suggestions
-            
+
         except Exception as e:
             print(f"[ERROR] generate_suggestions failed: {e}")
             # Fallback suggestions
@@ -506,17 +588,23 @@ class ReportService:
 请分析用户的情绪和状态，只返回最合适的一个关键词（呼吸、肌肉、或 冥想）。
 不要解释，只返回关键词。如果不确定，默认返回 呼吸。"""
 
-        import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
-        
         try:
-            response = client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False
-            )
-            content = response["message"]["content"].strip()
-            
+            # Try 3B agent first, fallback to 72B
+            try:
+                agent = self._get_agent_service()
+                content = agent.generate_report(prompt, timeout=AGENT_REPORT_TIMEOUT).strip()
+                print("[AGENT] Relaxation recommendation by 3B model")
+            except Exception as agent_err:
+                print(f"[WARNING] 3B relaxation rec failed, falling back to 72B: {agent_err}")
+                import ollama
+                client = ollama.Client(host=OLLAMA_HOST)
+                response = client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                content = response["message"]["content"].strip()
+
             # Extract keyword
             if "肌肉" in content or "MUSCLE" in content.upper():
                 return "肌肉"
@@ -524,7 +612,7 @@ class ReportService:
                 return "冥想"
             else:
                 return "呼吸" # Default
-                
+
         except Exception as e:
             print(f"[ERROR] Relaxation recommendation failed: {e}")
             return "呼吸" # Fallback
