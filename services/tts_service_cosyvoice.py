@@ -12,8 +12,6 @@ try:
     import pyaudio
 except ImportError:
     pyaudio = None
-import soundfile as sf
-import tempfile
 import time
 
 # Add CosyVoice to path
@@ -143,8 +141,6 @@ class TTSService:
         """Background thread that plays audio chunks from the queue."""
         buffered_chunks = []
         first_chunk = True
-        fade_samples = int(self.sample_rate * 0.05)  # 50ms fade
-
         try:
             while not stop_event.is_set():
                 try:
@@ -201,6 +197,8 @@ class TTSService:
         stream = None
 
         try:
+            if pyaudio is None:
+                raise RuntimeError("PyAudio not installed. Cannot play audio.")
             p = pyaudio.PyAudio()
             stream = p.open(
                 format=pyaudio.paFloat32,
@@ -309,6 +307,8 @@ class TTSService:
         stream = None
 
         try:
+            if pyaudio is None:
+                raise RuntimeError("PyAudio not installed. Cannot play audio.")
             p = pyaudio.PyAudio()
             stream = p.open(
                 format=pyaudio.paFloat32,

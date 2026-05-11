@@ -7,6 +7,7 @@ import time
 import threading
 import traceback
 import re
+import random
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -851,7 +852,6 @@ class MainWindow(QMainWindow):
 
     def _play_opening_greeting(self):
         """Play the opening greeting."""
-        import random
         if self.tts_service:
             greeting = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
             self.chat_panel.add_system_message(greeting)
@@ -864,7 +864,6 @@ class MainWindow(QMainWindow):
                 print(f"Greeting TTS error: {e}")
 
     def _play_post_relaxation_greeting(self):
-        import random
         if self.tts_service and POST_RELAXATION_MESSAGE:
             message = random.choice(POST_RELAXATION_MESSAGE)
             self.chat_panel.add_system_message(message)

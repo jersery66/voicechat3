@@ -45,6 +45,15 @@ _RELAXATION_KEYWORDS = [
     "深呼吸", "放松一下", "做个放松",
 ]
 
+# Emotional phrases for RAG routing fallback
+_EMOTIONAL_PHRASES = [
+    "睡不着", "失眠", "做噩梦", "焦虑", "抑郁", "害怕", "恐惧",
+    "生气", "愤怒", "伤心", "难过", "委屈", "孤独", "无助",
+    "压力大", "紧张", "烦躁", "心慌", "头疼", "难受", "痛苦",
+    "想哭", "崩溃", "绝望", "迷茫", "困惑", "瘾来了", "犯瘾",
+    "想吸毒", "复吸", "渴求", "戒断", "家庭", "欺负", "创伤",
+]
+
 
 class AgentService:
     """3B 模型 Agent 服务，负责意图分类和报告生成。"""
@@ -212,13 +221,6 @@ class AgentService:
 
     def _keyword_rag_routing(self, text: str) -> bool:
         """RAG 路由的关键词 fallback。"""
-        _EMOTIONAL_PHRASES = [
-            "睡不着", "失眠", "做噩梦", "焦虑", "抑郁", "害怕", "恐惧",
-            "生气", "愤怒", "伤心", "难过", "委屈", "孤独", "无助",
-            "压力大", "紧张", "烦躁", "心慌", "头疼", "难受", "痛苦",
-            "想哭", "崩溃", "绝望", "迷茫", "困惑", "瘾来了", "犯瘾",
-            "想吸毒", "复吸", "渴求", "戒断", "家庭", "欺负", "创伤",
-        ]
         for phrase in _EMOTIONAL_PHRASES:
             if phrase in text:
                 return True
@@ -378,7 +380,6 @@ class AgentService:
         media_type: "music" 或 "videos"
         返回 [{"name": ..., "path": ..., "description": ...}, ...]
         """
-        import json
         from pathlib import Path
 
         config_path = Path(__file__).parent.parent / "media_library" / "library_config.json"

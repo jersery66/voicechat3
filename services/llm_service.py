@@ -122,8 +122,16 @@ class LLMService:
                 self.history_context = f"\n\n【之前的对话摘要】\n{summary}"
                 self.conversation_history = recent
                 print(f"[AGENT] History compressed: {len(self.conversation_history) + 8} turns → summary + {len(recent)} recent turns")
+                return
         except Exception as e:
             print(f"[WARNING] History summarization failed: {e}")
+
+        # Fallback: truncate oldest turns to prevent unbounded growth
+        if len(self.conversation_history) > self.MAX_HISTORY_TURNS * 3:
+            recent = self.conversation_history[-8:]
+            self.conversation_history = recent
+            self.history_context = ""
+            print(f"[LLM] History truncated to {len(recent)} recent turns (summarization unavailable)")
 
     def chat_sync(self, user_message: str) -> str:
         """
