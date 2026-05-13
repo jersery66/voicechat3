@@ -6,6 +6,6 @@ from .chat_panel import ChatPanel
 from .loading_screen import LoadingScreen
 from .dialogs import (
     SessionEndDialog, CrisisDialog, ContinueOrEndDialog,
-    WarningDialog, FeedbackDialog
+    WarningDialog
 )
 from .widgets import FrostedPanel, RecordButton, BlinkButton, MessageBubble

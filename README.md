@@ -1,103 +1,143 @@
-# 🎙️ 心医生 (Heart Doctor) - 专业 AI 心理咨询助手
+# 心医生 (Heart Doctor) — 专业 AI 心理咨询语音系统
 
 > **科技传递温暖，专业重构新生。**
 
-**心医生** 是一款专为特殊戒治环境（如强制隔离戒毒所）打造的 **全场景 AI 心理咨询语音系统**。它不仅是一个对话机器人，更是一个集成了动机访谈 (MI)、情绪识别、RAG 专家知识库以及多媒体康复干预的综合性心理支持平台。
-
-通过先进的语音交互技术与深度心理学逻辑，心医生致力于在私密、安全的环境下，与来访者建立深层次的情感连接，协助缓解戒断焦虑，降低防御心理。
+专为强制隔离戒毒所打造的全场景 AI 心理咨询语音系统。集成动机访谈 (MI)、实时情绪识别、RAG 专家知识库及多媒体康复干预，通过自然语音交互与来访者建立深层情感连接，协助缓解戒断焦虑。
 
 ---
 
-## ✨ 核心特性
+## 核心特性
 
-- **🤝 动机访谈 (MI) 架构**：深度集成 **OARS**（开放式提问、肯定、反映、摘要）技术。严禁说教，通过"以此攻彼"和"双面反映"协助来访者处理矛盾心态。
-- **👁️ 实时情绪与状态监控**：AI 会实时识别来访者的情绪波动、防御强度及"变革话语"，并在后台生成动态评估报告。
-- **📚 RAG 专家知识库**：内置数万条临床心理学数据。当检测到特定症状（如幻觉、自杀倾向、失眠）时，系统自动调取专业干预方案。
-- **🎙️ 极致语音交互**：
-  - **STT**: 集成 FunASR 毫秒级转写。
-  - **TTS**: 搭载 CosyVoice3，支持语音克隆与流式合成，可通过 `[breath]`、`[laughter]` 等原生标记增强表现力。
-- **⌨️ 双模输入**：支持语音录入和键盘文字输入两种交互方式，灵活适配不同场景。
-- **🌊 交互式放松康复**：系统会根据对话逻辑，适时推荐并自动播放呼吸、肌肉、冥想等放松训练视频。
-- **📊 自动化专业审计报告**：会话结束秒级生成符合临床标准的 PDF/JSON 报告，包含风险评警、情绪变化轨迹及干预建议。
-- **🎨 现代化 PySide6 UI**：基于 PySide6 (Qt) 实现的 **毛玻璃 (Frosted Glass)** 视觉特效，左右分栏布局，营造宁静、解压的咨询氛围。
-- **🔍 模型自动检测**：启动时自动识别 Ollama 可用模型、FunASR 及 CosyVoice3 模型路径，零配置即可运行。
+- **MI 动机访谈架构**: 深度集成 OARS（开放式提问、肯定、反映、摘要）技术，严禁说教，通过"以此攻彼"和"双面反映"协助来访者处理矛盾心态。
+- **实时情绪与状态监控**: AI 实时识别情绪波动、防御强度及"变革话语"，后台生成动态评估报告。
+- **RAG 专家知识库**: 内置临床心理学数据，检测到特定症状（幻觉、自杀倾向、失眠等）时自动调取专业干预方案。
+- **语音交互**:
+  - STT: FunASR SenseVoiceSmall 毫秒级转写，含毒品术语纠错。
+  - TTS: CosyVoice3 流式合成 + 语音克隆，支持 `[breath]`、`[laughter]` 原生标记。
+- **双模输入**: 支持语音和键盘文字两种输入方式。
+- **交互式放松康复**: 根据对话逻辑自动推荐并播放呼吸、肌肉、冥想等放松训练视频。
+- **自动化专业报告**: 会话结束时秒级生成符合临床标准的 PDF/JSON 报告，含风险评估、情绪变化轨迹及干预建议。
+- **PySide6 UI**: 毛玻璃视觉风格，左右分栏布局。
+- **模型自动检测**: 启动时自动识别 Ollama 可用模型及 FunASR/CosyVoice3 路径。
 
-## 🛠️ 技术底座
+---
 
-- **核心大脑**: [Ollama](https://ollama.com/) (Qwen2.5:72b / gemma4 / deepseek-v3 等，可在 `config.py` 切换)
-- **语音引擎**:
-  - 识别: [FunASR](https://github.com/alibaba-damo-academy/FunASR) (SenseVoiceSmall)
-  - 合成: [CosyVoice3](https://github.com/FunAudioLLM/CosyVoice) (Fun-CosyVoice3-0.5B)
-- **前端架构**: Python + PySide6 (Qt for Python)
-- **知识检索**: 基于 jieba 分词 + 同义词扩展的加权关键词检索系统 (Local RAG)
-- **数据管理**: 基于会话 ID 的全流程录音与日志持久化
+## 架构
 
-## 📁 项目结构
+### 对话流水线 (ConversationPipeline)
+
+```
+Microphone → STT(可选) → Intent+Emotion(并行3B调用) → RAG → LLM Streaming
+  → ||| 分隔符解析 → Tag检测(END/REC) → TTS(可选) → 后处理路由
+```
+
+`services/pipeline.py` — 统一流水线，合并语音/文字两条路径为单一执行体，Qt 无关纯逻辑层。
+
+### 会话状态机 (SessionOrchestrator)
+
+```
+IDLE → CHATTING → RELAXATION_RECOMMENDED → VIDEO_PLAYING → POST_RELAXATION
+                   ↘ SESSION_ENDING → SESSION_ENDED → IDLE
+```
+
+`services/session_orchestrator.py` — 会话生命周期管理，状态转换验证，结束决策逻辑。
+
+### Tools 工具层
+
+`services/tools/` — 轻量 Tool 模式封装副作用操作：
+
+| Tool | 职责 |
+|------|------|
+| `VideoPlayTool` | 全屏播放放松视频 |
+| `RelaxationRecommendationTool` | 基于对话上下文推荐放松类型 |
+| `ReportGenerationTool` | 生成访客反馈 + 研究员报告 + 保存 |
+
+### 关键约定
+
+- **`|||` 分隔符**: LLM 回复中左侧为临床分析（不展示/不播出），右侧为口语回复（播放 TTS）。
+- **会话结束标记**: `[END_GOAL_ACHIEVED]`、`[END_TIME_LIMIT]`、`[END_SAFETY]` 等触发会话终止。
+- **放松推荐标记**: `[REC_BREATHING]`、`[REC_MUSCLE]`、`[REC_MEDITATION]` 触发全屏放松视频。
+- **CosyVoice 原生标记**: `[breath]`、`[laughter]` 嵌入文本由 CosyVoice3 处理，UI 展示时自动过滤。
+- **流式管线**: LLM 逐块输出，TTS 预缓冲 5 块后开始播放。
+
+---
+
+## 项目结构
 
 ```text
 voicechat/
-├── main.py                  # 程序主入口 (PySide6 Application)
-├── config.py                # 核心配置：System Prompt、模型路径、UI 参数、自动检测
+├── main.py                          # 程序入口 (PySide6 Application)
+├── config.py                        # 核心配置：System Prompt、模型路径、UI 参数
 ├── services/
-│   ├── llm_service.py       # Ollama 流式交互封装
-│   ├── stt_service.py       # 实时录音与 FunASR 识别
-│   ├── tts_service_cosyvoice.py  # CosyVoice3 流式语音合成 + 语音克隆
-│   ├── rag_service.py       # 意图路由与专家知识检索
-│   ├── report_service.py    # 情绪追踪与会话生命周期管理
-│   ├── report_generator.py  # PDF 报告生成
-│   ├── video_service.py     # Pygame 全屏视频播放
-│   └── game_service.py      # 放松小游戏
+│   ├── pipeline.py                  # 统一对话流水线 + 标签常量（单一数据源）
+│   ├── session_orchestrator.py      # 会话状态机 + 结束决策
+│   ├── llm_service.py               # Ollama 流式交互
+│   ├── stt_service.py               # 实时录音 + FunASR 识别 + 毒品术语纠错
+│   ├── tts_service_cosyvoice.py     # CosyVoice3 流式合成 + 语音克隆
+│   ├── rag_service.py               # 意图路由 + 关键词知识检索
+│   ├── report_service.py            # 情绪追踪 + 会话生命周期
+│   ├── report_generator.py          # PDF 报告生成
+│   ├── video_service.py             # Pygame 全屏视频播放
+│   ├── game_service.py              # 放松小游戏
+│   └── tools/
+│       ├── __init__.py              # Tool Protocol 定义
+│       ├── video_tool.py            # 放松视频播放 Tool
+│       ├── relaxation_tool.py       # 放松类型推荐 Tool
+│       └── report_tool.py           # 报告生成 Tool
 ├── ui/
-│   ├── main_window.py       # 主窗口 (左右分栏布局)
-│   ├── control_panel.py     # 左侧控制面板 (用户信息、录音、放松训练)
-│   ├── chat_panel.py        # 右侧对话面板 (气泡消息、文字输入)
-│   ├── loading_screen.py    # 加载画面
-│   ├── dialogs.py           # 弹窗对话框
-│   ├── widgets.py           # 自定义组件 (毛玻璃面板、动画按钮)
-│   └── styles.py            # QSS 样式表
-├── knowledge_base/          # 心理学临床数据集 (JSON)
-├── media_library/           # 放松训练多媒体素材
-└── data/                    # 结构化会话历史与 PDF 报告
+│   ├── main_window.py               # 主窗口 (左右分栏，管道路由，队列处理)
+│   ├── control_panel.py             # 左侧控制面板
+│   ├── chat_panel.py                # 右侧对话面板
+│   ├── loading_screen.py            # 加载画面
+│   ├── dialogs.py                   # 弹窗 (会话结束/危机/继续或结束/警告)
+│   ├── widgets.py                   # 自定义组件
+│   └── styles.py                    # QSS 样式表
+├── knowledge_base/                  # 心理学知识库 (JSON)
+├── media_library/                   # 放松训练视频素材
+└── data/                            # 会话记录与 PDF 报告
 ```
-
-## 🚀 快速启动
-
-### 1. 硬件准备
-- 建议配备 NVIDIA GPU (12G+ 显存) 以获得最佳语音实时响应体验
-- 安装 [Ollama](https://ollama.com/)
-
-### 2. 环境安装
-```bash
-# 克隆项目
-git clone https://github.com/jersery66/voicechat3.git
-cd voicechat3
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
-### 3. 模型准备
-确保 Ollama 中已拉取对应模型（系统启动时会自动检测可用模型）：
-```bash
-ollama pull qwen2.5:72b  # 推荐模型
-# 或者使用轻量模型：
-# ollama pull gemma4:e2b
-```
-
-### 4. 运行
-```bash
-python main.py
-```
-
-启动后系统将自动检测模型路径并显示加载进度，进入主界面后可选择语音或文字输入开始对话。
-
-## 💡 咨询室规则 (Prompt Engineering)
-
-系统在 `config.py` 中定义了极高的咨询伦理准则：
-- **[RED_WARNING]**：自动识别自杀/脱逃风险。
-- **[OARS_ONLY]**：强制限制回复长度与句式，模拟自然聊天。
-- **[EMOTION_TAGS]**：自动在回复中插入 `[breath]`、`[laughter]` 等 CosyVoice 原生标记以增强共情。
 
 ---
 
-*"每一次对话，都是一次心灵的重构。" —— 心医生团队*
+## 快速启动
+
+### 环境要求
+
+- Windows + NVIDIA GPU (12GB+ VRAM 推荐)
+- [Ollama](https://ollama.com/)
+
+### 安装
+
+```bash
+git clone https://github.com/jersery66/voicechat3.git
+cd voicechat3
+pip install -r requirements.txt
+ollama pull qwen2.5:72b
+python main.py
+```
+
+启动后自动检测模型路径并显示加载进度。进入主界面后可选语音或文字输入开始对话。
+
+### 外部依赖（不在 requirements.txt）
+
+- **Ollama** 服务，默认 `http://localhost:11434`
+- **CosyVoice3** 模型: `../CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B-2512/`
+- **FunASR** 模型: `../qwen/CosyVoice/pretrained_models/Fun-ASR-Nano-2512/`
+
+路径可在 `config.py` 中配置。
+
+---
+
+## 配置
+
+所有可调参数在 `config.py`:
+
+- `OLLAMA_MODEL`, `OLLAMA_BASE_URL` — LLM 后端
+- System Prompt (~140 行) — MI 咨询规则、OARS 约束、危机协议、CosyVoice 标签规范
+- `MAX_CONVERSATION_TURNS`, `SESSION_TIME_LIMIT_MINUTES` — 会话边界
+- `CRISIS_HOTLINES` — 紧急联系电话
+- 音频参数: `SAMPLE_RATE`, `AUDIO_CHANNELS`, `TTS_*`
+
+---
+
+*"每一次对话，都是一次心灵的重构。"*

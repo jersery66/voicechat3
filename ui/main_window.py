@@ -34,6 +34,8 @@ from .dialogs import (
     WarningDialog
 )
 from .styles import get_style
+from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineConfig
+from services.session_orchestrator import SessionState, SessionOrchestrator
 
 
 class MainWindow(QMainWindow):
@@ -55,7 +57,7 @@ class MainWindow(QMainWindow):
         # State
         self.is_recording = False
         self.models_loaded = False
-        self.session_ended = False
+        self.orchestrator = SessionOrchestrator()
         self.user_info = {}
         self.current_user_id = None
         self.info_confirmed = False
@@ -154,9 +156,9 @@ class MainWindow(QMainWindow):
         self.control_panel.modify_user.connect(self._on_modify_user)
         self.control_panel.record_started.connect(self._on_record_started)
         self.control_panel.record_stopped.connect(self._on_record_stopped)
-        self.control_panel.play_breathing.connect(lambda: self._play_video("呼吸训练.mp4"))
-        self.control_panel.play_muscle.connect(lambda: self._play_video("肌肉放松.mp4"))
-        self.control_panel.play_meditation.connect(lambda: self._play_video("冥想训练.mp4"))
+        self.control_panel.play_breathing.connect(lambda: self._play_relaxation_video("breathing"))
+        self.control_panel.play_muscle.connect(lambda: self._play_relaxation_video("muscle"))
+        self.control_panel.play_meditation.connect(lambda: self._play_relaxation_video("meditation"))
         self.control_panel.play_game.connect(self._play_game)
 
         # Chat panel signals
@@ -235,7 +237,7 @@ class MainWindow(QMainWindow):
         self.control_panel.set_status("正在处理...")
 
         if self.stt_service:
-            threading.Thread(target=self._process_pipeline, daemon=True).start()
+            threading.Thread(target=self._run_pipeline, daemon=True).start()
         else:
             self.control_panel.set_status("测试模式 - 服务未加载")
             self.control_panel.reset_recording()
@@ -244,19 +246,21 @@ class MainWindow(QMainWindow):
         """Handle text input from chat panel."""
         if not text.strip():
             return
-        if self.session_ended:
+        if self.orchestrator.state in (SessionState.SESSION_ENDING, SessionState.SESSION_ENDED):
             self.chat_panel.add_system_message("会话已结束，请开始新对话")
             return
         if not self.info_confirmed:
             self.chat_panel.add_system_message("请先填写左侧基本信息并确认")
             return
-        threading.Thread(target=self._process_text_pipeline, args=(text,), daemon=True).start()
+        threading.Thread(target=self._run_pipeline, args=(text,), daemon=True).start()
 
     # ==================== Pipeline ====================
 
-    def _process_pipeline(self):
+    def _run_pipeline(self, text=None):
+        """Unified pipeline entry point. Runs on a background thread.
+        text=None for voice mode (STT+TTS), text=str for text mode."""
         try:
-            if self.session_ended:
+            if self.orchestrator.state in (SessionState.SESSION_ENDING, SessionState.SESSION_ENDED):
                 self.processing_queue.put(("status", "会话已结束，请开始新对话"))
                 return
 
@@ -264,304 +268,45 @@ class MainWindow(QMainWindow):
             self._interim_report = None
             self._interim_pdf_path = None
 
-            # 1. Get audio
-            audio_data = self.stt_service.stop_recording()
-
-            if len(audio_data) == 0:
-                self.processing_queue.put(("status", "未检测到语音"))
-                return
-
-            # 2. Transcribe
-            self.processing_queue.put(("status", "正在转写..."))
-            text = self.stt_service.transcribe(audio_data)
-
-            if not text.strip():
-                self.processing_queue.put(("status", "无法识别内容"))
-                return
-
-            self.processing_queue.put(("append_chat", ("user", text)))
-
-            # Increment round
-            if self.report_service:
-                self.report_service.increment_round()
-
-            # Check time/round warning
-            if self.report_service:
-                should_warn, warning_msg = self.report_service.should_warn_time_limit()
-                if should_warn:
-                    self.processing_queue.put(("session_warning", warning_msg))
-
-            # Save user data
-            user_id = self.current_user_id or "default_user"
-            if self.data_manager:
-                self.data_manager.set_user_id(user_id)
-                self.data_manager.save_user_message(audio_data, text)
-
-            # Intent + Emotion: parallel 3B calls
-            intent, emotion_result = self._classify_intent_and_emotion(text)
-
-            system_suffix = ""
-            current_rounds = self.report_service.get_round_count() if self.report_service else 0
-            allow_relaxation = (current_rounds >= MIN_ROUNDS_FOR_RELAXATION)
-
-            if not allow_relaxation:
-                system_suffix = f"【系统警告】当前仅第{current_rounds}轮对话（少于{MIN_ROUNDS_FOR_RELAXATION}轮）。无论用户说了什么，你绝对禁止推荐放松训练！继续通过对话建立关系。"
-
-            # RAG context
-            if self.rag_service:
-                rag_suffix = self.rag_service.get_system_suffix(text)
-                if rag_suffix:
-                    system_suffix += "\n" + rag_suffix
-
-            final_suffix = system_suffix if system_suffix.strip() else None
-
-            # Streaming
-            full_response = ""
-            analysis_text = ""
-            spoken_text = ""
-            found_separator = False
-
-            self.processing_queue.put(("start_ai_message", None))
-
-            llm_gen = self.llm_service.chat(text, system_suffix=final_suffix)
-
-            stream_buffer = ""
-            for chunk in llm_gen:
-                full_response += chunk
-                stream_buffer += chunk
-
-                # Filter tags
-                stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer)
-                stream_buffer = re.sub(r'\[END_[A-Z_]+\]', '', stream_buffer)
-                stream_buffer = re.sub(r'【.*?】', '', stream_buffer)
-                stream_buffer = re.sub(r'\[(?:breath|laughter)\]', '', stream_buffer)
-
-                # Split on |||
-                if not found_separator and '|||' in stream_buffer:
-                    parts = stream_buffer.split('|||', 1)
-                    analysis_text = parts[0]
-                    stream_buffer = parts[1]
-                    found_separator = True
-
-                if found_separator and stream_buffer:
-                    # Filter emotion tags from display
-                    display_text = re.sub(r'<\|[^|]+\|>', '', stream_buffer)
-                    if display_text:
-                        self.processing_queue.put(("stream_text", display_text))
-                    stream_buffer = ""
-
-            self.processing_queue.put(("finish_streaming", None))
-
-            # Parse full response
-            if '|||' in full_response:
-                parts = full_response.split('|||', 1)
-                analysis_text = parts[0].strip()
-                spoken_text = parts[1].strip()
+            if text is not None:
+                # Text mode: no STT, no TTS
+                self.processing_queue.put(("set_buttons_state", "disabled"))
+                config = PipelineConfig(use_stt=False, use_tts=False, user_text=text)
             else:
-                spoken_text = full_response.strip()
+                # Voice mode: STT + TTS
+                audio_data = self.stt_service.stop_recording()
+                if len(audio_data) == 0:
+                    self.processing_queue.put(("status", "未检测到语音"))
+                    return
+                config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data)
 
-            # Clean spoken text of tags for display
-            clean_spoken = re.sub(r'\[REC_[A-Z_]+\]', '', spoken_text)
-            clean_spoken = re.sub(r'\[END_[A-Z_]+\]', '', clean_spoken)
-            clean_spoken = re.sub(r'<\|[^|]+\|>', '', clean_spoken)
-            clean_spoken = re.sub(r'【.*?】', '', clean_spoken).strip()
-
-            self.processing_queue.put(("clean_last_ai", clean_spoken))
-
-            # TTS text: keep [breath]/[laughter] for CosyVoice, strip the rest
-            tts_text = re.sub(r'\[REC_[A-Z_]+\]', '', spoken_text)
-            tts_text = re.sub(r'\[END_[A-Z_]+\]', '', tts_text)
-            tts_text = re.sub(r'<\|[^|]+\|>', '', tts_text)
-            tts_text = re.sub(r'【.*?】', '', tts_text).strip()
-
-            # Check for session end tags
-            end_patterns = {
-                r'\[END_GOAL_ACHIEVED\]': 'goal_achieved',
-                r'\[END_TIME_LIMIT\]': 'time_limit',
-                r'\[END_SAFETY\]': 'safety',
-                r'\[END_INVALID\]': 'invalid',
-                r'\[END_QUIT\]': 'quit',
-            }
-
-            end_type = None
-            for pattern, etype in end_patterns.items():
-                if re.search(pattern, full_response):
-                    end_type = etype
-                    break
-
-            # Check for relaxation recommendation tags
-            rec_tags = {
-                r'\[REC_BREATHING\]': 'breathing',
-                r'\[REC_MUSCLE\]': 'muscle',
-                r'\[REC_MEDITATION\]': 'meditation',
-                r'\[REC_GAME\]': 'game',
-            }
-
-            relaxation_rec = None
-            for pattern, rtype in rec_tags.items():
-                if re.search(pattern, full_response):
-                    relaxation_rec = rtype
-                    break
-
-            # Save assistant message
-            if self.data_manager:
-                self.data_manager.save_assistant_message(None, full_response, sample_rate=24000)
-
-            # 4. TTS
-            self.processing_queue.put(("status", "正在播放..."))
-            if self.tts_service and tts_text:
-                try:
-                    self.tts_service.generate_and_play(tts_text)
-                except Exception as e:
-                    print(f"TTS error: {e}")
-
-            # 5. Post-processing
-            if end_type:
-                if end_type == 'safety':
-                    self.processing_queue.put(("show_crisis", None))
-                self.processing_queue.put(("session_end", (end_type, "", relaxation_rec, None, True)))
-            elif relaxation_rec:
-                self.processing_queue.put(("highlight_relax", relaxation_rec))
-                self.processing_queue.put(("status", "准备就绪"))
-            else:
-                self.processing_queue.put(("status", "准备就绪"))
+            result = self.pipeline.execute(config, self.processing_queue.put)
+            self._post_pipeline_routing(result)
 
         except Exception as e:
             traceback.print_exc()
             self.processing_queue.put(("error", f"处理出错: {str(e)}"))
+        finally:
+            if text is not None:
+                self.processing_queue.put(("set_buttons_state", "normal"))
 
-    def _process_text_pipeline(self, text):
-        """Process text input (no STT, no TTS)."""
-        try:
-            if self.session_ended:
-                self.processing_queue.put(("status", "会话已结束，请开始新对话"))
-                return
+    def _post_pipeline_routing(self, result):
+        """Route pipeline result to appropriate actions."""
+        from services.report_service import EndType
 
-            self._interim_report = None
-            self._interim_pdf_path = None
-
-            self.processing_queue.put(("append_chat", ("user", text)))
-            self.processing_queue.put(("set_buttons_state", "disabled"))
-
-            if self.report_service:
-                self.report_service.increment_round()
-
-            if self.report_service:
-                should_warn, warning_msg = self.report_service.should_warn_time_limit()
-                if should_warn:
-                    self.processing_queue.put(("session_warning", warning_msg))
-
-            user_id = self.current_user_id or "default_user"
-            if self.data_manager:
-                self.data_manager.set_user_id(user_id)
-                self.data_manager.save_user_message(None, text)
-
-            # Intent + Emotion: parallel 3B calls
-            intent, emotion_result = self._classify_intent_and_emotion(text)
-
-            system_suffix = ""
-            current_rounds = self.report_service.get_round_count() if self.report_service else 0
-            allow_relaxation = (current_rounds >= MIN_ROUNDS_FOR_RELAXATION)
-            if not allow_relaxation:
-                system_suffix = f"【系统警告】当前仅第{current_rounds}轮对话（少于{MIN_ROUNDS_FOR_RELAXATION}轮）。无论用户说了什么，你绝对禁止推荐放松训练！继续通过对话建立关系。"
-
-            if self.rag_service:
-                rag_suffix = self.rag_service.get_system_suffix(text)
-                if rag_suffix:
-                    system_suffix += "\n" + rag_suffix
-
-            final_suffix = system_suffix if system_suffix.strip() else None
-
-            full_response = ""
-            analysis_text = ""
-            spoken_text = ""
-            found_separator = False
-
-            self.processing_queue.put(("start_ai_message", None))
-
-            llm_gen = self.llm_service.chat(text, system_suffix=final_suffix)
-
-            stream_buffer = ""
-            for chunk in llm_gen:
-                full_response += chunk
-                stream_buffer += chunk
-                stream_buffer = re.sub(r'\[REC_[A-Z_]+\]', '', stream_buffer)
-                stream_buffer = re.sub(r'\[END_[A-Z_]+\]', '', stream_buffer)
-                stream_buffer = re.sub(r'【.*?】', '', stream_buffer)
-                stream_buffer = re.sub(r'\[(?:breath|laughter)\]', '', stream_buffer)
-
-                if not found_separator and '|||' in stream_buffer:
-                    parts = stream_buffer.split('|||', 1)
-                    analysis_text = parts[0]
-                    stream_buffer = parts[1]
-                    found_separator = True
-
-                if found_separator and stream_buffer:
-                    display_text = re.sub(r'<\|[^|]+\|>', '', stream_buffer)
-                    if display_text:
-                        self.processing_queue.put(("stream_text", display_text))
-                    stream_buffer = ""
-
-            self.processing_queue.put(("finish_streaming", None))
-
-            if '|||' in full_response:
-                parts = full_response.split('|||', 1)
-                analysis_text = parts[0].strip()
-                spoken_text = parts[1].strip()
-            else:
-                spoken_text = full_response.strip()
-
-            clean_spoken = re.sub(r'\[REC_[A-Z_]+\]', '', spoken_text)
-            clean_spoken = re.sub(r'\[END_[A-Z_]+\]', '', clean_spoken)
-            clean_spoken = re.sub(r'<\|[^|]+\|>', '', clean_spoken)
-            clean_spoken = re.sub(r'【.*?】', '', clean_spoken).strip()
-
-            self.processing_queue.put(("clean_last_ai", clean_spoken))
-
-            end_patterns = {
-                r'\[END_GOAL_ACHIEVED\]': 'goal_achieved',
-                r'\[END_TIME_LIMIT\]': 'time_limit',
-                r'\[END_SAFETY\]': 'safety',
-                r'\[END_INVALID\]': 'invalid',
-                r'\[END_QUIT\]': 'quit',
-            }
-            end_type = None
-            for pattern, etype in end_patterns.items():
-                if re.search(pattern, full_response):
-                    end_type = etype
-                    break
-
-            rec_tags = {
-                r'\[REC_BREATHING\]': 'breathing',
-                r'\[REC_MUSCLE\]': 'muscle',
-                r'\[REC_MEDITATION\]': 'meditation',
-                r'\[REC_GAME\]': 'game',
-            }
-            relaxation_rec = None
-            for pattern, rtype in rec_tags.items():
-                if re.search(pattern, full_response):
-                    relaxation_rec = rtype
-                    break
-
-            if self.data_manager:
-                self.data_manager.save_assistant_message(None, full_response, sample_rate=24000)
-
-            if end_type:
-                if end_type == 'safety':
-                    self.processing_queue.put(("show_crisis", None))
-                self.processing_queue.put(("session_end", (end_type, "", relaxation_rec, None, True)))
-            elif relaxation_rec:
-                self.processing_queue.put(("highlight_relax", relaxation_rec))
-                self.processing_queue.put(("status", "准备就绪"))
-            else:
-                self.processing_queue.put(("status", "准备就绪"))
-
-            self.processing_queue.put(("set_buttons_state", "normal"))
-
-        except Exception as e:
-            traceback.print_exc()
-            self.processing_queue.put(("error", f"处理出错: {str(e)}"))
-            self.processing_queue.put(("set_buttons_state", "normal"))
+        if result.end_type:
+            et = get_end_type_enum(result.end_type)
+            if et == EndType.SAFETY:
+                self.processing_queue.put(("show_crisis", None))
+            self._handle_session_end(et, result.relaxation_rec)
+        elif result.relaxation_rec:
+            self.processing_queue.put(("highlight_relax", result.relaxation_rec))
+            self.processing_queue.put(("status", "准备就绪"))
+        elif result.intent == "entertainment":
+            # Future: media library integration
+            self.processing_queue.put(("status", "准备就绪"))
+        else:
+            self.processing_queue.put(("status", "准备就绪"))
 
     # ==================== Queue Processing ====================
 
@@ -623,14 +368,11 @@ class MainWindow(QMainWindow):
                 elif msg_type == "fill_info_prompt":
                     QTimer.singleShot(1000, self._play_fill_info_prompt)
 
-                elif msg_type == "post_relaxation_greeting":
-                    QTimer.singleShot(500, self._play_post_relaxation_greeting)
-
                 elif msg_type == "start_keepalive":
                     self._start_ollama_keepalive()
 
-                elif msg_type == "show_continue_dialog":
-                    QTimer.singleShot(100, self._show_continue_or_end_dialog)
+                elif msg_type == "video_finished":
+                    QTimer.singleShot(500, lambda c=content: self._on_video_finished(c))
 
                 elif msg_type == "loading_progress":
                     if self.loading_screen:
@@ -753,13 +495,38 @@ class MainWindow(QMainWindow):
 
             self.report_service = ReportService(self.llm_service, agent_service=self.agent_service)
             self.report_service.start_session()
-            self.session_ended = False
+            self.orchestrator.transition_to(SessionState.CHATTING)
 
             try:
                 self.rag_service = get_rag_service()
             except Exception as e:
                 print(f"[WARNING] RAG service init failed: {e}")
                 self.rag_service = None
+
+            # Unified conversation pipeline
+            self.pipeline = ConversationPipeline(
+                stt_service=self.stt_service,
+                llm_service=self.llm_service,
+                tts_service=self.tts_service,
+                rag_service=self.rag_service,
+                agent_service=self.agent_service,
+                report_service=self.report_service,
+                data_manager=self.data_manager,
+                session_emotions=self.session_emotions,
+            )
+
+            # Tools
+            from services.tools.video_tool import VideoPlayTool
+            from services.tools.relaxation_tool import RelaxationRecommendationTool
+            from services.tools.report_tool import ReportGenerationTool
+            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.video_tool = VideoPlayTool(app_dir)
+            self.relaxation_tool = RelaxationRecommendationTool(
+                self.agent_service, self.report_service
+            )
+            self.report_tool = ReportGenerationTool(
+                self.report_service, self.data_manager
+            )
 
             self.processing_queue.put(("loading_progress", 100))
             self.processing_queue.put(("loading_step", "加载完成"))
@@ -788,15 +555,16 @@ class MainWindow(QMainWindow):
     def _start_new_session(self):
         self.chat_panel.clear_chat()
         self.session_emotions = []
+        self.orchestrator.reset()
         if self.llm_service:
             self.llm_service.reset_conversation()
         if self.data_manager:
             self.data_manager.start_new_session()
         if self.report_service:
             self.report_service.start_session()
-        self.session_ended = False
 
     def _show_session_end_dialog(self, end_type, feedback, relaxation_rec, audio_data, play_audio=True):
+        self.orchestrator.transition_to(SessionState.SESSION_ENDED)
         report_path = getattr(self, '_interim_pdf_path', None)
         dialog = SessionEndDialog(
             self, end_type, feedback, relaxation_rec,
@@ -810,35 +578,115 @@ class MainWindow(QMainWindow):
         dialog = CrisisDialog(self, CRISIS_HOTLINES)
         dialog.exec()
 
-    def _show_continue_or_end_dialog(self):
-        dialog = ContinueOrEndDialog(self)
-        dialog.continue_chosen.connect(self._on_continue_chosen)
-        dialog.end_chosen.connect(self._on_end_chosen)
-        dialog.exec()
+    def _start_post_relaxation_timeout(self):
+        """启动放松后超时定时器（60秒无操作自动结束）"""
+        self._post_relaxation_timer = QTimer(self)
+        self._post_relaxation_timer.setSingleShot(True)
+        self._post_relaxation_timer.timeout.connect(self._on_post_relaxation_timeout_trigger)
+        self._post_relaxation_timer.start(POST_RELAXATION_TIMEOUT * 1000)
+
+    def _on_post_relaxation_timeout_trigger(self):
+        """超时定时器触发：关闭弹窗，标记超时"""
+        self.orchestrator.ctx.post_relaxation_timed_out = True
+        if hasattr(self, '_post_relaxation_dialog') and self._post_relaxation_dialog:
+            self._post_relaxation_dialog.close()
+
+    def _on_post_relaxation_timeout(self):
+        """放松后超时：播放结束语 → 生成报告结束会话"""
+        if self.orchestrator.state != SessionState.POST_RELAXATION:
+            return
+        message = random.choice(TIMEOUT_END_MESSAGE)
+        self.chat_panel.add_system_message(message)
+        if self.tts_service:
+            threading.Thread(
+                target=self.tts_service.generate_and_play,
+                args=(message,), daemon=True
+            ).start()
+        QTimer.singleShot(5000, lambda: self._handle_session_end(EndType.TIME_LIMIT))
+
+    def _cancel_post_relaxation_timer(self):
+        """取消放松后超时定时器（用户做出选择或关闭弹窗时调用）"""
+        if hasattr(self, '_post_relaxation_timer') and self._post_relaxation_timer.isActive():
+            self._post_relaxation_timer.stop()
 
     def _on_continue_chosen(self):
-        self.chat_panel.add_system_message("会话继续")
-        if self.llm_service:
-            self.processing_queue.put(("post_relaxation_greeting", None))
+        """用户选择继续聊天"""
+        self._cancel_post_relaxation_timer()
+        self.orchestrator.transition_to(SessionState.CHATTING)
+        message = random.choice(CONTINUE_CHAT_MESSAGE)
+        self.chat_panel.add_system_message(message)
+        if self.tts_service:
+            threading.Thread(
+                target=self.tts_service.generate_and_play,
+                args=(message,), daemon=True
+            ).start()
 
     def _on_end_chosen(self):
-        if self.report_service:
-            self.report_service.end_session("goal_achieved")
+        """用户在放松后弹窗选择结束"""
+        self._cancel_post_relaxation_timer()
+        from services.report_service import EndType
+        self._handle_session_end(EndType.GOAL_ACHIEVED)
 
     # ==================== Video / Game ====================
 
-    def _play_video(self, filename):
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        video_path = os.path.join(app_dir, filename)
-        if os.path.exists(video_path):
-            import subprocess
-            if sys.platform == 'win32':
-                os.startfile(video_path)
-            else:
-                subprocess.Popen(['xdg-open', video_path])
+    def _play_relaxation_video(self, relaxation_type):
+        """统一的放松视频播放流程：全屏播放 → 记录 → 弹窗
+        relaxation_type: 'breathing', 'muscle', 'meditation'
+        """
+        if not self.orchestrator.can_play_video():
+            return
 
-            # After video ends, show continue dialog
-            QTimer.singleShot(2000, lambda: self.processing_queue.put(("show_continue_dialog", None)))
+        self.orchestrator.transition_to(SessionState.VIDEO_PLAYING)
+        self.control_panel.stop_all_blinks()
+
+        # Record relaxation BEFORE video (authoritative record)
+        relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
+        if relax_name:
+            self.orchestrator.ctx.current_relaxation_type = relax_name
+            if self.report_service:
+                self.report_service.record_relaxation(relax_name)
+
+        def video_runner():
+            try:
+                self.video_tool.execute(relaxation_type=relaxation_type)
+            except Exception as e:
+                print(f"Video error: {e}")
+            finally:
+                self.processing_queue.put(("video_finished", relaxation_type))
+
+        threading.Thread(target=video_runner, daemon=True).start()
+
+    def _on_video_finished(self, relaxation_type):
+        """视频播放完成后的处理：问候 → 弹窗 + 超时"""
+        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
+
+        # NOTE: record_relaxation already called in _play_relaxation_video before video plays
+
+        # 1. 播放放松后问候
+        self._play_post_relaxation_greeting()
+
+        # 2. 启动超时定时器
+        self.orchestrator.ctx.post_relaxation_timed_out = False
+        self._start_post_relaxation_timeout()
+
+        # 3. 显示继续/结束弹窗
+        dialog = ContinueOrEndDialog(self)
+        self._post_relaxation_dialog = dialog
+        dialog.continue_chosen.connect(self._on_continue_chosen)
+        dialog.end_chosen.connect(self._on_end_chosen)
+
+        # X-button close = treat as "continue chatting" (unless timeout fired)
+        def on_dialog_finished():
+            self._cancel_post_relaxation_timer()
+            if self.orchestrator.state == SessionState.POST_RELAXATION:
+                if self.orchestrator.ctx.post_relaxation_timed_out:
+                    self._on_post_relaxation_timeout()
+                else:
+                    self._on_continue_chosen()
+
+        dialog.finished.connect(on_dialog_finished)
+        dialog.exec()
+        self._post_relaxation_dialog = None
 
     def _play_game(self):
         try:
@@ -951,7 +799,7 @@ class MainWindow(QMainWindow):
             "呼吸放松训练": "呼吸放松训练", "呼吸训练": "呼吸放松训练",
             "unknown": "未知"
         }
-        raw_type = getattr(self, '_current_relaxation_type', "")
+        raw_type = self.orchestrator.ctx.current_relaxation_type or ""
         if raw_type:
             clean_type = raw_type.replace(".mp4", "")
             return relax_map.get(clean_type, clean_type)
@@ -990,92 +838,33 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
         return None
 
-    def _classify_intent_and_emotion(self, text: str) -> tuple:
-        """Run intent + emotion classification in parallel via 3B agent. Returns (intent_str, emotion_result)."""
-        intent_result = {"intent": "counseling", "confidence": 1.0}
-        emotion_result = {"emotion": "neutral", "intensity": 0.0}
-        if self.agent_service:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {
-                    executor.submit(self.agent_service.classify_intent, text): "intent",
-                    executor.submit(self.agent_service.detect_emotion, text): "emotion",
-                }
-                for future in as_completed(futures):
-                    tag = futures[future]
-                    try:
-                        result = future.result()
-                        if tag == "intent":
-                            intent_result = result
-                        else:
-                            emotion_result = result
-                            self.session_emotions.append({"role": "user", **emotion_result})
-                    except Exception as e:
-                        print(f"[WARNING] {tag} detection failed: {e}")
-        intent = intent_result.get("intent", "counseling")
-        print(f"[AGENT] Intent: {intent} ({intent_result.get('confidence', 0):.2f}) | Emotion: {emotion_result.get('emotion', 'neutral')} ({emotion_result.get('intensity', 0):.2f})")
-        return intent, emotion_result
-
-    def _infer_relaxation_tag(self, spoken_text, allow_relaxation, current_rounds):
-        """Infer relaxation recommendation tag from spoken text using 3B agent."""
-        if not allow_relaxation:
-            return None
-        # Try 3B agent first, fallback to keyword matching
-        tag = None
-        if self.agent_service:
-            try:
-                tag = self.agent_service.infer_relaxation_tag(spoken_text)
-            except Exception as e:
-                print(f"[WARNING] Agent relaxation inference failed: {e}")
-
-        if tag is None:
-            # Keyword fallback
-            if "呼吸" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-                tag = "[REC_BREATHING]"
-            elif "肌肉" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-                tag = "[REC_MUSCLE]"
-            elif "冥想" in spoken_text and ("按钮" in spoken_text or "练习" in spoken_text):
-                tag = "[REC_MEDITATION]"
-            elif "游戏" in spoken_text:
-                tag = "[REC_GAME]"
-            elif "冥想" in spoken_text:
-                tag = "[REC_MEDITATION]"
-            elif "呼吸" in spoken_text:
-                tag = "[REC_BREATHING]"
-            elif "肌肉" in spoken_text:
-                tag = "[REC_MUSCLE]"
-
-        if tag:
-            print(f"[DEBUG] Inferred relaxation tag: {tag}")
-            self._last_relaxation_recommendation_round = current_rounds
-        return tag
-
     def _handle_session_end(self, end_type, relaxation_tag=None):
-        """Handle session end: generate reports and trigger UI updates."""
+        """Handle session end using orchestrator decision logic."""
         from services.report_service import EndType
-        self.session_ended = True
 
-        if not relaxation_tag and not getattr(self, '_current_relaxation_type', None):
+        # Use orchestrator to decide: force relaxation or generate reports
+        if not relaxation_tag and not self.orchestrator.ctx.current_relaxation_type:
             try:
                 conversation_history = self.llm_service.conversation_history
-                relaxation_tag = self.report_service.recommend_relaxation_strategy(conversation_history)
+                relaxation_tag = self.relaxation_tool.execute(
+                    conversation_history=conversation_history
+                )
             except Exception as e:
                 print(f"[WARNING] 智能推荐失败: {e}")
                 relaxation_tag = "呼吸"
 
-        if end_type not in [EndType.SAFETY, EndType.INVALID] and \
-           not getattr(self, '_current_relaxation_type', None) and \
-           not getattr(self, '_has_forced_relaxation_rec', False):
-            self._has_forced_relaxation_rec = True
-            self.session_ended = False
-            rec_text = f"等等，在结束之前，我留意到你还是有点紧张。要不咱们先做个{relaxation_tag}放松训练？只需几分钟，效果很好的。"
+        action, data = self.orchestrator.evaluate_session_end(end_type, relaxation_tag)
+
+        if action == "force_relaxation":
+            tag = data["relaxation_tag"]
+            rec_text = f"等等，在结束之前，我留意到你还是有点紧张。要不咱们先做个{tag}放松训练？只需几分钟，效果很好的。"
             self.processing_queue.put(("append_chat", ("ai", rec_text)))
             threading.Thread(target=lambda: self.tts_service.generate_and_play(rec_text), daemon=True).start()
-            time.sleep(1)
-            self.processing_queue.put(("highlight_relax", relaxation_tag))
+            QTimer.singleShot(1000, lambda: self.processing_queue.put(("highlight_relax", tag)))
             self.processing_queue.put(("status", "请尝试放松训练"))
             return
 
+        # action == "generate_reports"
         self.processing_queue.put(("status", "正在生成反馈..."))
 
         def generate_reports():
@@ -1083,47 +872,36 @@ class MainWindow(QMainWindow):
                 user_id = self.current_user_id or "default_user"
                 current_user_info = getattr(self, "user_info", {})
                 conversation_history = self.llm_service.conversation_history
+                relax_str = self._get_relaxation_info_str()
 
+                # Map relaxation_tag for report generation
                 relaxation_rec = None
                 if relaxation_tag:
                     tag_map = {"呼吸": "BREATHING", "肌肉": "MUSCLE", "冥想": "MEDITATION"}
                     relaxation_rec = tag_map.get(relaxation_tag)
 
-                # Generate visitor feedback
                 self.processing_queue.put(("start_ai_message", None))
-                full_feedback = ""
-                stream_gen = self.report_service.generate_visitor_feedback(
-                    conversation_history, end_type, relaxation_rec, stream=True,
-                    session_emotions=self.session_emotions
+                result = self.report_tool.execute(
+                    conversation_history=conversation_history,
+                    end_type=end_type,
+                    user_id=user_id,
+                    user_info=current_user_info,
+                    relaxation_info=relaxation_rec or relax_str,
+                    session_emotions=self.session_emotions,
+                    emit=lambda msg_type, content: self.processing_queue.put((msg_type, content)),
                 )
-                for chunk in stream_gen:
-                    full_feedback += chunk
-                    clean = re.sub(r'<\|[^>]+\|>', '', chunk)
-                    clean = re.sub(r'\[REC_[A-Z_]+\]', '', clean)
-                    clean = re.sub(r'\[END_[A-Z_]+\]', '', clean)
-                    clean = re.sub(r'\[(?:breath|laughter)\]', '', clean)
-                    if clean:
-                        self.processing_queue.put(("stream_text", clean))
                 self.processing_queue.put(("finish_streaming", None))
 
-                # Generate researcher report
-                relax_str = self._get_relaxation_info_str()
-                researcher_report = self.report_service.generate_researcher_report(
-                    conversation_history, user_id, end_type,
-                    user_info=current_user_info, relaxation_info=relax_str,
-                    session_emotions=self.session_emotions
-                )
+                full_feedback = result["feedback"]
+                researcher_report = result["researcher_report"]
+
                 if isinstance(researcher_report, dict):
                     researcher_report["relaxation_completed"] = True
                     researcher_report["relaxation_type"] = relax_str
 
-                # Save report
-                save_result = self.data_manager.save_session_report(
-                    researcher_report, full_feedback, end_type.value
-                )
-
                 # Generate PDF
-                pdf_path = self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
+                save_result = result.get("save_result")
+                self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
 
                 self.processing_queue.put(("session_end", (end_type, full_feedback, relaxation_rec, None, False)))
                 if end_type == EndType.SAFETY:
@@ -1136,51 +914,6 @@ class MainWindow(QMainWindow):
                 self.processing_queue.put(("error", f"报告生成失败: {str(e)}"))
 
         threading.Thread(target=generate_reports, daemon=True).start()
-
-    def _play_video_with_report(self, filename):
-        """Play relaxation video with background report generation."""
-        from services.video_service import get_video_player
-        from services.report_service import EndType
-
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        video_path = os.path.join(app_dir, filename)
-        if not os.path.exists(video_path):
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "警告", f"文件不存在: {filename}")
-            return
-
-        self.control_panel.stop_all_blinks()
-        self._current_relaxation_type = filename.replace(".mp4", "")
-        self._relaxation_completed_flag = False
-        self._has_forced_relaxation_rec = False
-
-        if self.report_service:
-            relax_name = filename.replace(".mp4", "")
-            self.report_service.record_relaxation(relax_name)
-
-        def video_runner():
-            try:
-                player = get_video_player()
-                player.play_video(video_path)
-            except Exception as e:
-                print(f"Video error: {e}")
-            finally:
-                if self.report_service:
-                    relax_name = filename.replace(".mp4", "")
-                    self.report_service.record_relaxation(relax_name)
-                self.processing_queue.put(("post_relaxation_greeting", None))
-
-        threading.Thread(target=video_runner, daemon=True).start()
-
-    def _on_continue_chosen_with_report(self):
-        """Continue chat after relaxation with interim report."""
-        self.chat_panel.add_system_message("放松训练已完成，可以继续对话。")
-        self._relaxation_completed_flag = True
-        self.processing_queue.put(("post_relaxation_greeting", None))
-
-    def _on_end_chosen_with_report(self):
-        """End session after relaxation."""
-        self._handle_session_end(EndType.GOAL_ACHIEVED)
 
     def _launch_therapeutic_game(self):
         """Launch the therapeutic game."""

@@ -29,16 +29,6 @@ class EndType(Enum):
     QUIT = "QUIT"                      # 用户主动退出
 
 
-# End type detection patterns
-END_PATTERNS = {
-    EndType.GOAL_ACHIEVED: r'\[END_GOAL_ACHIEVED\]',
-    EndType.TIME_LIMIT: r'\[END_TIME_LIMIT\]',
-    EndType.SAFETY: r'\[END_SAFETY\]',
-    EndType.INVALID: r'\[END_INVALID\]',
-    EndType.QUIT: r'\[END_QUIT\]',
-}
-
-
 class ReportService:
     """
     Report generation service for voice chat sessions.
@@ -149,29 +139,7 @@ class ReportService:
         return self.session_start_time
     
     # ==================== End Type Detection ====================
-    
-    def check_session_end(self, response: str) -> EndType:
-        """
-        Check if AI response contains session end tag.
-        
-        Args:
-            response: AI response text
-            
-        Returns:
-            EndType indicating the type of session end, or NONE
-        """
-        for end_type, pattern in END_PATTERNS.items():
-            if re.search(pattern, response):
-                return end_type
-        return EndType.NONE
-    
-    def strip_end_tags(self, response: str) -> str:
-        """Remove end tags from response text."""
-        result = response
-        for pattern in END_PATTERNS.values():
-            result = re.sub(pattern, '', result)
-        return result.strip()
-    
+
     def should_warn_time_limit(self) -> tuple[bool, str]:
         """
         Check if time/round warning should be shown.
