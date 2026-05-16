@@ -23,6 +23,8 @@ class ControlPanel(FrostedPanel):
     play_muscle = Signal()
     play_meditation = Signal()
     play_game = Signal()
+    open_history = Signal()
+    open_stats = Signal()
 
     def __init__(self, parent=None):
         super().__init__(alpha=0.65, radius=16, parent=None)
@@ -267,6 +269,33 @@ class ControlPanel(FrostedPanel):
         self.btn_game.clicked.connect(self.play_game.emit)
         layout.addWidget(self.btn_game)
 
+        # Researcher tools
+        self.btn_history = QPushButton("历史会话")
+        self.btn_history.setObjectName("relaxButton")
+        self.btn_history.setStyleSheet("""
+            QPushButton {
+                background-color: #78909C; color: white;
+                border: none; border-radius: 8px;
+                padding: 7px; font-size: 12px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #607D8B; }
+        """)
+        self.btn_history.clicked.connect(self.open_history.emit)
+        layout.addWidget(self.btn_history)
+
+        self.btn_stats = QPushButton("统计分析")
+        self.btn_stats.setObjectName("relaxButton")
+        self.btn_stats.setStyleSheet("""
+            QPushButton {
+                background-color: #5C6BC0; color: white;
+                border: none; border-radius: 8px;
+                padding: 7px; font-size: 12px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3F51B5; }
+        """)
+        self.btn_stats.clicked.connect(self.open_stats.emit)
+        layout.addWidget(self.btn_stats)
+
         # Store blink buttons for easy access
         self._blink_buttons = [
             self.btn_breathing, self.btn_muscle,
@@ -275,6 +304,19 @@ class ControlPanel(FrostedPanel):
 
         # Spacer
         layout.addStretch()
+
+        # Session progress
+        progress_title = QLabel("会话进度")
+        progress_title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        progress_title.setStyleSheet("color: #5d4037; padding: 4px 0;")
+        layout.addWidget(progress_title)
+
+        self.time_progress = self._make_progress_bar(bar_color="#64B5F6")
+        self.time_progress.setFormat("时间 %v/%m 分钟")
+        layout.addWidget(self.time_progress)
+
+        self.round_progress = self._make_progress_bar()
+        self.round_progress.setVisible(False)
 
         # Separator
         sep4 = QFrame()
@@ -395,3 +437,53 @@ class ControlPanel(FrostedPanel):
         self.btn_muscle.setEnabled(enabled)
         self.btn_meditation.setEnabled(enabled)
         self.btn_game.setEnabled(enabled)
+
+    @staticmethod
+    def _make_progress_bar(bar_color="#4CAF50"):
+        from PySide6.QtWidgets import QProgressBar
+        bar = QProgressBar()
+        bar.setTextVisible(True)
+        bar.setFixedHeight(18)
+        bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid #d0d0d0;
+                border-radius: 6px;
+                background-color: #f5f5f5;
+                font-size: 9px;
+                color: #5d4037;
+            }}
+            QProgressBar::chunk {{
+                border-radius: 5px;
+                background-color: {bar_color};
+            }}
+        """)
+        bar._base_color = bar_color
+        return bar
+
+    def update_session_progress(self, elapsed_minutes, total_minutes, rounds_used, total_rounds):
+        """Update time progress bar. Auto-colors when near limits."""
+        import math
+        time_pct = min(elapsed_minutes / total_minutes, 1.0) if total_minutes > 0 else 0
+
+        self.time_progress.setMaximum(total_minutes)
+        self.time_progress.setValue(int(math.ceil(elapsed_minutes)))
+
+        # Round bar stays hidden but tracks internally
+        self.round_progress.setMaximum(total_rounds)
+        self.round_progress.setValue(rounds_used)
+
+        # Time bar color: blue -> orange -> red
+        if time_pct > 0.95:
+            color = "#EF5350"
+        elif time_pct > 0.8:
+            color = "#FF9800"
+        else:
+            color = "#64B5F6"
+        self._apply_bar_color(self.time_progress, color)
+
+    @staticmethod
+    def _apply_bar_color(bar, color):
+        base = bar.styleSheet()
+        for old in ("#64B5F6", "#4CAF50", "#FF9800", "#EF5350"):
+            base = base.replace(f"background-color: {old};", f"background-color: {color};")
+        bar.setStyleSheet(base)

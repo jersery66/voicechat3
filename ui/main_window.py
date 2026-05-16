@@ -19,6 +19,10 @@ from PySide6.QtGui import QFont, QPixmap, QPainter, QColor, QBrush
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 from config import (
     APP_NAME, CRISIS_HOTLINES, GREETING_MESSAGE, GREETING_VARIANTS,
     POST_RELAXATION_MESSAGE, FILL_INFO_PROMPT, TRANSITION_PROMPT,
@@ -36,6 +40,7 @@ from .dialogs import (
 from .styles import get_style
 from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineConfig
 from services.session_orchestrator import SessionState, SessionOrchestrator
+from services.report_service import EndType
 
 
 class MainWindow(QMainWindow):
@@ -53,10 +58,18 @@ class MainWindow(QMainWindow):
         self.rag_service = None
         self.agent_service = None
         self.session_emotions = []  # Accumulated emotion tags for report
+        self._scale_tags = {}       # Accumulated scale assessment tags
+        self._session_ending = False  # Guard against double report generation
+
+        # Tools (initialized in load_models; guarded against partial init)
+        self.video_tool = None
+        self.relaxation_tool = None
+        self.report_tool = None
 
         # State
         self.is_recording = False
         self.models_loaded = False
+        self._dark_mode = False
         self.orchestrator = SessionOrchestrator()
         self.user_info = {}
         self.current_user_id = None
@@ -77,6 +90,11 @@ class MainWindow(QMainWindow):
         self._queue_timer = QTimer(self)
         self._queue_timer.timeout.connect(self.process_queue)
         self._queue_timer.start(50)
+
+        # Progress bars update at a lower frequency (1s) — no need per-message
+        self._progress_timer = QTimer(self)
+        self._progress_timer.timeout.connect(self._update_progress_bars)
+        self._progress_timer.start(1000)
 
         # Load models in background
         self.load_thread = threading.Thread(target=self.load_models, daemon=True)
@@ -133,6 +151,21 @@ class MainWindow(QMainWindow):
             self.loading_screen.setGeometry(self.centralWidget().rect())
         self.update()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_T and event.modifiers() & Qt.ControlModifier:
+            self._toggle_theme()
+            return
+        super().keyPressEvent(event)
+
+    def _toggle_theme(self):
+        from .widgets import MessageBubble
+        self._dark_mode = not self._dark_mode
+        self.setStyleSheet(get_style(dark=self._dark_mode))
+        MessageBubble.set_dark_mode(self._dark_mode)
+        for panel in [self.control_panel, self.chat_panel]:
+            if hasattr(panel, 'set_theme'):
+                panel.set_theme(self._dark_mode)
+
     def paintEvent(self, event):
         """Paint the background image."""
         if self._bg_pixmap:
@@ -160,6 +193,8 @@ class MainWindow(QMainWindow):
         self.control_panel.play_muscle.connect(lambda: self._play_relaxation_video("muscle"))
         self.control_panel.play_meditation.connect(lambda: self._play_relaxation_video("meditation"))
         self.control_panel.play_game.connect(self._play_game)
+        self.control_panel.open_history.connect(self._open_session_review)
+        self.control_panel.open_stats.connect(self._open_stats_panel)
 
         # Chat panel signals
         self.chat_panel.clear_clicked.connect(self._clear_history)
@@ -281,10 +316,11 @@ class MainWindow(QMainWindow):
                 config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data)
 
             result = self.pipeline.execute(config, self.processing_queue.put)
+            self._scale_tags = result.scale_tags
             self._post_pipeline_routing(result)
 
         except Exception as e:
-            traceback.print_exc()
+            logger.exception("Exception occurred")
             self.processing_queue.put(("error", f"处理出错: {str(e)}"))
         finally:
             if text is not None:
@@ -292,11 +328,9 @@ class MainWindow(QMainWindow):
 
     def _post_pipeline_routing(self, result):
         """Route pipeline result to appropriate actions."""
-        from services.report_service import EndType
-
         if result.end_type:
             et = get_end_type_enum(result.end_type)
-            if et == EndType.SAFETY:
+            if et == EndType.SAFETY and result.crisis_risk < 7:
                 self.processing_queue.put(("show_crisis", None))
             self._handle_session_end(et, result.relaxation_rec)
         elif result.relaxation_rec:
@@ -311,6 +345,12 @@ class MainWindow(QMainWindow):
     # ==================== Queue Processing ====================
 
     def process_queue(self):
+        # VAD auto-stop polling
+        if (self.is_recording and self.stt_service
+                and self.stt_service.is_vad_triggered()):
+            self.is_recording = False
+            self._on_record_stopped()
+
         try:
             while True:
                 task = self.processing_queue.get_nowait()
@@ -345,7 +385,7 @@ class MainWindow(QMainWindow):
                     self._show_session_end_dialog(end_type, feedback, relaxation_rec, audio_data, play_audio)
 
                 elif msg_type == "show_crisis":
-                    self._show_crisis_dialog()
+                    self._show_crisis_dialog(content)
 
                 elif msg_type == "highlight_relax":
                     # Map Chinese tags to English keys for control_panel
@@ -445,7 +485,7 @@ class MainWindow(QMainWindow):
                     self.processing_queue.put(("status", "语音识别模型未找到，跳过 STT"))
                     self.tts_service.load_model(use_streaming=True)
             except Exception as e:
-                print(f"[WARNING] STT load failed: {e}")
+                logger.warning(f"STT load failed: {e}")
                 self.processing_queue.put(("status", f"语音识别加载失败: {e}"))
                 self.stt_service = None
                 if not hasattr(self, '_tts_loaded_in_thread'):
@@ -480,11 +520,11 @@ class MainWindow(QMainWindow):
                 from services.agent_service import get_agent_service
                 self.agent_service = get_agent_service()
                 if self.agent_service.is_available():
-                    print("[INFO] Agent service (3B) ready")
+                    logger.info("Agent service (3B) ready")
                 else:
-                    print("[WARNING] 3B agent model not available, using keyword fallback")
+                    logger.warning("3B agent model not available, using keyword fallback")
             except Exception as e:
-                print(f"[WARNING] Agent service init failed: {e}")
+                logger.warning(f"Agent service init failed: {e}")
                 self.agent_service = None
 
             # Step 3: Data + Report + RAG
@@ -500,10 +540,12 @@ class MainWindow(QMainWindow):
             try:
                 self.rag_service = get_rag_service()
             except Exception as e:
-                print(f"[WARNING] RAG service init failed: {e}")
+                logger.warning(f"RAG service init failed: {e}")
                 self.rag_service = None
 
             # Unified conversation pipeline
+            from services.emotion_tracker import EmotionTracker
+            self.emotion_tracker = EmotionTracker()
             self.pipeline = ConversationPipeline(
                 stt_service=self.stt_service,
                 llm_service=self.llm_service,
@@ -513,6 +555,7 @@ class MainWindow(QMainWindow):
                 report_service=self.report_service,
                 data_manager=self.data_manager,
                 session_emotions=self.session_emotions,
+                emotion_tracker=self.emotion_tracker,
             )
 
             # Tools
@@ -539,7 +582,8 @@ class MainWindow(QMainWindow):
             self.processing_queue.put(("start_keepalive", None))
 
         except Exception as e:
-            traceback.print_exc()
+            logger.exception("Exception occurred")
+            self._cleanup_partial_services()
             self.processing_queue.put(("error", f"模型加载失败: {str(e)}"))
 
     # ==================== UI Transitions ====================
@@ -555,9 +599,21 @@ class MainWindow(QMainWindow):
     def _start_new_session(self):
         self.chat_panel.clear_chat()
         self.session_emotions = []
+        self._scale_tags = {}
+        self._session_ending = False
         self.orchestrator.reset()
+        if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
+            self.emotion_tracker.reset()
         if self.llm_service:
             self.llm_service.reset_conversation()
+            if self.data_manager and self.current_user_id:
+                context = self.data_manager.get_formatted_history_context(
+                    subject_id=self.current_user_id,
+                    include_profile=True,
+                    include_summaries=3
+                )
+                if context:
+                    self.llm_service.set_history_context(context)
         if self.data_manager:
             self.data_manager.start_new_session()
         if self.report_service:
@@ -574,8 +630,10 @@ class MainWindow(QMainWindow):
             self._start_new_session()
             self._play_opening_greeting()
 
-    def _show_crisis_dialog(self):
-        dialog = CrisisDialog(self, CRISIS_HOTLINES)
+    def _show_crisis_dialog(self, risk_data=None):
+        risk_level = risk_data.get("risk_level", 0) if risk_data else 0
+        indicators = risk_data.get("indicators", []) if risk_data else []
+        dialog = CrisisDialog(self, CRISIS_HOTLINES, risk_level, indicators)
         dialog.exec()
 
     def _start_post_relaxation_timeout(self):
@@ -624,7 +682,6 @@ class MainWindow(QMainWindow):
     def _on_end_chosen(self):
         """用户在放松后弹窗选择结束"""
         self._cancel_post_relaxation_timer()
-        from services.report_service import EndType
         self._handle_session_end(EndType.GOAL_ACHIEVED)
 
     # ==================== Video / Game ====================
@@ -650,7 +707,7 @@ class MainWindow(QMainWindow):
             try:
                 self.video_tool.execute(relaxation_type=relaxation_type)
             except Exception as e:
-                print(f"Video error: {e}")
+                logger.warning(f"Video error: {e}")
             finally:
                 self.processing_queue.put(("video_finished", relaxation_type))
 
@@ -694,7 +751,7 @@ class MainWindow(QMainWindow):
             game = get_game_service()
             game.launch()
         except Exception as e:
-            print(f"Game error: {e}")
+            logger.warning(f"Game error: {e}")
 
     # ==================== Audio Playback ====================
 
@@ -709,7 +766,7 @@ class MainWindow(QMainWindow):
                     args=(greeting,), daemon=True
                 ).start()
             except Exception as e:
-                print(f"Greeting TTS error: {e}")
+                logger.warning(f"Greeting TTS error: {e}")
 
     def _play_post_relaxation_greeting(self):
         if self.tts_service and POST_RELAXATION_MESSAGE:
@@ -721,7 +778,7 @@ class MainWindow(QMainWindow):
                     args=(message,), daemon=True
                 ).start()
             except Exception as e:
-                print(f"Post-relaxation TTS error: {e}")
+                logger.warning(f"Post-relaxation TTS error: {e}")
 
     def _play_fill_info_prompt(self):
         if self.tts_service and FILL_INFO_PROMPT:
@@ -731,7 +788,7 @@ class MainWindow(QMainWindow):
                     args=(FILL_INFO_PROMPT,), daemon=True
                 ).start()
             except Exception as e:
-                print(f"Fill info prompt TTS error: {e}")
+                logger.warning(f"Fill info prompt TTS error: {e}")
 
     def _start_ollama_keepalive(self):
         """Keep Ollama model warm."""
@@ -756,39 +813,53 @@ class MainWindow(QMainWindow):
             self.tts_service.cleanup()
         QApplication.quit()
 
+    def _open_session_review(self):
+        """Open the session review dialog."""
+        from config import DATA_ROOT
+        from ui.session_review import SessionReviewDialog
+        dialog = SessionReviewDialog(DATA_ROOT, parent=self)
+        dialog.exec()
+
+    def _open_stats_panel(self):
+        """Open the statistics panel dialog."""
+        from config import DATA_ROOT
+        from ui.stats_panel import StatsPanelDialog
+        dialog = StatsPanelDialog(DATA_ROOT, parent=self)
+        dialog.exec()
+
+    def _cleanup_partial_services(self):
+        """Safely release any services that were partially initialized."""
+        for svc_name in ("tts_service", "stt_service", "llm_service"):
+            svc = getattr(self, svc_name, None)
+            if svc is None:
+                continue
+            try:
+                cleanup = getattr(svc, "cleanup", None)
+                if cleanup:
+                    cleanup()
+            except Exception as e:
+                logger.debug(f"Error cleaning up {svc_name}: {e}")
+        if hasattr(self, "pipeline") and self.pipeline:
+            try:
+                self.pipeline.shutdown()
+            except Exception:
+                pass
+
     def closeEvent(self, event):
-        if self.tts_service:
-            self.tts_service.cleanup()
+        self._cleanup_partial_services()
         event.accept()
 
     # ==================== Missing Business Logic ====================
 
-    def _save_analysis_log(self, user_id, user_text, analysis, spoken):
-        """Save psychological analysis to log file."""
-        try:
-            from datetime import datetime
-            if self.data_manager and self.data_manager.current_folder_name:
-                session_path = self.data_manager._get_session_path()
-                log_path = session_path / "analysis_log.txt"
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                with open(log_path, 'a', encoding='utf-8') as f:
-                    f.write(f"\n{'='*60}\n")
-                    f.write(f"[{timestamp}] 用户: {user_text}\n")
-                    f.write(f"\n--- 心理分析 ---\n{analysis}\n")
-                    f.write(f"\n--- 口语回复 ---\n{spoken}\n")
-        except Exception as e:
-            print(f"[WARNING] 保存分析日志失败: {e}")
-
-    def _clean_text_for_ui(self, text):
-        """Remove control tags and TTS emotion tags for UI display."""
-        if not text:
-            return ""
-        text = re.sub(r'【.*?】', '', text)
-        text = re.sub(r'\[REC_[A-Z_]+\]', '', text)
-        text = re.sub(r'\s*<\|[^>]+\|>\s*', '', text)
-        text = re.sub(r'\[END_[A-Z_]+\]', '', text)
-        text = re.sub(r'\[(?:breath|laughter)\]', '', text)
-        return text.strip()
+    def _update_progress_bars(self):
+        """Refresh session progress bars on control panel."""
+        from config import MAX_CONVERSATION_MINUTES, MAX_CONVERSATION_ROUNDS
+        if self.report_service and self.orchestrator.state == SessionState.CHATTING:
+            elapsed = self.report_service.get_session_duration_minutes()
+            rounds = self.report_service.get_round_count()
+            self.control_panel.update_session_progress(
+                elapsed, MAX_CONVERSATION_MINUTES, rounds, MAX_CONVERSATION_ROUNDS
+            )
 
     def _get_relaxation_info_str(self):
         """Get Chinese description of relaxation training."""
@@ -831,27 +902,32 @@ class MainWindow(QMainWindow):
             if session_folder and os.path.isdir(session_folder):
                 pdf_path = pdf_generator.generate_report(pdf_data, session_folder)
                 if pdf_path:
-                    print(f"[INFO] PDF报告已生成: {pdf_path}")
+                    logger.info(f"PDF报告已生成: {pdf_path}")
                     return pdf_path
         except Exception as e:
-            print(f"[WARNING] PDF生成失败: {e}")
-            traceback.print_exc()
+            logger.warning(f"PDF生成失败: {e}")
+            logger.exception("Exception occurred")
         return None
 
     def _handle_session_end(self, end_type, relaxation_tag=None):
         """Handle session end using orchestrator decision logic."""
-        from services.report_service import EndType
+        if self._session_ending:
+            return
+        self._session_ending = True
 
         # Use orchestrator to decide: force relaxation or generate reports
         if not relaxation_tag and not self.orchestrator.ctx.current_relaxation_type:
-            try:
-                conversation_history = self.llm_service.conversation_history
-                relaxation_tag = self.relaxation_tool.execute(
-                    conversation_history=conversation_history
-                )
-            except Exception as e:
-                print(f"[WARNING] 智能推荐失败: {e}")
+            if self.relaxation_tool is None:
                 relaxation_tag = "呼吸"
+            else:
+                try:
+                    conversation_history = self.llm_service.conversation_history
+                    relaxation_tag = self.relaxation_tool.execute(
+                        conversation_history=conversation_history
+                    )
+                except Exception as e:
+                    logger.warning(f"智能推荐失败: {e}")
+                    relaxation_tag = "呼吸"
 
         action, data = self.orchestrator.evaluate_session_end(end_type, relaxation_tag)
 
@@ -888,7 +964,9 @@ class MainWindow(QMainWindow):
                     user_info=current_user_info,
                     relaxation_info=relaxation_rec or relax_str,
                     session_emotions=self.session_emotions,
+                    scale_tags=self._scale_tags,
                     emit=lambda msg_type, content: self.processing_queue.put((msg_type, content)),
+                    emotion_tracker=self.emotion_tracker,
                 )
                 self.processing_queue.put(("finish_streaming", None))
 
@@ -898,10 +976,18 @@ class MainWindow(QMainWindow):
                 if isinstance(researcher_report, dict):
                     researcher_report["relaxation_completed"] = True
                     researcher_report["relaxation_type"] = relax_str
+                    if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
+                        researcher_report["emotion_tracker_data"] = self.emotion_tracker.get_session_emotion_data()
 
                 # Generate PDF
                 save_result = result.get("save_result")
                 self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
+
+                # Save session summary for cross-session memory
+                if self.data_manager:
+                    self.data_manager.save_session_summary(
+                        summary=full_feedback[:500],
+                    )
 
                 self.processing_queue.put(("session_end", (end_type, full_feedback, relaxation_rec, None, False)))
                 if end_type == EndType.SAFETY:
@@ -910,55 +996,7 @@ class MainWindow(QMainWindow):
                 self.processing_queue.put(("status", "会话已结束 - 可开始新会话"))
 
             except Exception as e:
-                traceback.print_exc()
+                logger.exception("Exception occurred")
                 self.processing_queue.put(("error", f"报告生成失败: {str(e)}"))
 
         threading.Thread(target=generate_reports, daemon=True).start()
-
-    def _launch_therapeutic_game(self):
-        """Launch the therapeutic game."""
-        from services.game_service import get_game_service
-
-        user_id = self.control_panel.get_user_info().get("user_id", "default_user")
-        session_folder = getattr(self, '_session_folder', None)
-        if not session_folder:
-            from datetime import datetime
-            session_folder = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "data", "sessions", f"{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            os.makedirs(session_folder, exist_ok=True)
-            self._session_folder = session_folder
-
-        self.control_panel.set_status("正在启动心理互动游戏...")
-        self.chat_panel.add_system_message("心理互动游戏启动中...")
-        self.control_panel.set_buttons_enabled(False)
-
-        def run_game():
-            try:
-                game_service = get_game_service()
-                results = game_service.play_game(session_folder)
-                self._game_results = results
-                QTimer.singleShot(0, lambda: self._on_game_complete(results))
-            except Exception as e:
-                print(f"[ERROR] Game failed: {e}")
-                traceback.print_exc()
-                QTimer.singleShot(0, lambda: self._on_game_error(str(e)))
-
-        threading.Thread(target=run_game, daemon=True).start()
-
-    def _on_game_complete(self, results):
-        self.control_panel.set_buttons_enabled(True)
-        accuracy = results.get("go_nogo_accuracy", 0)
-        breathing_rate = results.get("breathing_completion_rate", 0)
-        camps = results.get("camp_structures_built", 0)
-        summary = f"游戏完成！反应准确率: {accuracy}%，呼吸完成率: {breathing_rate}%，建造营地: {camps}个"
-        self.control_panel.set_status(summary)
-        self.chat_panel.add_system_message(summary)
-        if self.report_service:
-            self.report_service.record_game_session(results)
-
-    def _on_game_error(self, error_msg):
-        self.control_panel.set_buttons_enabled(True)
-        self.control_panel.set_status(f"游戏启动失败: {error_msg}")
-        self.chat_panel.add_system_message(f"游戏启动失败: {error_msg}")

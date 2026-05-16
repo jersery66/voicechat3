@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, Generator
 
 from openai import OpenAI
 
+from services.logger import get_logger
 from config import (
     AGENT_MODEL,
     AGENT_MODEL_SERVER,
@@ -25,12 +26,15 @@ from config import (
     AGENT_RELAXATION_SYSTEM_MESSAGE,
     AGENT_EMOTION_SYSTEM_MESSAGE,
     AGENT_SUMMARY_SYSTEM_MESSAGE,
+    AGENT_CRISIS_SYSTEM_MESSAGE,
     AGENT_TIMEOUT,
     AGENT_REPORT_TIMEOUT,
     AGENT_ENTERTAINMENT_KEYWORDS,
     EMOTION_SCENE_MAP,
     INTENT_SCENE_MAP,
 )
+
+logger = get_logger(__name__)
 
 # Crisis keywords for keyword fallback
 _CRISIS_KEYWORDS = [
@@ -58,6 +62,9 @@ _EMOTIONAL_PHRASES = [
 class AgentService:
     """3B 模型 Agent 服务，负责意图分类和报告生成。"""
 
+    # Re-check availability at most once per RECHECK_INTERVAL seconds
+    RECHECK_INTERVAL = 60.0
+
     def __init__(self):
         self.client = OpenAI(
             base_url=AGENT_MODEL_SERVER,
@@ -65,10 +72,19 @@ class AgentService:
         )
         self.model = AGENT_MODEL
         self._available: Optional[bool] = None
+        self._last_check_ts: float = 0.0
 
     def is_available(self) -> bool:
-        """检测 3B 模型是否可达。"""
-        if self._available is not None:
+        """检测 3B 模型是否可达。
+
+        结果缓存 ``RECHECK_INTERVAL`` 秒；超期后会重新探测，避免临时故障
+        后永久在 fallback 模式运行。
+        """
+        now = time.time()
+        if (
+            self._available is not None
+            and (now - self._last_check_ts) < self.RECHECK_INTERVAL
+        ):
             return self._available
         try:
             resp = self.client.chat.completions.create(
@@ -79,9 +95,44 @@ class AgentService:
             )
             self._available = resp.choices is not None and len(resp.choices) > 0
         except Exception as e:
-            print(f"[AGENT] 3B model not available: {e}")
+            logger.debug(f"3B model not available: {e}")
             self._available = False
+        self._last_check_ts = now
         return self._available
+
+    # ==================== Internal helpers ====================
+
+    def _call_json(
+        self,
+        system_message: str,
+        user_text: str,
+        *,
+        max_tokens: int = 100,
+        temperature: float = 0.1,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Call the 3B agent and parse a JSON response.
+
+        Centralizes the request boilerplate for the various JSON-mode calls
+        (intent, RAG routing, relaxation, emotion, crisis). Raises on failure
+        so each public caller can decide how to fall back.
+        """
+        timeout = timeout or AGENT_TIMEOUT
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_text},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            raise ValueError("empty response")
+        return json.loads(content)
 
     # ==================== Intent Classification ====================
 
@@ -96,23 +147,14 @@ class AgentService:
         """
         timeout = timeout or AGENT_TIMEOUT
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": AGENT_INTENT_SYSTEM_MESSAGE},
-                    {"role": "user", "content": user_text},
-                ],
-                response_format={"type": "json_object"},
-                max_tokens=100,
-                temperature=0.1,
-                timeout=timeout,
+            result = self._call_json(
+                AGENT_INTENT_SYSTEM_MESSAGE, user_text,
+                max_tokens=100, temperature=0.1, timeout=timeout,
             )
-            content = resp.choices[0].message.content.strip()
-            result = json.loads(content)
 
             # Validate structure
             if "intent" not in result:
-                raise ValueError(f"Missing 'intent' key in response: {content}")
+                raise ValueError(f"Missing 'intent' key in response: {result}")
             valid_intents = {"counseling", "entertainment", "crisis", "chitchat", "relaxation"}
             if result["intent"] not in valid_intents:
                 result["intent"] = "counseling"
@@ -121,7 +163,7 @@ class AgentService:
             return result
 
         except Exception as e:
-            print(f"[AGENT] Intent classification failed: {e}")
+            logger.debug(f"Intent classification failed: {e}")
             return self._keyword_classify(user_text)
 
     def _keyword_classify(self, text: str) -> Dict[str, Any]:
@@ -145,6 +187,77 @@ class AgentService:
 
         # Default: counseling
         return {"intent": "counseling", "confidence": 0.5, "reason": "default fallback"}
+
+    # ==================== Crisis Risk Assessment ====================
+
+    def assess_crisis_risk(self, text: str, timeout: float = None,
+                           use_llm: bool = True) -> Dict[str, Any]:
+        """
+        Assess crisis risk level from user text.
+        Returns {"risk_level": 0-10, "indicators": [...], "immediate_action": bool}
+        Falls back to keyword scoring on failure.
+        Set use_llm=False to skip the LLM call and use keyword scoring only.
+        """
+        if not use_llm:
+            return self._keyword_crisis_risk(text)
+        timeout = timeout or AGENT_TIMEOUT
+        try:
+            result = self._call_json(
+                AGENT_CRISIS_SYSTEM_MESSAGE, text,
+                max_tokens=100, temperature=0.1, timeout=timeout,
+            )
+            result.setdefault("risk_level", 0)
+            result.setdefault("indicators", [])
+            result.setdefault("immediate_action", result["risk_level"] >= 7)
+            # Clamp risk_level to 0-10
+            result["risk_level"] = max(0, min(10, int(result["risk_level"])))
+            return result
+        except Exception as e:
+            logger.debug(f"Crisis risk assessment failed: {e}")
+            return self._keyword_crisis_risk(text)
+
+    def _keyword_crisis_risk(self, text: str) -> Dict[str, Any]:
+        """Keyword-based crisis risk scoring fallback."""
+        risk_level = 0
+        indicators = []
+
+        # Level 9-10: Direct suicide with method
+        _critical = ["跳楼", "割腕", "上吊", "喝农药", "安眠药", "结束生命",
+                      "马上去死", "现在就死", "不想活了马上"]
+        for kw in _critical:
+            if kw in text:
+                risk_level = max(risk_level, 9)
+                indicators.append(f"危急关键词: {kw}")
+
+        # Level 7-8: Suicide ideation, self-harm
+        _severe = ["自杀", "想死", "死了算了", "活不下去", "轻生", "自残",
+                    "不想活", "活着没意思", "不如死了", "死了一了百了"]
+        for kw in _severe:
+            if kw in text:
+                risk_level = max(risk_level, 7)
+                indicators.append(f"严重关键词: {kw}")
+
+        # Level 4-6: Violence, escape plans
+        _moderate = ["杀了", "打死", "弄死", "报复", "逃跑", "逃出去",
+                      "活够了", "撑不下去了", "没有意义"]
+        for kw in _moderate:
+            if kw in text:
+                risk_level = max(risk_level, 5)
+                indicators.append(f"中等关键词: {kw}")
+
+        # Level 1-3: General distress
+        _mild = ["绝望", "崩溃", "撑不住", "受不了了", "一点希望都没有",
+                  "看不到希望", "走投无路"]
+        for kw in _mild:
+            if kw in text:
+                risk_level = max(risk_level, 3)
+                indicators.append(f"关注关键词: {kw}")
+
+        return {
+            "risk_level": risk_level,
+            "indicators": indicators,
+            "immediate_action": risk_level >= 7,
+        }
 
     # ==================== Report Generation ====================
 
@@ -198,25 +311,16 @@ class AgentService:
         """
         timeout = timeout or AGENT_TIMEOUT
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": AGENT_RAG_ROUTING_SYSTEM_MESSAGE},
-                    {"role": "user", "content": user_text},
-                ],
-                response_format={"type": "json_object"},
-                max_tokens=50,
-                temperature=0.1,
-                timeout=timeout,
+            result = self._call_json(
+                AGENT_RAG_ROUTING_SYSTEM_MESSAGE, user_text,
+                max_tokens=50, temperature=0.1, timeout=timeout,
             )
-            content = resp.choices[0].message.content.strip()
-            result = json.loads(content)
             need_rag = result.get("need_rag", False)
             reason = result.get("reason", "")
-            print(f"[AGENT] RAG routing: {need_rag} ({reason})")
+            logger.debug(f"RAG routing: {need_rag} ({reason})")
             return bool(need_rag)
         except Exception as e:
-            print(f"[AGENT] RAG routing failed: {e}")
+            logger.debug(f"RAG routing failed: {e}")
             return self._keyword_rag_routing(user_text)
 
     def _keyword_rag_routing(self, text: str) -> bool:
@@ -236,19 +340,10 @@ class AgentService:
         """
         timeout = timeout or AGENT_TIMEOUT
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": AGENT_RELAXATION_SYSTEM_MESSAGE},
-                    {"role": "user", "content": spoken_text},
-                ],
-                response_format={"type": "json_object"},
-                max_tokens=30,
-                temperature=0.1,
-                timeout=timeout,
+            result = self._call_json(
+                AGENT_RELAXATION_SYSTEM_MESSAGE, spoken_text,
+                max_tokens=30, temperature=0.1, timeout=timeout,
             )
-            content = resp.choices[0].message.content.strip()
-            result = json.loads(content)
             tag_name = result.get("tag", "NONE")
             tag_map = {
                 "BREATHING": "[REC_BREATHING]",
@@ -258,10 +353,10 @@ class AgentService:
             }
             tag = tag_map.get(tag_name)
             if tag:
-                print(f"[AGENT] Relaxation tag inferred: {tag}")
+                logger.debug(f"Relaxation tag inferred: {tag}")
             return tag
         except Exception as e:
-            print(f"[AGENT] Relaxation inference failed: {e}")
+            logger.debug(f"Relaxation inference failed: {e}")
             return self._keyword_relaxation_tag(spoken_text)
 
     def _keyword_relaxation_tag(self, text: str) -> Optional[str]:
@@ -286,25 +381,16 @@ class AgentService:
         """
         timeout = timeout or AGENT_TIMEOUT
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": AGENT_EMOTION_SYSTEM_MESSAGE},
-                    {"role": "user", "content": text},
-                ],
-                response_format={"type": "json_object"},
-                max_tokens=50,
-                temperature=0.1,
-                timeout=timeout,
+            result = self._call_json(
+                AGENT_EMOTION_SYSTEM_MESSAGE, text,
+                max_tokens=50, temperature=0.1, timeout=timeout,
             )
-            content = resp.choices[0].message.content.strip()
-            result = json.loads(content)
             result.setdefault("emotion", "neutral")
             result.setdefault("intensity", 0.5)
             result.setdefault("keywords", [])
             return result
         except Exception as e:
-            print(f"[AGENT] Emotion detection failed: {e}")
+            logger.debug(f"Emotion detection failed: {e}")
             return {"emotion": "neutral", "intensity": 0.0, "keywords": []}
 
     # ==================== Conversation Summary ====================
@@ -320,7 +406,7 @@ class AgentService:
         # Format conversation for the prompt
         formatted = []
         for msg in messages[-20:]:  # Only last 20 turns to keep prompt short
-            role = "来访者" if msg["role"] == "user" else "心医生"
+            role = "来访者" if msg["role"] == "user" else "薇薇老师"
             formatted.append(f"{role}: {msg['content'][:200]}")
         conversation_text = "\n".join(formatted)
 
@@ -336,10 +422,10 @@ class AgentService:
                 timeout=timeout,
             )
             summary = resp.choices[0].message.content.strip()
-            print(f"[AGENT] History summarized ({len(summary)} chars)")
+            logger.debug(f"History summarized ({len(summary)} chars)")
             return summary
         except Exception as e:
-            print(f"[AGENT] History summarization failed: {e}")
+            logger.debug(f"History summarization failed: {e}")
             return ""
 
     # ==================== Scene Recommendation ====================
@@ -391,7 +477,7 @@ class AgentService:
             scene_data = config.get("scenes", {}).get(scene, {})
             return scene_data.get(media_type, [])
         except Exception as e:
-            print(f"[AGENT] Failed to load media for scene {scene}: {e}")
+            logger.debug(f"Failed to load media for scene {scene}: {e}")
             return []
 
     def get_recommended_media(self, emotion: str = "neutral", intent: str = "counseling",

@@ -3,8 +3,13 @@
 import os
 import sys
 import json
+from collections import OrderedDict
 from typing import Optional, List, Dict, Any, Set
 from pathlib import Path
+
+from services.logger import get_logger
+
+logger = get_logger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -211,7 +216,6 @@ class RAGService:
         "被人看不起": ["自卑", "社会压力"],
         "低人一等": ["自卑", "自我价值感低"],
         "没朋友": ["孤独", "社交困难"],
-        "被人欺负": ["人际冲突", "创伤"],
         "受欺负": ["人际冲突", "创伤"],
 
         # === Physical symptoms ===
@@ -267,9 +271,14 @@ class RAGService:
         self._lazy_loaded = False
         self._lazy_files_loaded: Set[str] = set()  # Track which lazy files are loaded
         self._jieba = None
-        self._query_cache: Dict[str, Set[str]] = {}  # Cache expanded queries
-        self._search_cache: Dict[str, List[Dict]] = {}  # Cache search results
+        self._query_cache: OrderedDict[str, Set[str]] = OrderedDict()  # Cache expanded queries
+        self._search_cache: OrderedDict[str, List[Dict]] = OrderedDict()  # Cache search results
         self._MAX_CACHE_SIZE = 256
+        # Pre-sort the synonym keys once — used by _expand_query on every call.
+        # Sorting all 200+ keys per query was wasteful.
+        self._synonym_keys_sorted: List[str] = sorted(
+            self.SYNONYM_MAP.keys(), key=len, reverse=True
+        )
         self._load_core_knowledge()
 
     def _get_default_kb_path(self) -> Path:
@@ -300,15 +309,15 @@ class RAGService:
                                     "content": entry['content']
                                 })
                         self.knowledge_base.extend(valid_entries)
-                        print(f"[INFO] RAG: Loaded {len(valid_entries)} core entries from {filename}")
+                        logger.info(f"RAG: Loaded {len(valid_entries)} core entries from {filename}")
                 except Exception as e:
-                    print(f"[WARNING] RAG: Failed to load {filename}: {e}")
+                    logger.warning(f"RAG: Failed to load {filename}: {e}")
 
         if not self.knowledge_base:
             self._create_default_knowledge_base()
 
         self._core_count = len(self.knowledge_base)
-        print(f"[INFO] RAG: Core knowledge base size: {self._core_count}")
+        logger.info(f"RAG: Core knowledge base size: {self._core_count}")
 
     def _load_lazy_file(self, filename: str) -> int:
         """Load a single lazy file. Returns number of entries added."""
@@ -335,10 +344,10 @@ class RAGService:
                         })
                 self.knowledge_base.extend(valid_entries)
                 self._lazy_files_loaded.add(filename)
-                print(f"[INFO] RAG: Lazy-loaded {len(valid_entries)} entries from {filename}")
+                logger.info(f"RAG: Lazy-loaded {len(valid_entries)} entries from {filename}")
                 return len(valid_entries)
         except Exception as e:
-            print(f"[WARNING] RAG: Failed to lazy-load {filename}: {e}")
+            logger.warning(f"RAG: Failed to lazy-load {filename}: {e}")
             self._lazy_files_loaded.add(filename)
         return 0
 
@@ -421,13 +430,13 @@ class RAGService:
         try:
             with open(kb_file, 'w', encoding='utf-8') as f:
                 json.dump(self.knowledge_base, f, ensure_ascii=False, indent=2)
-            print(f"[INFO] RAG: Saved knowledge base to {kb_file}")
+            logger.info(f"RAG: Saved knowledge base to {kb_file}")
         except Exception as e:
-            print(f"[WARNING] RAG: Failed to save knowledge base: {e}")
+            logger.warning(f"RAG: Failed to save knowledge base: {e}")
 
     def warmup(self):
         """Warmup the RAG service (preload models if using embedding)."""
-        print("[INFO] RAG Service warmed up")
+        logger.info("RAG Service warmed up")
         return True
 
     def _segment_text(self, text: str) -> List[str]:
@@ -441,11 +450,12 @@ class RAGService:
     def _expand_query(self, text: str) -> Set[str]:
         """Expand query with synonym map and jieba segmentation. Results are cached."""
         if text in self._query_cache:
+            self._query_cache.move_to_end(text)
             return self._query_cache[text]
         expanded = set()
 
-        # 1. Direct synonym map matching (longest match first)
-        for colloquial in sorted(self.SYNONYM_MAP.keys(), key=len, reverse=True):
+        # 1. Direct synonym map matching (longest match first, pre-sorted)
+        for colloquial in self._synonym_keys_sorted:
             if colloquial in text:
                 expanded.update(self.SYNONYM_MAP[colloquial])
                 expanded.add(colloquial)
@@ -458,7 +468,7 @@ class RAGService:
             expanded.add(seg)
 
         if len(self._query_cache) >= self._MAX_CACHE_SIZE:
-            self._query_cache.clear()
+            self._query_cache.popitem(last=False)
         self._query_cache[text] = expanded
         return expanded
 
@@ -604,9 +614,12 @@ class RAGService:
         Core knowledge is preferred; lazy files only supplement when core has no strong match."""
         query_lower = query.lower()
 
-        # Check search cache
-        cache_key = f"{query_lower}:{top_k}"
+        # Check search cache. The cache key includes the lazy-loaded flag so
+        # that an early hit (before lazy files were loaded) doesn't shadow a
+        # later, richer result set.
+        cache_key = f"{query_lower}:{top_k}:{int(self._lazy_loaded)}"
         if cache_key in self._search_cache:
+            self._search_cache.move_to_end(cache_key)
             return self._search_cache[cache_key]
 
         # Expand query with synonyms and jieba
@@ -623,7 +636,7 @@ class RAGService:
         if core_results and core_results[0]["score"] >= 3.0:
             result = core_results[:top_k]
             if len(self._search_cache) >= self._MAX_CACHE_SIZE:
-                self._search_cache.clear()
+                self._search_cache.popitem(last=False)
             self._search_cache[cache_key] = result
             return result
 
@@ -659,7 +672,7 @@ class RAGService:
 
         result = merged[:top_k]
         if len(self._search_cache) >= self._MAX_CACHE_SIZE:
-            self._search_cache.clear()
+            self._search_cache.popitem(last=False)
         self._search_cache[cache_key] = result
         return result
 
@@ -692,10 +705,10 @@ class RAGService:
                 if not agent.classify_rag_intent(user_text):
                     return None
             except Exception as e:
-                print(f"[WARNING] Agent RAG routing failed: {e}")
+                logger.warning(f"Agent RAG routing failed: {e}")
                 return None
 
-        print(f"[INFO] RAG triggered for: {user_text[:50]}...")
+        logger.info(f"RAG triggered for: {user_text[:50]}...")
 
         results = self._simple_search(user_text, top_k=3)
 

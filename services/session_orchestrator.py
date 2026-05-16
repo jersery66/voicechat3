@@ -4,6 +4,10 @@ from enum import Enum, auto
 from typing import Optional, Callable
 from dataclasses import dataclass, field
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class SessionState(Enum):
     """会话生命周期状态"""
@@ -63,7 +67,7 @@ class SessionOrchestrator:
         """Validate and execute state transition. Returns True if valid."""
         valid = self.VALID_TRANSITIONS.get(self.ctx.state, set())
         if new_state not in valid:
-            print(f"[WARN] Invalid transition: {self.ctx.state} -> {new_state}")
+            logger.warning(f"Invalid transition: {self.ctx.state} -> {new_state}")
             return False
         self.ctx.state = new_state
         return True

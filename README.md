@@ -75,10 +75,18 @@ voicechat/
 │   ├── stt_service.py               # 实时录音 + FunASR 识别 + 毒品术语纠错
 │   ├── tts_service_cosyvoice.py     # CosyVoice3 流式合成 + 语音克隆
 │   ├── rag_service.py               # 意图路由 + 关键词知识检索
-│   ├── report_service.py            # 情绪追踪 + 会话生命周期
+│   ├── agent_service.py             # 3B 模型意图分类 + 报告生成 (含自动 recheck)
+│   ├── report_service.py            # 情绪追踪 + 会话生命周期 + Ollama 连接池
 │   ├── report_generator.py          # PDF 报告生成
 │   ├── video_service.py             # Pygame 全屏视频播放
 │   ├── game_service.py              # 放松小游戏
+│   ├── emotion_tracker.py           # 情绪趋势追踪
+│   ├── scales.py                    # 心理量表管理
+│   ├── stats_service.py             # 统计数据服务
+│   ├── logger.py                    # 统一日志配置
+│   ├── error_monitor.py             # WARNING+ 日志聚合 → logs/errors.jsonl
+│   ├── metrics.py                   # 性能指标收集 (环形缓冲区 + @measure 装饰器)
+│   ├── _ollama_pool.py              # 共享 ollama.Client 单例池
 │   └── tools/
 │       ├── __init__.py              # Tool Protocol 定义
 │       ├── video_tool.py            # 放松视频播放 Tool
@@ -91,7 +99,27 @@ voicechat/
 │   ├── loading_screen.py            # 加载画面
 │   ├── dialogs.py                   # 弹窗 (会话结束/危机/继续或结束/警告)
 │   ├── widgets.py                   # 自定义组件
-│   └── styles.py                    # QSS 样式表
+│   ├── styles.py                    # QSS 样式表
+│   ├── session_review.py            # 会话历史回顾
+│   └── stats_panel.py               # 统计面板 (metrics + error log)
+├── game/
+│   ├── engine.py                    # Pygame 游戏主循环 (安全退出，可重复启动)
+│   ├── config.py                    # 游戏常量
+│   ├── clinical_tracker.py          # 临床数据追踪
+│   ├── entities/                    # 游戏实体
+│   └── systems/                     # 游戏子系统 (资源/风暴/营地/难度/背景)
+├── data/
+│   ├── data_manager.py              # 分层存储 (JSON I/O 抽象，WAV dtype 防御)
+│   └── treatment_progress.py        # 治疗进度追踪
+├── scripts/
+│   └── check_config.py              # 启动前配置健康检查
+├── tests/                           # 单元测试 (pytest)
+│   ├── test_pipeline.py             # 标签检测 + 清理函数
+│   ├── test_rag.py                  # 同义词扩展 + 评分
+│   ├── test_data_manager.py         # 会话管理 + WAV 保存
+│   └── test_report_service.py       # 报告解析 + 会话追踪
+├── pytest.ini                       # pytest 配置
+├── requirements-dev.txt             # 开发依赖 (pytest, pytest-mock)
 ├── knowledge_base/                  # 心理学知识库 (JSON)
 ├── media_library/                   # 放松训练视频素材
 └── data/                            # 会话记录与 PDF 报告
@@ -116,7 +144,14 @@ ollama pull qwen2.5:72b
 python main.py
 ```
 
-启动后自动检测模型路径并显示加载进度。进入主界面后可选语音或文字输入开始对话。
+启动时自动运行配置健康检查（Ollama 连通性、模型路径、知识库完整性），然后加载模型并显示进度。进入主界面后可选语音或文字输入开始对话。
+
+### 开发与测试
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
 
 ### 外部依赖（不在 requirements.txt）
 
@@ -137,6 +172,28 @@ python main.py
 - `MAX_CONVERSATION_TURNS`, `SESSION_TIME_LIMIT_MINUTES` — 会话边界
 - `CRISIS_HOTLINES` — 紧急联系电话
 - 音频参数: `SAMPLE_RATE`, `AUDIO_CHANNELS`, `TTS_*`
+
+---
+
+## 运维与监控
+
+### 配置健康检查
+
+启动前可手动运行：
+
+```bash
+python scripts/check_config.py
+```
+
+检查 Ollama 服务、FunASR/CosyVoice 模型路径、知识库完整性及数据目录可写性。
+
+### 错误日志聚合
+
+`services/error_monitor.py` 自动采集 WARNING+ 级别日志到 `logs/errors.jsonl`（JSON Lines 格式），并提供内存环形缓冲区供 UI 统计面板调用。
+
+### 性能指标
+
+`services/metrics.py` 提供 `@measure("llm.chat")` 装饰器和 `Metrics.timer()` 上下文管理器，记录关键路径耗时（STT、LLM 首 token、RAG 检索、TTS 合成、报告生成）。统计数据可通过 `ui/stats_panel.py` 查看。
 
 ---
 

@@ -9,6 +9,10 @@ except ImportError:
     from moviepy.editor import VideoFileClip
 import threading
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 class VideoPlayer:
     def __init__(self):
         pass
@@ -19,7 +23,7 @@ class VideoPlayer:
         Blocks until video finishes or (Win + Esc) is pressed.
         """
         if not os.path.exists(file_path):
-            print(f"[ERROR] Video file not found: {file_path}")
+            logger.error(f"Video file not found: {file_path}")
             return
 
         # Initialize Pygame
@@ -69,7 +73,7 @@ class VideoPlayer:
             audio_path = os.path.join(temp_dir, f"{file_hash}.wav")
             
             if not os.path.exists(audio_path):
-                print(f"[INFO] Extracting audio (first time only)... Please wait.")
+                logger.info("Extracting audio (first time only)... Please wait.")
                 # Show a loading screen using standard font if possible, or just console log
                 # PyGAme default font
                 font = pygame.font.SysFont("Arial", 36)
@@ -80,17 +84,17 @@ class VideoPlayer:
                 try:
                     clip.audio.write_audiofile(audio_path, logger=None)
                 except Exception as e:
-                    print(f"[ERROR] Failed to extract audio: {e}")
+                    logger.error(f"Failed to extract audio: {e}")
                     # Try to play without audio or exit
             else:
-                print(f"[INFO] Using cached audio: {audio_path}")
+                logger.info(f"Using cached audio: {audio_path}")
             
             try:
                 pygame.mixer.init()
                 pygame.mixer.music.load(audio_path)
                 pygame.mixer.music.play()
             except Exception as e:
-                 print(f"[WARNING] Audio play failed: {e}")
+                 logger.warning(f"Audio play failed: {e}")
 
             clock = pygame.time.Clock()
             start_time = time.time()
@@ -122,7 +126,7 @@ class VideoPlayer:
                          esc_pressed = keys[pygame.K_ESCAPE]
                          
                          if (ctrl_pressed and alt_pressed and q_pressed) or (win_pressed and esc_pressed):
-                             print("[INFO] Backdoor triggered: Forced Exit")
+                             logger.info("Backdoor triggered: Forced Exit")
                              running = False
                 
                 # Convert frame (numpy) -> pygame surface
@@ -156,12 +160,11 @@ class VideoPlayer:
                     pass
 
         except Exception as e:
-            print(f"[ERROR] Video playback error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Video playback error: {e}")
+            logger.exception("Exception occurred")
             
         finally:
-            print("[INFO] Cleaning up video player...")
+            logger.info("Cleaning up video player...")
             try:
                 if pygame.mixer.get_init():
                     pygame.mixer.music.stop()

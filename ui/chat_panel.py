@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QKeyEvent
 
-from .widgets import FrostedPanel, MessageBubble
+from .widgets import FrostedPanel, MessageBubble, StatusIndicator
 
 
 class ChatInput(QTextEdit):
@@ -132,6 +132,10 @@ class ChatPanel(FrostedPanel):
         self.scroll_area.setWidget(self._msg_container)
         layout.addWidget(self.scroll_area)
 
+        # AI status indicator
+        self.status_indicator = StatusIndicator()
+        layout.addWidget(self.status_indicator)
+
         # Text input area
         input_layout = QHBoxLayout()
         input_layout.setSpacing(6)
@@ -209,6 +213,7 @@ class ChatPanel(FrostedPanel):
         self._add_bubble(bubble)
         self._messages.append({"type": "ai", "text": "", "bubble": bubble})
         self._current_streaming_bubble = bubble
+        self.status_indicator.set_state("generating")
 
     def stream_text(self, chunk):
         """Append text chunk to current streaming message."""
@@ -221,6 +226,11 @@ class ChatPanel(FrostedPanel):
     def finish_streaming(self):
         """Mark streaming as complete."""
         self._current_streaming_bubble = None
+        self.status_indicator.set_state("idle")
+
+    def set_ai_status(self, status):
+        """External control: 'idle', 'thinking', 'generating', 'speaking'."""
+        self.status_indicator.set_state(status)
 
     def _add_bubble(self, bubble):
         """Insert bubble before the stretch."""

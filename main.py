@@ -12,9 +12,20 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
 from ui.main_window import MainWindow
+from services.logger import setup_logging
 
 
 def main():
+    setup_logging()
+
+    # Pre-launch config check (non-blocking — warn but don't block startup)
+    try:
+        from scripts.check_config import run_check
+        if not run_check():
+            print("WARNING: Some configuration checks failed. The application may not work correctly.")
+    except Exception as e:
+        print(f"Config check skipped: {e}")
+
     # High DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

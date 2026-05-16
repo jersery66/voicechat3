@@ -16,7 +16,14 @@ import soundfile as sf
 
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import FUNASR_MODEL_PATH, SAMPLE_RATE, CHANNELS
+from config import (
+    FUNASR_MODEL_PATH, SAMPLE_RATE, CHANNELS,
+    USE_VAD_AUTO_STOP, VAD_SILENCE_THRESHOLD,
+    VAD_SILENCE_DURATION, VAD_SPEECH_MIN_DURATION
+)
+from services.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class STTService:
@@ -31,6 +38,12 @@ class STTService:
         self.audio_queue = queue.Queue()
         self.recorded_audio = []
         self.stream = None
+
+        # VAD state
+        self._vad_triggered = False
+        self._vad_silence_frames = 0
+        self._vad_speech_frames = 0
+        self._vad_enabled = USE_VAD_AUTO_STOP
         
     def load_model(self, progress_callback=None):
         """Load the FunASR model."""
@@ -47,7 +60,7 @@ class STTService:
                 from model import FunASRNano
             except ImportError:
                 # Fallback: try to find it in the directory explicitly if simple import failed
-                print(f"Could not import FunASRNano from {self.model_path}, checking path...")
+                logger.warning(f"Could not import FunASRNano from {self.model_path}, checking path...")
                 raise
 
             # Load model and kwargs
@@ -60,7 +73,7 @@ class STTService:
             self.model.eval()
             
         except Exception as e:
-            print(f"Error loading FunASR model: {e}")
+            logger.warning(f"Error loading FunASR model: {e}")
             raise e
         
         if progress_callback:
@@ -73,12 +86,31 @@ class STTService:
         self.is_recording = True
         self.recorded_audio = []
         self.audio_queue = queue.Queue() # Clear queue
+        self._vad_triggered = False
+        self._vad_silence_frames = 0
+        self._vad_speech_frames = 0
         
         def audio_callback(indata, frames, time, status):
             if status:
-                print(f"Audio status: {status}")
+                logger.debug(f"Audio status: {status}")
             if self.is_recording:
                 self.audio_queue.put(indata.copy())
+
+                # VAD: energy-based silence detection
+                if self._vad_enabled:
+                    rms = np.sqrt(np.mean(indata ** 2))
+                    if rms < VAD_SILENCE_THRESHOLD:
+                        self._vad_silence_frames += frames
+                    else:
+                        self._vad_silence_frames = 0
+                        self._vad_speech_frames += frames
+
+                    silence_sec = self._vad_silence_frames / SAMPLE_RATE
+                    speech_sec = self._vad_speech_frames / SAMPLE_RATE
+                    if (silence_sec >= VAD_SILENCE_DURATION
+                            and speech_sec >= VAD_SPEECH_MIN_DURATION):
+                        self._vad_triggered = True
+                        self.is_recording = False
         
         try:
             device_id = None
@@ -92,7 +124,7 @@ class STTService:
                     name = dev['name'].lower()
                     if "cable" in name or "virtual" in name or "stereo mix" in name:
                         best_device_id = i
-                        print(f"Selected prioritized Virtual Device: {dev['name']} (Index {i})")
+                        logger.info(f"Selected prioritized Virtual Device: {dev['name']} (Index {i})")
                         break
             
             # Priority 2: Explicit "Mic" or "麦克风" (Fallback)
@@ -102,7 +134,7 @@ class STTService:
                         name = dev['name'].lower()
                         if "mic" in name or "麦克风" in name:
                             best_device_id = i
-                            print(f"Selected Microphone (Fallback): {dev['name']} (Index {i})")
+                            logger.info(f"Selected Microphone (Fallback): {dev['name']} (Index {i})")
                             break
             
             # Priority 3: Fallback to default
@@ -110,7 +142,7 @@ class STTService:
                 try:
                     default_device = sd.query_devices(kind='input')
                     best_device_id = default_device['index']
-                    print(f"Using default input device: {default_device['name']}")
+                    logger.info(f"Using default input device: {default_device['name']}")
                 except Exception:
                     pass
             
@@ -119,7 +151,7 @@ class STTService:
                 for i, dev in enumerate(devices):
                     if dev['max_input_channels'] > 0:
                         best_device_id = i
-                        print(f"Found fallback device: {dev.get('name')} (Index {i})")
+                        logger.info(f"Found fallback device: {dev.get('name')} (Index {i})")
                         break
             
             if best_device_id is None:
@@ -150,13 +182,12 @@ class STTService:
             self.collect_thread.start()
             
         except Exception as e:
-            print(f"Error starting recording stream: {e}")
+            logger.warning(f"Error starting recording stream: {e}")
             self.is_recording = False
             # We can't easily propagate error to UI thread from here without the queue
             # But main.py checks self.is_recording state or we could print it.
             # Ideally the UI should know.
-            import traceback
-            traceback.print_exc()
+            logger.exception("Exception occurred")
         
     def stop_recording(self) -> np.ndarray:
         """Stop recording and return the audio data."""
@@ -176,7 +207,14 @@ class STTService:
             audio = np.concatenate(self.recorded_audio, axis=0)
             return audio.flatten()
         return np.array([])
-    
+
+    def is_vad_triggered(self) -> bool:
+        """Check if VAD auto-stop was triggered since last start_recording."""
+        return self._vad_triggered
+
+    def set_vad_enabled(self, enabled: bool):
+        self._vad_enabled = enabled
+
     def transcribe(self, audio: np.ndarray) -> str:
         """Transcribe audio to text."""
         if self.model is None:
@@ -191,8 +229,8 @@ class STTService:
             # let's save to a temporary wav file.
             
             # Debug: print audio stats
-            print(f"[DEBUG] Audio length: {len(audio)} samples ({len(audio)/SAMPLE_RATE:.2f}s)")
-            print(f"[DEBUG] Audio range: [{audio.min():.4f}, {audio.max():.4f}], mean: {audio.mean():.4f}")
+            logger.debug(f"Audio length: {len(audio)} samples ({len(audio)/SAMPLE_RATE:.2f}s)")
+            logger.debug(f"Audio range: [{audio.min():.4f}, {audio.max():.4f}], mean: {audio.mean():.4f}")
             
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
                 tmp_path = tmp_file.name
@@ -210,7 +248,7 @@ class STTService:
                 # res seems to be a list of results (one per input file)
                 # each result is a list of segments?
                 
-                print(f"[DEBUG] Raw result: {res}")
+                logger.debug(f"Raw result: {res}")
                 
                 if res and len(res) > 0:
                     item = res[0]
@@ -223,7 +261,7 @@ class STTService:
                     
                     # Check if result is primarily Chinese, if not retry with forced Chinese
                     if text and not self._is_chinese_text(text):
-                        print(f"[WARNING] Non-Chinese text detected: {text}, retrying with forced Chinese...")
+                        logger.warning(f"Non-Chinese text detected: {text}, retrying with forced Chinese...")
                         # Retry with explicit Chinese language setting
                         retry_kwargs = dict(self.model_kwargs)
                         retry_kwargs['language'] = 'zh'
@@ -237,7 +275,7 @@ class STTService:
                                 text = retry_item[0].get("text", "").strip()
                             elif isinstance(retry_item, dict):
                                 text = retry_item.get("text", "").strip()
-                        print(f"[INFO] Retry result: {text}")
+                        logger.info(f"Retry result: {text}")
                     
                     # Post-processing: correct common misrecognitions
                     text = self._correct_common_errors(text)
@@ -250,9 +288,8 @@ class STTService:
                     os.unlink(tmp_path)
             
         except Exception as e:
-            print(f"Transcription error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.warning(f"Transcription error: {e}")
+            logger.exception("Exception occurred")
             return ""
     
     def record_and_transcribe(self) -> str:
@@ -262,16 +299,16 @@ class STTService:
 
     def warmup(self):
         """Warmup the STT model with test audio data."""
-        print("[INFO] Warming up STT model...")
+        logger.info("Warming up STT model...")
         try:
             # Create 1 second of white noise instead of silence
             # This helps avoid edge cases in model processing
             dummy_audio = np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.01
             result = self.transcribe(dummy_audio)
-            print(f"[INFO] STT warmup complete. Test result: '{result}'")
+            logger.info(f"STT warmup complete. Test result: '{result}'")
             return True
         except Exception as e:
-            print(f"[WARNING] STT Warmup had issue (non-fatal): {e}")
+            logger.warning(f"STT Warmup had issue (non-fatal): {e}")
             # Don't fail completely - the model may still work
             return True
     
@@ -331,7 +368,7 @@ class STTService:
             return True  # Only punctuation/whitespace is fine
         
         ratio = chinese_count / total_chars
-        print(f"[DEBUG] Chinese ratio: {ratio:.2f} ({chinese_count}/{total_chars})")
+        logger.debug(f"Chinese ratio: {ratio:.2f} ({chinese_count}/{total_chars})")
         
         # If less than 30% Chinese, likely not Chinese
         return ratio >= 0.3

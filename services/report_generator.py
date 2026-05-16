@@ -6,6 +6,10 @@ import json
 from datetime import datetime
 from typing import Dict, Any, Optional
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -18,7 +22,6 @@ try:
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
-    print("[WARNING] reportlab not installed. PDF generation disabled.")
 
 
 class PDFReportGenerator:
@@ -52,12 +55,12 @@ class PDFReportGenerator:
                 try:
                     pdfmetrics.registerFont(TTFont(self.font_name, path))
                     self.font_registered = True
-                    print(f"[INFO] PDF字体已注册: {path}")
+                    logger.info(f"PDF字体已注册: {path}")
                     return
                 except Exception as e:
-                    print(f"[WARNING] 字体注册失败 {path}: {e}")
+                    logger.warning(f"字体注册失败 {path}: {e}")
         
-        print("[WARNING] 未找到中文字体，PDF可能显示乱码")
+        logger.warning("未找到中文字体，PDF可能显示乱码")
     
     def _create_styles(self) -> Dict[str, ParagraphStyle]:
         """Create paragraph styles for the report."""
@@ -138,7 +141,7 @@ class PDFReportGenerator:
             Full path to the generated PDF file, or None if generation failed
         """
         if not REPORTLAB_AVAILABLE:
-            print("[ERROR] reportlab not available, cannot generate PDF")
+            logger.error("reportlab not available, cannot generate PDF")
             return None
         
         try:
@@ -167,7 +170,7 @@ class PDFReportGenerator:
                         # Draw image covering the whole page
                         canvas.drawImage(bg_path, 0, 0, width=A4[0], height=A4[1], preserveAspectRatio=False)
                     except Exception as e:
-                        print(f"Background draw error: {e}")
+                        logger.warning(f"Background draw error: {e}")
                 
                 # 2. Draw Translucent Content Box - REMOVED as requested
                 # Adjusted margins to avoid covering LOGO at the top
@@ -423,13 +426,12 @@ class PDFReportGenerator:
             # Build PDF
             doc.build(story)
             
-            print(f"[INFO] PDF报告已生成: {filepath}")
+            logger.info(f"PDF报告已生成: {filepath}")
             return filepath
             
         except Exception as e:
-            print(f"[ERROR] PDF生成失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"PDF生成失败: {e}")
+            logger.exception("PDF生成失败")
             return None
 
 

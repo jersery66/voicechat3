@@ -1,5 +1,9 @@
 # Relaxation Recommendation Tool - Uses 3B Agent for relaxation type inference
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class RelaxationRecommendationTool:
     """Use 3B agent to recommend relaxation type based on conversation context."""
@@ -37,13 +41,13 @@ class RelaxationRecommendationTool:
                     if result:
                         return result
             except Exception as e:
-                print(f"[WARNING] Agent relaxation inference failed: {e}")
+                logger.warning(f"Agent relaxation inference failed: {e}")
 
         # Fallback: use report_service's conversation-based recommendation
         if conversation_history and self.report:
             try:
                 return self.report.recommend_relaxation_strategy(conversation_history)
             except Exception as e:
-                print(f"[WARNING] Report service relaxation rec failed: {e}")
+                logger.warning(f"Report service relaxation rec failed: {e}")
 
         return "呼吸"  # Default

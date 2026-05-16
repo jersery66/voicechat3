@@ -18,18 +18,16 @@ from PySide6.QtGui import (
 class FrostedPanel(QFrame):
     """Semi-transparent frosted glass panel with rounded corners."""
 
-    def __init__(self, alpha=0.85, radius=16, parent=None):
+    def __init__(self, alpha=0.85, radius=16, parent=None,
+                 bg_color=(255, 255, 255), border_alpha=0.3):
         super().__init__(parent)
         self._alpha = alpha
         self._radius = radius
+        self._bg_color = bg_color
+        self._border_alpha = border_alpha
+        self._dark_mode = False
         self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setStyleSheet(f"""
-            FrostedPanel {{
-                background-color: rgba(255, 255, 255, {int(alpha * 255)});
-                border-radius: {radius}px;
-                border: 1px solid rgba(255, 255, 255, 0.3);
-            }}
-        """)
+        self._rebuild_style()
 
         # Drop shadow
         shadow = QGraphicsDropShadowEffect(self)
@@ -37,6 +35,27 @@ class FrostedPanel(QFrame):
         shadow.setOffset(0, 4)
         shadow.setColor(QColor(0, 0, 0, 60))
         self.setGraphicsEffect(shadow)
+
+    def _rebuild_style(self):
+        r, g, b = self._bg_color
+        self.setStyleSheet(f"""
+            FrostedPanel {{
+                background-color: rgba({r}, {g}, {b}, {int(self._alpha * 255)});
+                border-radius: {self._radius}px;
+                border: 1px solid rgba(255, 255, 255, {self._border_alpha});
+            }}
+        """)
+
+    def set_theme(self, dark: bool):
+        """Switch between light and dark frost colors."""
+        self._dark_mode = dark
+        if dark:
+            self._bg_color = (30, 30, 60)
+            self._border_alpha = 0.08
+        else:
+            self._bg_color = (255, 255, 255)
+            self._border_alpha = 0.3
+        self._rebuild_style()
 
 
 class AnimatedButton(QPushButton):
@@ -193,8 +212,81 @@ class RecordButton(QPushButton):
             painter.end()
 
 
+class StatusIndicator(QWidget):
+    """Small indicator showing AI state: thinking, generating, speaking."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._state = "idle"
+        self._anim_phase = 0
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._pulse)
+        self.setFixedHeight(28)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(6)
+
+        self._dot = QLabel("●")
+        self._dot.setFont(QFont("Microsoft YaHei", 10))
+        self._dot.setFixedWidth(16)
+
+        self._label = QLabel("")
+        self._label.setFont(QFont("Microsoft YaHei", 9))
+        self._label.setStyleSheet("color: #8b7355;")
+
+        layout.addStretch()
+        layout.addWidget(self._dot)
+        layout.addWidget(self._label)
+        layout.addStretch()
+
+        self.setVisible(False)
+        self._update_style()
+
+    def set_state(self, state: str):
+        """Set AI state: 'idle', 'thinking', 'generating', 'speaking'."""
+        self._state = state
+        if state == "idle":
+            self._anim_timer.stop()
+            self.setVisible(False)
+        else:
+            self.setVisible(True)
+            self._anim_phase = 0
+            if not self._anim_timer.isActive():
+                self._anim_timer.start(400)
+        self._update_style()
+
+    def _pulse(self):
+        self._anim_phase = (self._anim_phase + 1) % 6
+        self._update_style()
+
+    def _update_style(self):
+        phase = self._anim_phase
+        if self._state == "thinking":
+            dots = "●" * ((phase % 3) + 1) + "○" * (2 - (phase % 3))
+            self._dot.setText(dots)
+            self._dot.setStyleSheet("color: #64B5F6;")
+            self._label.setText("正在理解...")
+        elif self._state == "generating":
+            alpha = int(180 + 75 * abs(phase / 3 - 1))
+            self._dot.setText("✦")
+            self._dot.setStyleSheet(f"color: rgba(76, 175, 80, {alpha});")
+            self._label.setText("正在回复...")
+        elif self._state == "speaking":
+            bars = ["▁", "▃", "▅", "▇", "▅", "▃"]
+            self._dot.setText(bars[phase])
+            self._dot.setStyleSheet("color: #FF8A65;")
+            self._label.setText("正在播放...")
+
+
 class MessageBubble(QFrame):
-    """Chat message bubble with user/AI/system styles."""
+    """Chat message bubble with user/AI/system styles. Supports dark mode."""
+
+    _dark_mode = False
+
+    @classmethod
+    def set_dark_mode(cls, dark: bool):
+        cls._dark_mode = dark
 
     def __init__(self, text="", is_user=True, is_system=False, parent=None):
         super().__init__(parent)
@@ -213,28 +305,29 @@ class MessageBubble(QFrame):
         self.text_label.setFont(QFont("Microsoft YaHei", 11))
         self.text_label.setMaximumWidth(340)
 
+        dark = self._dark_mode
         if self._is_system:
             self.text_label.setAlignment(Qt.AlignCenter)
             self.text_label.setStyleSheet("""
-                color: #95a5a6;
+                color: #78909c;
                 font-style: italic;
                 padding: 6px 12px;
                 background: transparent;
             """)
             layout.setAlignment(Qt.AlignCenter)
         elif self._is_user:
-            self.text_label.setStyleSheet("""
-                background-color: #DCF8C6;
-                color: #2c3e50;
+            self.text_label.setStyleSheet(f"""
+                background-color: {'#2d5a27' if dark else '#DCF8C6'};
+                color: {'#e0e0e0' if dark else '#2c3e50'};
                 border-radius: 16px 16px 4px 16px;
                 padding: 10px 14px;
             """)
             layout.setAlignment(Qt.AlignRight)
         else:
-            self.text_label.setStyleSheet("""
-                background-color: rgba(255, 255, 255, 0.95);
-                color: #2c3e50;
-                border: 1px solid #e0e0e0;
+            self.text_label.setStyleSheet(f"""
+                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.95)'};
+                color: {'#e0e0e0' if dark else '#2c3e50'};
+                border: 1px solid {'#3a3a5c' if dark else '#e0e0e0'};
                 border-radius: 16px 16px 16px 4px;
                 padding: 10px 14px;
             """)

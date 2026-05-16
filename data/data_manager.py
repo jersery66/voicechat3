@@ -13,6 +13,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DATA_ROOT, SAMPLE_RATE
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class DataManager:
     """
@@ -49,9 +53,39 @@ class DataManager:
         profiles_dir.mkdir(parents=True, exist_ok=True)
         summaries_dir.mkdir(parents=True, exist_ok=True)
         
-    def set_user_id(self, user_id: str):
-        """Set the current subject ID (被试编号)."""
-        self.current_subject_id = user_id.strip() or "default_subject"
+    def set_user_id(self, user_id: Optional[str]):
+        """Set the current subject ID (被试编号).
+
+        Defensive against ``None`` / empty / whitespace-only values: any of
+        these are mapped to ``"default_subject"`` to keep downstream path
+        construction safe.
+        """
+        cleaned = (user_id or "").strip() or "default_subject"
+        self.current_subject_id = cleaned
+
+    @staticmethod
+    def _read_json(path: Path, default: Any = None) -> Any:
+        """Safely read a JSON file. Returns ``default`` on missing/corrupt."""
+        if not path.exists():
+            return {} if default is None else default
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"Failed to read JSON {path}: {e}")
+            return {} if default is None else default
+
+    @staticmethod
+    def _write_json(path: Path, data: Any) -> bool:
+        """Safely write JSON to ``path``. Returns True on success."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except OSError as e:
+            logger.warning(f"Failed to write JSON {path}: {e}")
+            return False
         
     # ==================== User Profile Management ====================
     
@@ -81,20 +115,13 @@ class DataManager:
         
         profile_path = profiles_dir / f"{self.current_subject_id}.json"
         
-        existing_profile = {}
-        if profile_path.exists():
-            with open(profile_path, 'r', encoding='utf-8') as f:
-                existing_profile = json.load(f)
-        
+        existing_profile = self._read_json(profile_path, default={})
+
         existing_profile.update(profile)
         existing_profile["subject_id"] = self.current_subject_id
         existing_profile["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        try:
-            with open(profile_path, 'w', encoding='utf-8') as f:
-                json.dump(existing_profile, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[WARNING] Failed to save user profile: {e}")
+        self._write_json(profile_path, existing_profile)
 
         return str(profile_path)
     
@@ -113,10 +140,7 @@ class DataManager:
             return {}
             
         profile_path = self.data_root / "user_profiles" / f"{sid}.json"
-        if profile_path.exists():
-            with open(profile_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
+        return self._read_json(profile_path, default={})
     
     def get_all_user_profiles(self) -> List[Dict[str, Any]]:
         """Get all user profiles."""
@@ -130,7 +154,7 @@ class DataManager:
                 with open(profile_file, 'r', encoding='utf-8') as f:
                     profiles.append(json.load(f))
             except Exception as e:
-                print(f"[WARNING] Failed to load profile {profile_file}: {e}")
+                logger.warning(f"Failed to load profile {profile_file}: {e}")
         return profiles
     
     # ==================== Session Summary Management ====================
@@ -153,12 +177,17 @@ class DataManager:
         summaries_dir.mkdir(parents=True, exist_ok=True)
         
         summary_path = summaries_dir / f"{self.current_subject_id}_summary.json"
-        
-        summaries_data = {"subject_id": self.current_subject_id, "sessions": []}
-        if summary_path.exists():
-            with open(summary_path, 'r', encoding='utf-8') as f:
-                summaries_data = json.load(f)
-        
+
+        summaries_data = self._read_json(
+            summary_path,
+            default={"subject_id": self.current_subject_id, "sessions": []},
+        )
+        # Guard against legacy / corrupted files lacking the expected keys
+        if not isinstance(summaries_data, dict):
+            summaries_data = {"subject_id": self.current_subject_id, "sessions": []}
+        summaries_data.setdefault("subject_id", self.current_subject_id)
+        summaries_data.setdefault("sessions", [])
+
         session_entry = {
             "date": session_date or self.current_date or datetime.now().strftime("%Y-%m-%d"),
             "summary": summary,
@@ -167,11 +196,7 @@ class DataManager:
         summaries_data["sessions"].append(session_entry)
         summaries_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        try:
-            with open(summary_path, 'w', encoding='utf-8') as f:
-                json.dump(summaries_data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[WARNING] Failed to save session summary: {e}")
+        self._write_json(summary_path, summaries_data)
 
         return str(summary_path)
     
@@ -193,14 +218,15 @@ class DataManager:
         summary_path = self.data_root / "session_summaries" / f"{sid}_summary.json"
         if not summary_path.exists():
             return []
-            
+
+        data = self._read_json(summary_path, default={})
+        if not isinstance(data, dict):
+            return []
+        sessions = data.get("sessions", []) or []
         try:
-            with open(summary_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            sessions = data.get("sessions", [])
             return sessions[-limit:][::-1]
         except Exception as e:
-            print(f"[WARNING] Failed to load summaries: {e}")
+            logger.warning(f"Failed to slice summaries: {e}")
             return []
     
     def get_formatted_history_context(self, subject_id: str = None, include_profile: bool = True, include_summaries: int = 3) -> str:
@@ -252,75 +278,97 @@ class DataManager:
                     context_parts.append(f"--- {s.get('date', '未知日期')} ---")
                     context_parts.append(s.get("summary", "无摘要"))
                     context_parts.append("")
-        
+
+        try:
+            from data.treatment_progress import TreatmentProgress
+            progress = TreatmentProgress(str(self.data_root))
+            progress_summary = progress.get_progress_summary(sid)
+            if progress_summary:
+                context_parts.append(progress_summary)
+                context_parts.append("")
+        except Exception as e:
+            logger.debug(f"Treatment progress context unavailable: {e}")
+
         return "\n".join(context_parts) if context_parts else ""
         
     def start_new_session(self) -> str:
-        """Start a new chat session and return folder name."""
+        """Start a new chat session and return folder name.
+
+        If a previous "default_subject" empty session exists, it is renamed to
+        the current subject id (when distinct) instead of creating a new
+        folder, to avoid accumulating empty default folders.
+        """
         now = datetime.now()
+        previous_folder_name = self.current_folder_name
+        previous_message_count = self.message_counter
+        # Snapshot the previous session path BEFORE mutating state, so the
+        # rename branch below can refer to the old directory unambiguously.
+        old_path: Optional[Path] = None
+        if previous_folder_name and self.current_date:
+            old_path = self.data_root / self.current_date / previous_folder_name
+
         self.current_date = now.strftime("%Y-%m-%d")
         self.message_counter = 0
-        
+
         # 获取被试编号，确定文件夹名
         subject_id = self.current_subject_id or "default_subject"
-        
+
         # 检查是否已存在同名文件夹，如有则添加时间戳
         date_path = self.data_root / self.current_date
         base_folder = subject_id
         folder_name = base_folder
-        
+
         if date_path.exists():
             # Check for existing folder with same name
             if (date_path / folder_name).exists():
                 folder_name = f"{base_folder}_{now.strftime('%H%M%S')}"
-        
-        # Check if we should rename an existing empty "default_subject" session
-        # This prevents accumulating empty default folders
-        if self.current_folder_name and "default_subject" in self.current_folder_name and self.message_counter == 0:
-            old_path = self._get_session_path()
-            if old_path.exists() and subject_id != "default_subject":
-                try:
-                    new_folder_name = folder_name
-                    # Ensure new name is unique if we are renaming to it (though we just calculated it)
-                    # But wait, folder_name was calculated based on existence.
-                    # If we rename 'default' to 'subject_001', we need to check if 'subject_001' exists?
-                    # Yes, logic above handled collision for 'subject_001' vs existing 'subject_001'.
-                    
-                    self.current_folder_name = new_folder_name
-                    new_path = self._get_session_path()
-                    
-                    # Rename directory
-                    old_path.rename(new_path)
-                    print(f"[INFO] Renamed empty default session to: {new_path}")
-                    
-                    # Update metadata in the renamed folder
-                    metadata = self._load_metadata()
-                    metadata["subject_id"] = subject_id
-                    metadata["folder_name"] = new_folder_name
-                    self._save_metadata(metadata)
-                    
-                    return self.current_folder_name
-                except Exception as e:
-                    print(f"[WARNING] Failed to rename default session: {e}")
-                    # Fallback to creating new folder
-                    self.current_folder_name = folder_name
-        
+
+        # If we previously had an empty "default_subject" session AND the
+        # caller has now provided a real subject id, rename the old folder
+        # in-place rather than creating a new empty one.
+        if (
+            previous_folder_name
+            and "default_subject" in previous_folder_name
+            and previous_message_count == 0
+            and old_path is not None
+            and old_path.exists()
+            and subject_id != "default_subject"
+        ):
+            try:
+                self.current_folder_name = folder_name
+                new_path = self._get_session_path()
+
+                old_path.rename(new_path)
+                logger.info(f"Renamed empty default session to: {new_path}")
+
+                # Update metadata in the renamed folder
+                metadata = self._load_metadata()
+                metadata["subject_id"] = subject_id
+                metadata["folder_name"] = folder_name
+                self._save_metadata(metadata)
+
+                return self.current_folder_name
+            except Exception as e:
+                logger.warning(f"Failed to rename default session: {e}")
+                # Fallback to creating new folder
+                self.current_folder_name = folder_name
+
         self.current_folder_name = folder_name
-        
+
         # Create directory structure
         session_path = self._get_session_path()
         session_path.mkdir(parents=True, exist_ok=True)
-        
-        # Create metadata file
+
+        # Create metadata file (millisecond-precision start time)
         metadata = {
-            "subject_id": subject_id,  # 被试编号
+            "subject_id": subject_id,
             "folder_name": folder_name,
             "date": self.current_date,
-            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],  # Millisecond precision
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
             "messages": []
         }
         self._save_metadata(metadata)
-        
+
         return self.current_folder_name
     
     @property
@@ -337,19 +385,12 @@ class DataManager:
     def _save_metadata(self, metadata: Dict[str, Any]):
         """Save session metadata."""
         metadata_path = self._get_session_path() / "metadata.json"
-        try:
-            with open(metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[WARNING] Failed to save metadata: {e}")
-            
+        self._write_json(metadata_path, metadata)
+
     def _load_metadata(self) -> Dict[str, Any]:
         """Load session metadata."""
         metadata_path = self._get_session_path() / "metadata.json"
-        if metadata_path.exists():
-            with open(metadata_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
+        return self._read_json(metadata_path, default={})
     
     def save_user_message(self, audio: np.ndarray, text: str) -> Dict[str, str]:
         """
@@ -378,7 +419,7 @@ class DataManager:
             with open(text_path, 'w', encoding='utf-8') as f:
                 f.write(f"[{timestamp}]\n{text}")
         except Exception as e:
-            print(f"[WARNING] Failed to save user text: {e}")
+            logger.warning(f"Failed to save user text: {e}")
 
         try:
             metadata = self._load_metadata()
@@ -392,7 +433,7 @@ class DataManager:
             })
             self._save_metadata(metadata)
         except Exception as e:
-            print(f"[WARNING] Failed to update metadata: {e}")
+            logger.warning(f"Failed to update metadata: {e}")
 
         return {
             "audio_path": str(audio_path),
@@ -426,7 +467,7 @@ class DataManager:
             with open(text_path, 'w', encoding='utf-8') as f:
                 f.write(f"[{timestamp}]\n{text}")
         except Exception as e:
-            print(f"[WARNING] Failed to save assistant text: {e}")
+            logger.warning(f"Failed to save assistant text: {e}")
 
         try:
             metadata = self._load_metadata()
@@ -440,7 +481,7 @@ class DataManager:
             })
             self._save_metadata(metadata)
         except Exception as e:
-            print(f"[WARNING] Failed to update metadata: {e}")
+            logger.warning(f"Failed to update metadata: {e}")
 
         return {
             "audio_path": str(audio_path),
@@ -448,21 +489,31 @@ class DataManager:
         }
     
     def _save_wav(self, filepath: Path, audio: np.ndarray, sample_rate: int = SAMPLE_RATE):
-        """Save numpy array as WAV file."""
+        """Save numpy array as WAV file.
+
+        Accepts any array-like and any numeric dtype; coerces to mono int16 at
+        ``sample_rate`` Hz, writing a 16-bit PCM WAV. Errors are caught and
+        logged — callers must not rely on the file existing on disk.
+        """
         try:
-            # Normalize to int16
-            if audio.dtype == np.float32 or audio.dtype == np.float64:
-                audio = (audio * 32767).astype(np.int16)
-            elif audio.dtype != np.int16:
-                audio = audio.astype(np.int16)
+            arr = np.asarray(audio)
+            if arr.size == 0:
+                logger.debug(f"Skip empty audio for {filepath}")
+                return
+            if arr.dtype in (np.float32, np.float64):
+                # Clip to [-1, 1] to avoid integer overflow on conversion
+                arr = np.clip(arr, -1.0, 1.0)
+                arr = (arr * 32767).astype(np.int16)
+            elif arr.dtype != np.int16:
+                arr = arr.astype(np.int16)
 
             with wave.open(str(filepath), 'wb') as wav:
                 wav.setnchannels(1)
                 wav.setsampwidth(2)  # 16-bit
                 wav.setframerate(sample_rate)
-                wav.writeframes(audio.tobytes())
+                wav.writeframes(arr.tobytes())
         except Exception as e:
-            print(f"[WARNING] Failed to save WAV {filepath}: {e}")
+            logger.warning(f"Failed to save WAV {filepath}: {e}")
     
     def get_session_history(self) -> list:
         """Get all messages in current session."""
@@ -531,7 +582,7 @@ class DataManager:
             with open(report_path, 'w', encoding='utf-8') as f:
                 json.dump(researcher_report, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"[WARNING] Failed to save researcher report: {e}")
+            logger.warning(f"Failed to save researcher report: {e}")
 
         # Save visitor feedback as text
         feedback_path = session_path / "visitor_feedback.txt"
@@ -540,7 +591,7 @@ class DataManager:
             with open(feedback_path, 'w', encoding='utf-8') as f:
                 f.write(f"[{timestamp}]\n{visitor_feedback}")
         except Exception as e:
-            print(f"[WARNING] Failed to save visitor feedback: {e}")
+            logger.warning(f"Failed to save visitor feedback: {e}")
 
         # Update metadata with report info
         try:
@@ -550,7 +601,7 @@ class DataManager:
             metadata["end_time"] = timestamp
             self._save_metadata(metadata)
         except Exception as e:
-            print(f"[WARNING] Failed to update metadata for report: {e}")
+            logger.warning(f"Failed to update metadata for report: {e}")
         
         return {
             "report_path": str(report_path),

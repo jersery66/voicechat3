@@ -17,6 +17,9 @@ import time
 # Add CosyVoice to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from services.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class TTSService:
@@ -43,7 +46,7 @@ class TTSService:
                 if os.path.isfile(fp) and (now - os.path.getmtime(fp)) > max_age_seconds:
                     os.remove(fp)
         except Exception as e:
-            print(f"[WARNING] Temp cleanup failed: {e}")
+            logger.warning(f"Temp cleanup failed: {e}")
 
     def load_model(self, progress_callback=None, **kwargs):
         """Load CosyVoice3 model and prepare voice cloning prompt."""
@@ -53,7 +56,7 @@ class TTSService:
         cosyvoice_dir = config.COSYVOICE_BASE_DIR
         model_dir = config.COSYVOICE_MODEL_PATH
 
-        print(f"[INFO] Loading CosyVoice3 from: {model_dir}")
+        logger.info(f"Loading CosyVoice3 from: {model_dir}")
         sys.path.insert(0, cosyvoice_dir)
 
         from cosyvoice.cli.cosyvoice import AutoModel
@@ -65,19 +68,19 @@ class TTSService:
         self.prompt_text = config.VOICE_PROMPT_TEXT
 
         if self.prompt_wav and os.path.exists(self.prompt_wav):
-            print(f"[INFO] Voice prompt: {self.prompt_wav}")
+            logger.info(f"Voice prompt: {self.prompt_wav}")
             # Cache speaker embedding for faster subsequent calls
             try:
                 self.model.add_zero_shot_spk(
                     self.prompt_text, self.prompt_wav, 'default_speaker'
                 )
                 self._use_cached_speaker = True
-                print("[INFO] Speaker embedding cached as 'default_speaker'")
+                logger.info("Speaker embedding cached as 'default_speaker'")
             except Exception as e:
-                print(f"[WARNING] Failed to cache speaker: {e}")
+                logger.warning(f"Failed to cache speaker: {e}")
                 self._use_cached_speaker = False
         else:
-            print(f"[WARNING] Voice prompt not found: {self.prompt_wav}")
+            logger.warning(f"Voice prompt not found: {self.prompt_wav}")
             self._use_cached_speaker = False
 
         # Initialize PyAudio
@@ -91,18 +94,17 @@ class TTSService:
 
     def warmup(self):
         """Warmup the model with a short generation."""
-        print("[INFO] Warming up CosyVoice3...")
+        logger.info("Warming up CosyVoice3...")
         try:
             audio = self.generate("你好，很高兴认识你。")
             if audio is not None and len(audio) > 0:
-                print(f"[INFO] CosyVoice3 warmup successful. Generated {len(audio)} samples.")
+                logger.info(f"CosyVoice3 warmup successful. Generated {len(audio)} samples.")
             else:
-                print("[WARNING] Warmup generated empty audio, continuing...")
+                logger.warning("Warmup generated empty audio, continuing...")
             return True
         except Exception as e:
-            print(f"[ERROR] CosyVoice3 warmup failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"CosyVoice3 warmup failed: {e}")
+            logger.exception("Exception occurred")
             return False
 
     # ==================== Text Preprocessing ====================
@@ -111,6 +113,9 @@ class TTSService:
         """Map FireRedTTS2-style tags to CosyVoice native tags and clean up."""
         if not text:
             return ""
+
+        # 0. Number range normalization: "8-10" → "8到10", "3~5" → "3到5"
+        text = re.sub(r'(\d+)\s*[-~—–]\s*(\d+)', r'\1到\2', text)
 
         # 1. Remove emotion tags (not supported in zero-shot mode)
         text = re.sub(r'<\|emotion_\w+\|>', '', text)
@@ -164,7 +169,7 @@ class TTSService:
                 except queue.Empty:
                     continue
                 except Exception as e:
-                    print(f"[ERROR] Playback worker error: {e}")
+                    logger.error(f"Playback worker error: {e}")
                     break
 
             # Flush remaining buffered chunks
@@ -174,19 +179,19 @@ class TTSService:
                         stream.write(c.tobytes())
 
         finally:
-            print("[DEBUG] Playback worker finished")
+            logger.debug("Playback worker finished")
 
     def generate_and_play(self, text: str, **kwargs):
         """Generate speech with CosyVoice3 and play in real-time (streaming)."""
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
-        print(f"[DEBUG] generate_and_play called with text length: {len(text)}")
+        logger.debug(f"generate_and_play called with text length: {len(text)}")
         self.is_playing = True
 
         clean_text = self._preprocess_text(text)
         if not clean_text:
-            print("[WARNING] Empty text after preprocessing")
+            logger.warning("Empty text after preprocessing")
             self.is_playing = False
             return
 
@@ -197,10 +202,9 @@ class TTSService:
         stream = None
 
         try:
-            if pyaudio is None:
-                raise RuntimeError("PyAudio not installed. Cannot play audio.")
-            p = pyaudio.PyAudio()
-            stream = p.open(
+            if not self.pyaudio:
+                raise RuntimeError("PyAudio not initialized.")
+            stream = self.pyaudio.open(
                 format=pyaudio.paFloat32,
                 channels=1,
                 rate=self.sample_rate,
@@ -229,7 +233,7 @@ class TTSService:
 
             for chunk in self.model.inference_zero_shot(**kwargs_gen):
                 if not self.is_playing:
-                    print("[DEBUG] Playback interrupted.")
+                    logger.debug("Playback interrupted.")
                     break
 
                 audio_np = chunk['tts_speech'].squeeze().float().cpu().numpy().astype(np.float32)
@@ -242,16 +246,13 @@ class TTSService:
             playback_thread.join(timeout=10)
 
         except Exception as e:
-            print(f"[ERROR] generate_and_play failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"generate_and_play failed: {e}")
+            logger.exception("Exception occurred")
 
         finally:
             if stream:
                 stream.stop_stream()
                 stream.close()
-            if p:
-                p.terminate()
             self.is_playing = False
 
     def generate(self, text: str, **kwargs) -> np.ndarray:
@@ -285,9 +286,8 @@ class TTSService:
             return np.array([])
 
         except Exception as e:
-            print(f"[ERROR] CosyVoice3 generate failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"CosyVoice3 generate failed: {e}")
+            logger.exception("Exception occurred")
             return np.array([])
 
     def stop_playing(self):
@@ -297,20 +297,18 @@ class TTSService:
     def play_audio(self, audio: np.ndarray):
         """Play pre-generated audio data synchronously."""
         if audio is None or len(audio) == 0:
-            print("[WARNING] play_audio called with empty audio data")
+            logger.warning("play_audio called with empty audio data")
             return
 
-        print(f"[DEBUG] play_audio called with {len(audio)} samples")
+        logger.debug(f"play_audio called with {len(audio)} samples")
         self.is_playing = True
 
-        p = None
         stream = None
 
         try:
-            if pyaudio is None:
-                raise RuntimeError("PyAudio not installed. Cannot play audio.")
-            p = pyaudio.PyAudio()
-            stream = p.open(
+            if not self.pyaudio:
+                raise RuntimeError("PyAudio not initialized.")
+            stream = self.pyaudio.open(
                 format=pyaudio.paFloat32,
                 channels=1,
                 rate=self.sample_rate,
@@ -326,16 +324,13 @@ class TTSService:
                 stream.write(chunk.astype(np.float32).tobytes())
 
         except Exception as e:
-            print(f"[ERROR] play_audio error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"play_audio error: {e}")
+            logger.exception("Exception occurred")
 
         finally:
             if stream:
                 stream.stop_stream()
                 stream.close()
-            if p:
-                p.terminate()
             self.is_playing = False
 
     def save_audio(self, audio: np.ndarray, filepath: str):
