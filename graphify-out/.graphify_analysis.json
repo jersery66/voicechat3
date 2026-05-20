@@ -1,0 +1,359 @@
+{
+  "communities": {
+    "0": [
+      "data_my_voice",
+      "img_pdf_background",
+      "img_services_dots",
+      "img_services_zero",
+      "img_ui_background",
+      "img_ui_backgroundm",
+      "rationale_user_researcher_split",
+      "ui_chat_panel",
+      "ui_control_panel",
+      "ui_dialogs",
+      "ui_init",
+      "ui_loading_screen",
+      "ui_main_window",
+      "ui_session_review",
+      "ui_stats_panel",
+      "ui_widgets",
+      "widget_blink_button",
+      "widget_frosted_panel",
+      "widget_message_bubble",
+      "widget_record_button",
+      "widget_status_indicator"
+    ],
+    "1": [
+      "config_agent_crisis",
+      "config_agent_emotion",
+      "config_agent_intent",
+      "config_agent_relaxation",
+      "config_config",
+      "config_crisis_intervention",
+      "config_greeting_variants",
+      "config_system_prompt",
+      "data_datamanager",
+      "data_treatmentprogress",
+      "game_backgroundsystem",
+      "game_campsystem",
+      "game_clinicaltracker",
+      "game_config",
+      "game_difficultysystem",
+      "game_engine",
+      "game_player",
+      "game_resourcesystem",
+      "game_stormsystem",
+      "main_main"
+    ],
+    "2": [
+      "download_media",
+      "knowledge_anger_management",
+      "knowledge_anxiety_intervention",
+      "knowledge_crisis_intervention",
+      "knowledge_depression_intervention",
+      "knowledge_relaxation_techniques",
+      "knowledge_sleep_intervention",
+      "knowledge_withdrawal_coping",
+      "library_config",
+      "scene_anger_calm",
+      "scene_anxiety_relief",
+      "scene_breathing_exercise",
+      "scene_depression_support",
+      "scene_entertainment",
+      "scene_meditation",
+      "scene_motivation",
+      "scene_muscle_relaxation",
+      "scene_nature_sounds",
+      "scene_sleep_aid"
+    ],
+    "3": [
+      "background_system_BackgroundSystem",
+      "camp_system_CampSystem",
+      "clinical_tracker_ClinicalTracker",
+      "config_AgentEmotionMessage",
+      "config_AgentRelaxationMessage",
+      "config_EmotionSceneMap",
+      "data_manager_DataManager",
+      "data_manager_TreatmentProgress",
+      "difficulty_system_DifficultySystem",
+      "engine_GameEngine",
+      "player_Player",
+      "rationale_478Breathing",
+      "rationale_DDA",
+      "rationale_DelayedGratification",
+      "rationale_EmotionTracking",
+      "rationale_GoNogoTask",
+      "rationale_RelaxationTriggerTags",
+      "resource_system_ResourceSystem",
+      "storm_system_StormSystem"
+    ],
+    "4": [
+      "emotion_tracker",
+      "game_service",
+      "llm_service",
+      "logger",
+      "metrics",
+      "parallel_classification_concept",
+      "pipeline",
+      "report_generator",
+      "streaming_recovery_concept",
+      "tag_detection_concept",
+      "test_conversation",
+      "agent_service",
+      "singleton_pattern_concept"
+    ],
+    "5": [
+      "check_config",
+      "emollm_single_turn_1",
+      "emollm_single_turn_2",
+      "intent_routing_concept",
+      "knowledge_core",
+      "lazy_loading_concept",
+      "preprocess_knowledge_base",
+      "psi_trie_preprocessing",
+      "psyqa_converted",
+      "rag_service",
+      "synonym_map_concept",
+      "test_rag"
+    ],
+    "6": [
+      "config_AgentCrisisMessage",
+      "config_CrisisInterventionSuffix",
+      "config_SYSTEM_PROMPT",
+      "cpsycounr_converted_ClinicalCases",
+      "emollm_multi_turn_Dialogues",
+      "rationale_CBTApproach",
+      "rationale_MIOARS",
+      "rationale_PsychosomaticModel"
+    ],
+    "7": [
+      "doc_claude_md",
+      "doc_readme",
+      "rationale_chinese_inkwash_palette",
+      "rationale_frosted_glass_theme",
+      "rationale_queue_threading",
+      "ui_styles"
+    ],
+    "8": [
+      "dialog_base",
+      "dialog_continue_or_end",
+      "dialog_crisis",
+      "dialog_session_end"
+    ],
+    "9": [
+      "data_requirements",
+      "data_requirements_dev"
+    ],
+    "10": [
+      "error_monitor",
+      "ring_buffer_error_concept"
+    ],
+    "11": [
+      "knowledge_dissociation_coping",
+      "knowledge_hallucination_coping"
+    ],
+    "12": [
+      "data_init"
+    ],
+    "13": [
+      "game_init"
+    ],
+    "14": [
+      "game_entities_init"
+    ],
+    "15": [
+      "game_systems_init"
+    ],
+    "16": [
+      "kb_cpsycounr"
+    ],
+    "17": [
+      "kb_emollm"
+    ],
+    "18": [
+      "settings_local"
+    ],
+    "19": [
+      "knowledge_family_support"
+    ],
+    "20": [
+      "knowledge_assessment_tools"
+    ],
+    "21": [
+      "widget_animated_button"
+    ],
+    "22": [
+      "config_IntentSceneMap"
+    ],
+    "23": [
+      "config_AgentIntentMessage"
+    ],
+    "24": [
+      "config_AgentRagRoutingMessage"
+    ],
+    "25": [
+      "config_AgentSummaryMessage"
+    ],
+    "26": [
+      "config_CrisisHotlines"
+    ],
+    "27": [
+      "config_SessionSummaryPrompt"
+    ],
+    "28": [
+      "config_VisitorFeedbackPrompt"
+    ],
+    "29": [
+      "config_SuggestionsPrompt"
+    ],
+    "30": [
+      "rationale_PipeDelimiterPattern"
+    ],
+    "31": [
+      "rationale_SessionEndTags"
+    ]
+  },
+  "cohesion": {
+    "0": 0.1380952380952381,
+    "1": 0.18947368421052632,
+    "2": 0.1286549707602339,
+    "3": 0.13450292397660818,
+    "4": 0.21794871794871795,
+    "5": 0.22727272727272727,
+    "6": 0.25,
+    "7": 0.4,
+    "8": 0.5,
+    "9": 1.0,
+    "10": 1.0,
+    "11": 1.0,
+    "12": 1.0,
+    "13": 1.0,
+    "14": 1.0,
+    "15": 1.0,
+    "16": 1.0,
+    "17": 1.0,
+    "18": 1.0,
+    "19": 1.0,
+    "20": 1.0,
+    "21": 1.0,
+    "22": 1.0,
+    "23": 1.0,
+    "24": 1.0,
+    "25": 1.0,
+    "26": 1.0,
+    "27": 1.0,
+    "28": 1.0,
+    "29": 1.0,
+    "30": 1.0,
+    "31": 1.0
+  },
+  "gods": [
+    {
+      "id": "agent_service",
+      "label": "AgentService (3B Model Agent)",
+      "degree": 15
+    },
+    {
+      "id": "rag_service",
+      "label": "RAGService",
+      "degree": 13
+    },
+    {
+      "id": "ui_main_window",
+      "label": "MainWindow",
+      "degree": 13
+    },
+    {
+      "id": "download_media",
+      "label": "Media Download Script",
+      "degree": 11
+    },
+    {
+      "id": "config_config",
+      "label": "Voice Chat Configuration",
+      "degree": 9
+    },
+    {
+      "id": "game_engine",
+      "label": "GameEngine",
+      "degree": 9
+    },
+    {
+      "id": "logger",
+      "label": "Logger (get_logger)",
+      "degree": 7
+    },
+    {
+      "id": "pipeline",
+      "label": "ConversationPipeline",
+      "degree": 7
+    },
+    {
+      "id": "engine_GameEngine",
+      "label": "GameEngine (Main Game Loop)",
+      "degree": 7
+    },
+    {
+      "id": "game_stormsystem",
+      "label": "StormSystem",
+      "degree": 6
+    }
+  ],
+  "surprises": [
+    {
+      "source": "MainWindow",
+      "target": "my_voice.txt TTS Script",
+      "source_files": [
+        "ui/main_window.py",
+        "data/my_voice.txt"
+      ],
+      "confidence": "INFERRED",
+      "relation": "references",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (code ↔ doc); connects across different repos/directories; peripheral node `my_voice.txt TTS Script` unexpectedly reaches hub `MainWindow`"
+    },
+    {
+      "source": "DataManager (Hierarchical Data Storage)",
+      "target": "ClinicalTracker (CSV Event Recording)",
+      "source_files": [
+        "data/data_manager.py",
+        "game/clinical_tracker.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "semantically_similar_to",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; semantically similar concepts with no structural link; peripheral node `DataManager (Hierarchical Data Storage)` unexpectedly reaches hub `ClinicalTracker (CSV Event Recording)`"
+    },
+    {
+      "source": "DataManager",
+      "target": "GameEngine",
+      "source_files": [
+        "data/data_manager.py",
+        "game/engine.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "semantically_similar_to",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; semantically similar concepts with no structural link"
+    },
+    {
+      "source": "DataManager",
+      "target": "ClinicalTracker",
+      "source_files": [
+        "data/data_manager.py",
+        "game/clinical_tracker.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "semantically_similar_to",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; semantically similar concepts with no structural link"
+    },
+    {
+      "source": "Crisis Intervention and Suicide Prevention",
+      "target": "AgentService (3B Model Agent)",
+      "source_files": [
+        "knowledge_base/knowledge.json",
+        "services/agent_service.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "conceptually_related_to",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities; peripheral node `Crisis Intervention and Suicide Prevention` unexpectedly reaches hub `AgentService (3B Model Agent)`"
+    }
+  ]
+}
