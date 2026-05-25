@@ -134,3 +134,42 @@ class TestReadWriteJson:
         path = tmp_path / "corrupt.json"
         path.write_text("not json", encoding="utf-8")
         assert dm._read_json(path) == {}
+
+
+class TestUserProfileNormalization:
+    """Profile aliases from UI/report code should stay compatible."""
+
+    def test_normalizes_aliases(self, dm):
+        profile = dm.normalize_user_profile({
+            "user_id": " subject-1 ",
+            "marital": "已婚",
+            "drug_type": "冰毒",
+        })
+
+        assert profile["subject_id"] == "subject-1"
+        assert profile["user_id"] == "subject-1"
+        assert profile["marital_status"] == "已婚"
+        assert profile["marital"] == "已婚"
+        assert profile["addiction_type"] == "冰毒"
+        assert profile["drug_type"] == "冰毒"
+
+    def test_save_user_profile_writes_aliases(self, dm):
+        dm.set_user_id("subject-2")
+        path = dm.save_user_profile({"marital": "未婚", "drug_type": "海洛因"})
+        saved = json.loads(Path(path).read_text(encoding="utf-8"))
+
+        assert saved["subject_id"] == "subject-2"
+        assert saved["user_id"] == "subject-2"
+        assert saved["marital_status"] == "未婚"
+        assert saved["addiction_type"] == "海洛因"
+
+    def test_save_user_profile_recovers_legacy_non_dict(self, dm):
+        dm.set_user_id("subject-3")
+        profile_path = dm.data_root / "user_profiles" / "subject-3.json"
+        profile_path.write_text("[]", encoding="utf-8")
+
+        dm.save_user_profile({"drug_type": "其他"})
+        saved = json.loads(profile_path.read_text(encoding="utf-8"))
+
+        assert saved["subject_id"] == "subject-3"
+        assert saved["addiction_type"] == "其他"

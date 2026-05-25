@@ -1,12 +1,14 @@
 # Pipeline - Unified conversation pipeline and shared constants
 
 import re
+import time
 import traceback
 from typing import Optional, Any, Callable, List, Dict
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.logger import get_logger
+from services.metrics import get_metrics
 
 logger = get_logger(__name__)
 
@@ -182,17 +184,22 @@ class ConversationPipeline:
         Run the full pipeline. emit(msg_type, content) is called for UI updates.
         Returns PipelineResult with all parsed data.
         """
+        metrics = get_metrics()
+        pipeline_started = time.perf_counter()
         result = PipelineResult()
 
         # --- STT (optional) ---
         if config.use_stt:
             if config.audio_data is None or len(config.audio_data) == 0:
                 emit("status", "未检测到语音")
+                metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
                 return result
             emit("status", "正在转写...")
-            result.user_text = self.stt.transcribe(config.audio_data)
+            with metrics.timer("stt.transcribe"):
+                result.user_text = self.stt.transcribe(config.audio_data)
             if not result.user_text.strip():
                 emit("status", "无法识别内容")
+                metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
                 return result
         else:
             result.user_text = config.user_text
@@ -221,9 +228,10 @@ class ConversationPipeline:
                 self.data.save_user_message(None, result.user_text)
 
         # --- Intent + Emotion (parallel 3B calls) ---
-        result.intent, result.emotion_result = self._classify_intent_and_emotion(
-            result.user_text
-        )
+        with metrics.timer("agent.intent_emotion"):
+            result.intent, result.emotion_result = self._classify_intent_and_emotion(
+                result.user_text
+            )
 
         # --- Emotion trend tracking ---
         if self.emotion_tracker:
@@ -237,15 +245,17 @@ class ConversationPipeline:
             emotion = result.emotion_result.get("emotion", "neutral")
             intensity = result.emotion_result.get("intensity", 0.0)
             use_llm = emotion != "neutral" or intensity >= 0.5
-            crisis_result = self.agent.assess_crisis_risk(
-                result.user_text, use_llm=use_llm)
+            with metrics.timer("agent.crisis"):
+                crisis_result = self.agent.assess_crisis_risk(
+                    result.user_text, use_llm=use_llm)
             result.crisis_risk = crisis_result.get("risk_level", 0)
             result.crisis_indicators = crisis_result.get("indicators", [])
             if crisis_result.get("immediate_action"):
                 emit("show_crisis", crisis_result)
 
         # --- System suffix construction ---
-        system_suffix = self._build_system_suffix(result.user_text)
+        with metrics.timer("rag.system_suffix"):
+            system_suffix = self._build_system_suffix(result.user_text)
         if self.emotion_tracker:
             hint = self.emotion_tracker.get_intervention_hint()
             if hint:
@@ -268,8 +278,9 @@ class ConversationPipeline:
 
         # --- LLM streaming ---
         emit("start_ai_message", None)
-        result.full_response, result.analysis_text, result.spoken_text = \
-            self._stream_llm(result.user_text, final_suffix, emit)
+        with metrics.timer("llm.stream"):
+            result.full_response, result.analysis_text, result.spoken_text = \
+                self._stream_llm(result.user_text, final_suffix, emit)
         emit("finish_streaming", None)
 
         # --- Clean for display ---
@@ -292,10 +303,12 @@ class ConversationPipeline:
         if config.use_tts and self.tts and result.tts_text:
             emit("status", "正在播放...")
             try:
-                self.tts.generate_and_play(result.tts_text)
+                with metrics.timer("tts.play"):
+                    self.tts.generate_and_play(result.tts_text)
             except Exception as e:
                 logger.warning(f"TTS error: {e}")
 
+        metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
         return result
 
     def _classify_intent_and_emotion(self, text: str) -> tuple:

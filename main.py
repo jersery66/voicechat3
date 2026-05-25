@@ -17,6 +17,8 @@ from services.logger import setup_logging
 
 def main():
     setup_logging()
+    from services.error_monitor import get_error_monitor
+    get_error_monitor()
 
     # Pre-launch config check (non-blocking — warn but don't block startup)
     try:

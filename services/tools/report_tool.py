@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 
 from services.logger import get_logger
+from services.metrics import get_metrics
 
 logger = get_logger(__name__)
 
@@ -40,20 +41,22 @@ class ReportGenerationTool:
         """
         session_emotions = session_emotions or []
         scale_tags = scale_tags or {}
+        metrics = get_metrics()
 
         # 1. Visitor feedback (streaming)
         full_feedback = ""
         try:
-            stream_gen = self.report.generate_visitor_feedback(
-                conversation_history, end_type, relaxation_info,
-                stream=True, session_emotions=session_emotions
-            )
-            for chunk in stream_gen:
-                full_feedback += chunk
-                if emit:
-                    clean = self._clean_chunk(chunk)
-                    if clean:
-                        emit("stream_text", clean)
+            with metrics.timer("report.feedback"):
+                stream_gen = self.report.generate_visitor_feedback(
+                    conversation_history, end_type, relaxation_info,
+                    stream=True, session_emotions=session_emotions
+                )
+                for chunk in stream_gen:
+                    full_feedback += chunk
+                    if emit:
+                        clean = self._clean_chunk(chunk)
+                        if clean:
+                            emit("stream_text", clean)
         except Exception as e:
             logger.warning(f"Visitor feedback generation failed: {e}")
 
@@ -61,11 +64,12 @@ class ReportGenerationTool:
         researcher_report = None
         scored_scales = None
         try:
-            researcher_report = self.report.generate_researcher_report(
-                conversation_history, user_id, end_type,
-                user_info=user_info, relaxation_info=relaxation_info,
-                session_emotions=session_emotions
-            )
+            with metrics.timer("report.researcher"):
+                researcher_report = self.report.generate_researcher_report(
+                    conversation_history, user_id, end_type,
+                    user_info=user_info, relaxation_info=relaxation_info,
+                    session_emotions=session_emotions
+                )
             # Add scale assessment results
             if scale_tags:
                 researcher_report = researcher_report or {}

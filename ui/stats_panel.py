@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel,
-    QPushButton, QFileDialog, QMessageBox
+    QPushButton, QFileDialog, QMessageBox, QTextEdit
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -51,6 +51,7 @@ class StatsPanelDialog(QDialog):
         self.tab_widget = QTabWidget()
         self.tab_widget.addTab(self._build_overview_tab(), "被试概览")
         self.tab_widget.addTab(self._build_charts_tab(), "统计图表")
+        self.tab_widget.addTab(self._build_runtime_tab(), "运行监控")
         self.tab_widget.addTab(self._build_export_tab(), "导出报告")
         layout.addWidget(self.tab_widget, 1)
 
@@ -93,6 +94,26 @@ class StatsPanelDialog(QDialog):
             layout.addWidget(self._chart_canvas)
         else:
             layout.addWidget(QLabel("matplotlib 未安装，无法显示图表"))
+        return container
+
+    def _build_runtime_tab(self) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        refresh_btn = QPushButton("刷新运行监控")
+        refresh_btn.clicked.connect(self._load_runtime_data)
+        layout.addWidget(refresh_btn)
+
+        self._runtime_metrics = QTextEdit()
+        self._runtime_metrics.setReadOnly(True)
+        self._runtime_metrics.setMinimumHeight(220)
+        layout.addWidget(self._runtime_metrics)
+
+        self._runtime_errors = QTextEdit()
+        self._runtime_errors.setReadOnly(True)
+        self._runtime_errors.setMinimumHeight(220)
+        layout.addWidget(self._runtime_errors)
+
         return container
 
     def _build_export_tab(self) -> QWidget:
@@ -170,6 +191,38 @@ class StatsPanelDialog(QDialog):
         # Charts
         if MATPLOTLIB_AVAILABLE:
             self._update_charts()
+        self._load_runtime_data()
+
+    def _load_runtime_data(self):
+        if not hasattr(self, "_runtime_metrics"):
+            return
+        from services.metrics import get_metrics
+        from services.error_monitor import get_error_monitor
+
+        snapshot = get_metrics().snapshot()
+        if snapshot:
+            lines = ["性能指标（毫秒）:"]
+            for name, stat in sorted(snapshot.items()):
+                lines.append(
+                    f"{name}: count={int(stat['count'])}, "
+                    f"avg={stat['avg']:.1f}, p50={stat['p50']:.1f}, "
+                    f"p95={stat['p95']:.1f}, max={stat['max']:.1f}"
+                )
+            self._runtime_metrics.setPlainText("\n".join(lines))
+        else:
+            self._runtime_metrics.setPlainText("暂无性能指标。")
+
+        errors = get_error_monitor().get_recent(30)
+        if errors:
+            lines = ["最近 WARNING/ERROR:"]
+            for item in errors:
+                lines.append(
+                    f"[{item.get('ts')}] {item.get('level')} "
+                    f"{item.get('logger')}: {item.get('msg')}"
+                )
+            self._runtime_errors.setPlainText("\n".join(lines))
+        else:
+            self._runtime_errors.setPlainText("暂无 WARNING/ERROR 记录。")
 
     def _update_charts(self):
         self._chart_figure.clear()

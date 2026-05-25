@@ -350,7 +350,9 @@ class ControlPanel(FrostedPanel):
             "age": self.age_input.text().strip(),
             "education": self.edu_combo.currentText(),
             "marital": self.marital_combo.currentText(),
+            "marital_status": self.marital_combo.currentText(),
             "drug_type": self.drug_combo.currentText(),
+            "addiction_type": self.drug_combo.currentText(),
         }
 
         self._info_confirmed = True
@@ -392,7 +394,9 @@ class ControlPanel(FrostedPanel):
             "age": self.age_input.text().strip(),
             "education": self.edu_combo.currentText(),
             "marital": self.marital_combo.currentText(),
+            "marital_status": self.marital_combo.currentText(),
             "drug_type": self.drug_combo.currentText(),
+            "addiction_type": self.drug_combo.currentText(),
         }
 
     @property

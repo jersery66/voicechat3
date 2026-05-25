@@ -2,9 +2,11 @@
 
 import os
 import sys
+import time
 from typing import Generator, List, Dict, Any, Optional
 
 from services.logger import get_logger
+from services.metrics import get_metrics
 from services._ollama_pool import get_ollama_client
 
 # Add parent directory to path for config
@@ -99,6 +101,8 @@ class LLMService:
         # Stream response
         full_response = ""
         chunks_yielded = 0
+        request_started = time.perf_counter()
+        first_token_recorded = False
         stream_options = {
             "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "薇薇老师:", "薇薇老师："]
         }
@@ -116,6 +120,12 @@ class LLMService:
                     content = chunk["message"]["content"]
                     if not content:
                         continue
+                    if not first_token_recorded:
+                        get_metrics().record(
+                            "llm.first_token",
+                            (time.perf_counter() - request_started) * 1000.0,
+                        )
+                        first_token_recorded = True
                     full_response += content
                     chunks_yielded += 1
                     yield content

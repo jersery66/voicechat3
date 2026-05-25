@@ -254,8 +254,10 @@ class PDFReportGenerator:
                 if user_info.get("gender"): info_items.append(("性别", str(user_info.get("gender"))))
                 if user_info.get("age"): info_items.append(("年龄", str(user_info.get("age"))))
                 if user_info.get("education"): info_items.append(("文化程度", str(user_info.get("education"))))
-                if user_info.get("marital_status"): info_items.append(("婚姻状况", str(user_info.get("marital_status"))))
-                if user_info.get("drug_type"): info_items.append(("毒品类型", str(user_info.get("drug_type"))))
+                marital = user_info.get("marital_status") or user_info.get("marital")
+                if marital: info_items.append(("婚姻状况", str(marital)))
+                drug_type = user_info.get("drug_type") or user_info.get("addiction_type")
+                if drug_type: info_items.append(("毒品类型", str(drug_type)))
             
             info_items.append(("会话时长", f"{duration} 分钟"))
             info_items.append(("对话轮次", f"{report_data.get('conversation_rounds', 0)} 轮"))

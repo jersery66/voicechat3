@@ -40,6 +40,7 @@ from .dialogs import (
 from .styles import get_style
 from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineConfig
 from services.session_orchestrator import SessionState, SessionOrchestrator
+from services.session_end_controller import SessionEndController
 from services.report_service import EndType
 
 
@@ -71,6 +72,7 @@ class MainWindow(QMainWindow):
         self.models_loaded = False
         self._dark_mode = False
         self.orchestrator = SessionOrchestrator()
+        self.session_end_controller = SessionEndController()
         self.user_info = {}
         self.current_user_id = None
         self.info_confirmed = False
@@ -204,23 +206,55 @@ class MainWindow(QMainWindow):
     # ==================== User Info ====================
 
     def _on_confirm_user(self, info):
-        self.user_info = info
-        self.info_confirmed = True
-        user_id = info.get("user_id", "default_user")
+        normalized = self._normalize_user_info(info)
+        user_id = normalized.get("user_id", "default_user")
+        user_changed = self.current_user_id is not None and user_id != self.current_user_id
 
-        # Check if user ID changed
-        if self.current_user_id is not None and user_id != self.current_user_id:
+        self.user_info = normalized
+        self.info_confirmed = True
+        self.current_user_id = user_id
+
+        if self.data_manager:
+            self.data_manager.set_user_id(user_id)
+            self.data_manager.save_user_profile(normalized)
+            if self.llm_service:
+                context = self.data_manager.get_formatted_history_context(
+                    subject_id=user_id,
+                    include_profile=True,
+                    include_summaries=3,
+                )
+                self.llm_service.set_history_context(context)
+
+        if user_changed:
             self._start_new_session()
             self._play_opening_greeting()
             self.control_panel.set_status("用户已更换，请等待问候后再录音")
             return
 
-        if self.current_user_id is None:
-            self.current_user_id = user_id
+    @staticmethod
+    def _normalize_user_info(info):
+        """Normalize UI field aliases used by storage, reports, and prompts."""
+        normalized = dict(info or {})
+        user_id = (
+            normalized.get("user_id")
+            or normalized.get("subject_id")
+            or "default_user"
+        )
+        user_id = str(user_id).strip() or "default_user"
+        normalized["user_id"] = user_id
+        normalized["subject_id"] = user_id
 
-        # Save user info to data manager
-        if self.data_manager:
-            self.data_manager.set_user_id(user_id)
+        marital = normalized.get("marital_status") or normalized.get("marital")
+        if marital:
+            normalized["marital_status"] = marital
+            normalized["marital"] = marital
+
+        drug_type = normalized.get("addiction_type") or normalized.get("drug_type")
+        if drug_type:
+            normalized["addiction_type"] = drug_type
+            normalized["drug_type"] = drug_type
+
+        return normalized
 
     def _on_modify_user(self):
         self.info_confirmed = False
@@ -363,6 +397,10 @@ class MainWindow(QMainWindow):
                     role, text = content
                     if role == "user":
                         self.chat_panel.add_user_message(text)
+                    elif role == "ai":
+                        self.chat_panel.start_ai_message()
+                        self.chat_panel.stream_text(text)
+                        self.chat_panel.finish_streaming()
                     elif role == "ai_start":
                         self.chat_panel.start_ai_message()
 
@@ -455,41 +493,63 @@ class MainWindow(QMainWindow):
             self.processing_queue.put(("status", "正在并行加载语音识别与合成模型..."))
             self.processing_queue.put(("loading_progress", 5))
 
-            self.tts_service = TTSService()
+            self.tts_service = None
 
-            # STT: load with graceful fallback
+            # STT/TTS: load with graceful fallback. Either service may be
+            # unavailable while text chat and reports remain usable.
             stt_ok = False
-            try:
-                from config import FUNASR_MODEL_PATH
-                if FUNASR_MODEL_PATH and os.path.isdir(FUNASR_MODEL_PATH):
-                    self.stt_service = STTService()
-                    stt_loaded = threading.Event()
-                    tts_loaded = threading.Event()
+            tts_ok = False
+            load_errors = []
 
-                    def load_stt():
-                        self.stt_service.load_model()
-                        stt_loaded.set()
-
-                    def load_tts():
-                        self.tts_service.load_model(use_streaming=True)
-                        tts_loaded.set()
-
-                    t_stt = threading.Thread(target=load_stt, daemon=True)
-                    t_tts = threading.Thread(target=load_tts, daemon=True)
-                    t_stt.start()
-                    t_tts.start()
-                    t_stt.join()
-                    t_tts.join()
+            def load_stt():
+                nonlocal stt_ok
+                try:
+                    service = STTService()
+                    service.load_model()
+                    self.stt_service = service
                     stt_ok = True
+                except Exception as exc:
+                    self.stt_service = None
+                    load_errors.append(f"STT: {exc}")
+                    logger.warning(f"STT load failed: {exc}")
+
+            def load_tts():
+                nonlocal tts_ok
+                try:
+                    service = TTSService()
+                    service.load_model(use_streaming=True)
+                    self.tts_service = service
+                    tts_ok = True
+                except Exception as exc:
+                    self.tts_service = None
+                    load_errors.append(f"TTS: {exc}")
+                    logger.warning(f"TTS load failed: {exc}")
+
+            try:
+                from config import FUNASR_MODEL_PATH, COSYVOICE_MODEL_PATH
+
+                threads = []
+                if FUNASR_MODEL_PATH and os.path.isdir(FUNASR_MODEL_PATH):
+                    t_stt = threading.Thread(target=load_stt, daemon=True)
+                    t_stt.start()
+                    threads.append(t_stt)
                 else:
                     self.processing_queue.put(("status", "语音识别模型未找到，跳过 STT"))
-                    self.tts_service.load_model(use_streaming=True)
+
+                if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
+                    t_tts = threading.Thread(target=load_tts, daemon=True)
+                    t_tts.start()
+                    threads.append(t_tts)
+                else:
+                    self.processing_queue.put(("status", "语音合成模型未找到，跳过 TTS"))
+
+                for thread in threads:
+                    thread.join()
+                if load_errors:
+                    self.processing_queue.put(("status", "部分语音模块不可用，已降级继续"))
             except Exception as e:
-                logger.warning(f"STT load failed: {e}")
-                self.processing_queue.put(("status", f"语音识别加载失败: {e}"))
-                self.stt_service = None
-                if not hasattr(self, '_tts_loaded_in_thread'):
-                    self.tts_service.load_model(use_streaming=True)
+                logger.warning(f"Voice service loading failed: {e}")
+                self.processing_queue.put(("status", f"语音模块加载失败: {e}"))
 
             self.processing_queue.put(("loading_progress", 40))
 
@@ -498,8 +558,11 @@ class MainWindow(QMainWindow):
                 self.stt_service.warmup()
             self.processing_queue.put(("loading_progress", 50))
 
-            self.processing_queue.put(("status", "正在预热语音合成..."))
-            self.tts_service.warmup()
+            if tts_ok and self.tts_service:
+                self.processing_queue.put(("status", "正在预热语音合成..."))
+                self.tts_service.warmup()
+            else:
+                logger.warning("TTS unavailable; continuing in text-only playback mode")
             self.processing_queue.put(("loading_progress", 65))
 
             # Step 2: LLM
@@ -601,6 +664,7 @@ class MainWindow(QMainWindow):
         self.session_emotions = []
         self._scale_tags = {}
         self._session_ending = False
+        self.session_end_controller.reset()
         self.orchestrator.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
             self.emotion_tracker.reset()
@@ -655,11 +719,7 @@ class MainWindow(QMainWindow):
             return
         message = random.choice(TIMEOUT_END_MESSAGE)
         self.chat_panel.add_system_message(message)
-        if self.tts_service:
-            threading.Thread(
-                target=self.tts_service.generate_and_play,
-                args=(message,), daemon=True
-            ).start()
+        self._play_tts_async(message)
         QTimer.singleShot(5000, lambda: self._handle_session_end(EndType.TIME_LIMIT))
 
     def _cancel_post_relaxation_timer(self):
@@ -673,11 +733,7 @@ class MainWindow(QMainWindow):
         self.orchestrator.transition_to(SessionState.CHATTING)
         message = random.choice(CONTINUE_CHAT_MESSAGE)
         self.chat_panel.add_system_message(message)
-        if self.tts_service:
-            threading.Thread(
-                target=self.tts_service.generate_and_play,
-                args=(message,), daemon=True
-            ).start()
+        self._play_tts_async(message)
 
     def _on_end_chosen(self):
         """用户在放松后弹窗选择结束"""
@@ -755,40 +811,34 @@ class MainWindow(QMainWindow):
 
     # ==================== Audio Playback ====================
 
+    def _play_tts_async(self, text):
+        """Play TTS in the background when the service is available."""
+        if not self.tts_service or not text:
+            return
+
+        def runner():
+            try:
+                self.tts_service.generate_and_play(text)
+            except Exception as e:
+                logger.warning(f"TTS playback failed: {e}")
+
+        threading.Thread(target=runner, daemon=True).start()
+
     def _play_opening_greeting(self):
         """Play the opening greeting."""
-        if self.tts_service:
-            greeting = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
-            self.chat_panel.add_system_message(greeting)
-            try:
-                threading.Thread(
-                    target=self.tts_service.generate_and_play,
-                    args=(greeting,), daemon=True
-                ).start()
-            except Exception as e:
-                logger.warning(f"Greeting TTS error: {e}")
+        greeting = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
+        self.chat_panel.add_system_message(greeting)
+        self._play_tts_async(greeting)
 
     def _play_post_relaxation_greeting(self):
-        if self.tts_service and POST_RELAXATION_MESSAGE:
+        if POST_RELAXATION_MESSAGE:
             message = random.choice(POST_RELAXATION_MESSAGE)
             self.chat_panel.add_system_message(message)
-            try:
-                threading.Thread(
-                    target=self.tts_service.generate_and_play,
-                    args=(message,), daemon=True
-                ).start()
-            except Exception as e:
-                logger.warning(f"Post-relaxation TTS error: {e}")
+            self._play_tts_async(message)
 
     def _play_fill_info_prompt(self):
-        if self.tts_service and FILL_INFO_PROMPT:
-            try:
-                threading.Thread(
-                    target=self.tts_service.generate_and_play,
-                    args=(FILL_INFO_PROMPT,), daemon=True
-                ).start()
-            except Exception as e:
-                logger.warning(f"Fill info prompt TTS error: {e}")
+        if FILL_INFO_PROMPT:
+            self._play_tts_async(FILL_INFO_PROMPT)
 
     def _start_ollama_keepalive(self):
         """Keep Ollama model warm."""
@@ -911,7 +961,7 @@ class MainWindow(QMainWindow):
 
     def _handle_session_end(self, end_type, relaxation_tag=None):
         """Handle session end using orchestrator decision logic."""
-        if self._session_ending:
+        if not self.session_end_controller.begin().accepted:
             return
         self._session_ending = True
 
@@ -935,9 +985,11 @@ class MainWindow(QMainWindow):
             tag = data["relaxation_tag"]
             rec_text = f"等等，在结束之前，我留意到你还是有点紧张。要不咱们先做个{tag}放松训练？只需几分钟，效果很好的。"
             self.processing_queue.put(("append_chat", ("ai", rec_text)))
-            threading.Thread(target=lambda: self.tts_service.generate_and_play(rec_text), daemon=True).start()
+            self._play_tts_async(rec_text)
             QTimer.singleShot(1000, lambda: self.processing_queue.put(("highlight_relax", tag)))
             self.processing_queue.put(("status", "请尝试放松训练"))
+            self._session_ending = False
+            self.session_end_controller.defer_for_relaxation()
             return
 
         # action == "generate_reports"
@@ -997,6 +1049,8 @@ class MainWindow(QMainWindow):
 
             except Exception as e:
                 logger.exception("Exception occurred")
+                self._session_ending = False
+                self.session_end_controller.reset()
                 self.processing_queue.put(("error", f"报告生成失败: {str(e)}"))
 
         threading.Thread(target=generate_reports, daemon=True).start()

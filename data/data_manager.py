@@ -88,6 +88,37 @@ class DataManager:
             return False
         
     # ==================== User Profile Management ====================
+
+    @staticmethod
+    def normalize_user_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize UI/report aliases before profile persistence.
+
+        Older UI code used short keys such as ``marital`` and ``drug_type``;
+        report/history code expects ``marital_status`` and ``addiction_type``.
+        Keep both aliases so existing reports and stored JSON remain compatible.
+        """
+        normalized = dict(profile or {})
+
+        subject_id = (
+            normalized.get("subject_id")
+            or normalized.get("user_id")
+            or normalized.get("id")
+        )
+        if subject_id:
+            normalized["subject_id"] = str(subject_id).strip()
+            normalized["user_id"] = normalized["subject_id"]
+
+        marital = normalized.get("marital_status") or normalized.get("marital")
+        if marital:
+            normalized["marital_status"] = marital
+            normalized["marital"] = marital
+
+        drug_type = normalized.get("addiction_type") or normalized.get("drug_type")
+        if drug_type:
+            normalized["addiction_type"] = drug_type
+            normalized["drug_type"] = drug_type
+
+        return normalized
     
     def save_user_profile(self, profile: Dict[str, Any]) -> str:
         """
@@ -109,6 +140,8 @@ class DataManager:
         """
         if not self.current_subject_id:
             return ""
+
+        profile = self.normalize_user_profile(profile)
             
         profiles_dir = self.data_root / "user_profiles"
         profiles_dir.mkdir(parents=True, exist_ok=True)
@@ -116,9 +149,12 @@ class DataManager:
         profile_path = profiles_dir / f"{self.current_subject_id}.json"
         
         existing_profile = self._read_json(profile_path, default={})
+        if not isinstance(existing_profile, dict):
+            existing_profile = {}
 
         existing_profile.update(profile)
         existing_profile["subject_id"] = self.current_subject_id
+        existing_profile["user_id"] = self.current_subject_id
         existing_profile["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         self._write_json(profile_path, existing_profile)
@@ -260,8 +296,9 @@ class DataManager:
                     context_parts.append(f"性别：{profile['gender']}")
                 if profile.get("occupation"):
                     context_parts.append(f"职业：{profile['occupation']}")
-                if profile.get("addiction_type"):
-                    context_parts.append(f"吸毒类型：{profile['addiction_type']}")
+                addiction_type = profile.get("addiction_type") or profile.get("drug_type")
+                if addiction_type:
+                    context_parts.append(f"吸毒类型：{addiction_type}")
                 if profile.get("addiction_duration"):
                     context_parts.append(f"吸毒年限：{profile['addiction_duration']}")
                 if profile.get("treatment_count"):
