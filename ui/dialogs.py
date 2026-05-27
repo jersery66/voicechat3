@@ -292,6 +292,65 @@ class ContinueOrEndDialog(BaseDialog):
         self.end_chosen.emit()
         self.accept()
 
+    def _setup_ui_for_timeout(self):
+        """Rebuild UI for timeout ask-continue scenario."""
+        for child in self.findChildren(QLabel):
+            child.deleteLater()
+        for child in self.findChildren(QPushButton):
+            child.deleteLater()
+
+        layout = self.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.layout():
+                item.layout().deleteLater()
+            elif item.widget():
+                item.widget().deleteLater()
+
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        title = QLabel("对话时间提醒")
+        title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("color: #5d4037;")
+        layout.addWidget(title)
+
+        msg = QLabel("我们的对话已进行约45分钟。请问您想继续聊，还是今天就到这里？")
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setWordWrap(True)
+        msg.setStyleSheet("color: #2c3e50; font-size: 12px;")
+        layout.addWidget(msg)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(20)
+
+        btn_continue = QPushButton("继续对话")
+        btn_continue.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50; color: white;
+                border: 1px solid #388E3C; font-weight: bold;
+                padding: 10px 24px; font-size: 13px;
+            }
+            QPushButton:hover { background-color: #388E3C; }
+        """)
+        btn_continue.clicked.connect(self._on_continue)
+        btn_layout.addWidget(btn_continue)
+
+        btn_end = QPushButton("结束会话")
+        btn_end.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800; color: white;
+                border: 1px solid #F57C00; font-weight: bold;
+                padding: 10px 24px; font-size: 13px;
+            }
+            QPushButton:hover { background-color: #F57C00; }
+        """)
+        btn_end.clicked.connect(self._on_end)
+        btn_layout.addWidget(btn_end)
+
+        layout.addLayout(btn_layout)
+
 
 class WarningDialog(BaseDialog):
     """Simple warning/info dialog."""

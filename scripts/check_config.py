@@ -65,13 +65,48 @@ def check_funasr() -> bool:
 
 
 def check_cosyvoice() -> bool:
-    """Verify CosyVoice model directory exists."""
+    """Verify CosyVoice model directory exists (legacy)."""
     from config import COSYVOICE_MODEL_PATH
     if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
-        _ok(f"CosyVoice ({COSYVOICE_MODEL_PATH})")
+        _ok(f"CosyVoice (legacy, {COSYVOICE_MODEL_PATH})")
         return True
-    _warn("CosyVoice", f"path not found: {COSYVOICE_MODEL_PATH} (TTS will be disabled)")
-    return True  # non-fatal
+    _warn("CosyVoice (legacy)", f"path not found: {COSYVOICE_MODEL_PATH}")
+    return True
+
+
+def check_voxcpm() -> bool:
+    """Verify VoxCPM2 model availability."""
+    from config import VOXCPM_MODEL_PATH
+    if VOXCPM_MODEL_PATH and os.path.isdir(VOXCPM_MODEL_PATH):
+        _ok(f"VoxCPM2 ({VOXCPM_MODEL_PATH})")
+        return True
+    try:
+        import voxcpm
+        _ok("VoxCPM2 (pip package installed, will auto-download from HF Hub)")
+        return True
+    except ImportError:
+        _warn("VoxCPM2", "pip package not installed (TTS will be disabled)")
+        return True
+
+
+def check_voice_prompt() -> bool:
+    """Verify optional zero-shot TTS voice prompt exists."""
+    from config import VOICE_PROMPT_PATH
+    if VOICE_PROMPT_PATH and os.path.exists(VOICE_PROMPT_PATH):
+        _ok(f"Voice Prompt ({VOICE_PROMPT_PATH})")
+        return True
+    _warn("Voice Prompt", f"path not found: {VOICE_PROMPT_PATH} (default voice may be used)")
+    return True
+
+
+def check_offline_model_root() -> bool:
+    """Print the model root used by offline deployment scripts."""
+    from config import OFFLINE_MODELS_ROOT
+    if os.path.isdir(OFFLINE_MODELS_ROOT):
+        _ok(f"Offline Models Root ({OFFLINE_MODELS_ROOT})")
+    else:
+        _warn("Offline Models Root", f"path not found: {OFFLINE_MODELS_ROOT}")
+    return True
 
 
 def check_knowledge_base() -> bool:
@@ -115,9 +150,12 @@ def run_check() -> bool:
     print("=" * 50)
 
     results = [
+        check_offline_model_root(),
         check_ollama(),
         check_funasr(),
         check_cosyvoice(),
+        check_voxcpm(),
+        check_voice_prompt(),
         check_knowledge_base(),
         check_data_root(),
     ]

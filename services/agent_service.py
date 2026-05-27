@@ -143,8 +143,13 @@ class AgentService:
          "confidence": 0.0-1.0,
          "reason": "简短理由"}
 
-        失败时自动 fallback 到关键词分类。
+        先用关键词快速判断，高置信度直接返回；
+        关键词不确定时才调用3B模型。
         """
+        keyword_result = self._keyword_classify(user_text)
+        if keyword_result["confidence"] >= 0.85:
+            return keyword_result
+
         timeout = timeout or AGENT_TIMEOUT
         try:
             result = self._call_json(
@@ -152,7 +157,6 @@ class AgentService:
                 max_tokens=100, temperature=0.1, timeout=timeout,
             )
 
-            # Validate structure
             if "intent" not in result:
                 raise ValueError(f"Missing 'intent' key in response: {result}")
             valid_intents = {"counseling", "entertainment", "crisis", "chitchat", "relaxation"}
@@ -164,7 +168,7 @@ class AgentService:
 
         except Exception as e:
             logger.debug(f"Intent classification failed: {e}")
-            return self._keyword_classify(user_text)
+            return keyword_result
 
     def _keyword_classify(self, text: str) -> Dict[str, Any]:
         """纯关键词 fallback 分类。"""
@@ -180,9 +184,17 @@ class AgentService:
             if kw in text_lower:
                 return {"intent": "relaxation", "confidence": 0.9, "reason": f"keyword: {kw}"}
 
-        # Entertainment
+        # Entertainment — only trigger for request-like expressions
+        _STATEMENT_PREFIXES = [
+            "平时", "以前", "曾经", "过去", "老是", "总是",
+            "一直", "以前喜欢", "以前爱", "习惯",
+        ]
+        is_statement = any(p in text_lower for p in _STATEMENT_PREFIXES)
+
         for kw in AGENT_ENTERTAINMENT_KEYWORDS:
             if kw in text_lower:
+                if is_statement:
+                    return {"intent": "counseling", "confidence": 0.7, "reason": f"keyword: {kw} (statement, not request)"}
                 return {"intent": "entertainment", "confidence": 0.85, "reason": f"keyword: {kw}"}
 
         # Default: counseling
@@ -377,8 +389,12 @@ class AgentService:
         """
         从文本中提取情绪状态。
         返回 {"emotion": "类别名", "intensity": 0.0-1.0, "keywords": ["触发词"]}
-        失败时返回 neutral。
+        先用关键词快速检测，匹配到高置信度情绪直接返回。
         """
+        keyword_emotion = self._keyword_detect_emotion(text)
+        if keyword_emotion.get("intensity", 0) >= 0.7:
+            return keyword_emotion
+
         timeout = timeout or AGENT_TIMEOUT
         try:
             result = self._call_json(
@@ -391,7 +407,24 @@ class AgentService:
             return result
         except Exception as e:
             logger.debug(f"Emotion detection failed: {e}")
-            return {"emotion": "neutral", "intensity": 0.0, "keywords": []}
+            return keyword_emotion
+
+    def _keyword_detect_emotion(self, text: str) -> Dict[str, Any]:
+        """关键词快速情绪检测 fallback。"""
+        text_lower = text.lower()
+        emotion_keywords = {
+            "sad": ["难过", "伤心", "悲伤", "痛苦", "想哭", "委屈", "失落", "绝望"],
+            "anxious": ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁"],
+            "angry": ["生气", "愤怒", "烦", "恼火", "气愤", "不公平", "受够了"],
+            "depressed": ["抑郁", "低落", "没意思", "无聊", "空虚", "绝望", "崩溃"],
+            "happy": ["开心", "高兴", "快乐", "好", "不错", "满意", "感谢"],
+            "lonely": ["孤独", "寂寞", "没人", "一个人", "无助", "没有朋友"],
+        }
+        for emotion, keywords in emotion_keywords.items():
+            for kw in keywords:
+                if kw in text_lower:
+                    return {"emotion": emotion, "intensity": 0.75, "keywords": [kw]}
+        return {"emotion": "neutral", "intensity": 0.0, "keywords": []}
 
     # ==================== Conversation Summary ====================
 

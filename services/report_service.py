@@ -149,6 +149,7 @@ class ReportService:
         self.time_warning_shown = False
         self.completed_relaxation = None
         self.game_results = None
+        self.activity_log = []
         
     def record_relaxation(self, relaxation_name: str):
         """Record that a relaxation session was completed."""
@@ -184,36 +185,29 @@ class ReportService:
     def should_warn_time_limit(self) -> Tuple[bool, str]:
         """
         Check if time/round warning should be shown.
+        At TIME_WARNING_MINUTES: show warning.
+        At MAX_CONVERSATION_MINUTES: ask if user wants to continue.
         
         Returns:
             (should_warn, warning_message)
         """
-        if self.time_warning_shown:
-            return False, ""
-            
         duration = self.get_session_duration_minutes()
         
-        # Time warning (approaching limit)
-        if duration >= TIME_WARNING_MINUTES:
+        if duration >= MAX_CONVERSATION_MINUTES:
+            self.time_warning_shown = False
+            return True, f"TIME_LIMIT_ASK"
+        
+        if duration >= TIME_WARNING_MINUTES and not self.time_warning_shown:
             self.time_warning_shown = True
             remaining = MAX_CONVERSATION_MINUTES - duration
-            return True, f"我们的对话已进行约{int(duration)}分钟，还剩约{int(remaining)}分钟。如有需要，可以延长或约定下次讨论。"
-        
-        # Round warning (approaching limit)
-        # Round warning (approaching limit)
-        # DISABLE round warning as per user request
-        # if self.round_count >= MAX_CONVERSATION_ROUNDS - 2:
-        #     self.time_warning_shown = True
-        #     remaining = MAX_CONVERSATION_ROUNDS - self.round_count
-        #     return False, ""
+            return True, f"我们的对话已进行约{int(duration)}分钟，还剩约{int(remaining)}分钟。"
             
         return False, ""
     
     def is_over_limit(self) -> bool:
-        """Check if session has exceeded time or round limits."""
+        """Check if session has exceeded time limit (for prompting, not forcing end)."""
         duration = self.get_session_duration_minutes()
-        return (duration >= MAX_CONVERSATION_MINUTES or 
-                self.round_count >= MAX_CONVERSATION_ROUNDS)
+        return duration >= MAX_CONVERSATION_MINUTES
     
     # ==================== Report Generation ====================
     

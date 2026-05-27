@@ -36,9 +36,20 @@ temp_audio/
 voice_chat_data/
 cache/
 test_output/
+models/
+offline_deploy/dist/
+offline_deploy/wheels/
+offline_deploy/installers/
+offline_deploy/models/
 game/
 scripts/
 knowledge_base/backup_original/
+
+# Graphify analysis output
+graphify-out/
+
+# VS workspace cache
+.vs/
 
 # Large Media (Excluded as requested)
 冥想训练.mp4

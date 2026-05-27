@@ -293,17 +293,18 @@ class MessageBubble(QFrame):
         self._full_text = text
         self._is_user = is_user
         self._is_system = is_system
+        if not is_system:
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(4, 4, 4, 4)
 
         self.text_label = QLabel(self._full_text)
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.text_label.setFont(QFont("Microsoft YaHei", 11))
-        self.text_label.setMaximumWidth(340)
 
         dark = self._dark_mode
         if self._is_system:
@@ -316,22 +317,28 @@ class MessageBubble(QFrame):
             """)
             layout.setAlignment(Qt.AlignCenter)
         elif self._is_user:
-            self.text_label.setStyleSheet(f"""
+            self.setStyleSheet(f"""
                 background-color: {'#2d5a27' if dark else '#DCF8C6'};
-                color: {'#e0e0e0' if dark else '#2c3e50'};
-                border-radius: 16px 16px 4px 16px;
-                padding: 10px 14px;
+                border-radius: 12px 12px 4px 12px;
             """)
-            layout.setAlignment(Qt.AlignRight)
-        else:
+            self.text_label.setAlignment(Qt.AlignRight)
             self.text_label.setStyleSheet(f"""
-                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.95)'};
                 color: {'#e0e0e0' if dark else '#2c3e50'};
-                border: 1px solid {'#3a3a5c' if dark else '#e0e0e0'};
-                border-radius: 16px 16px 16px 4px;
                 padding: 10px 14px;
+                background: transparent;
             """)
-            layout.setAlignment(Qt.AlignLeft)
+        else:
+            self.setStyleSheet(f"""
+                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.95)'};
+                border: 1px solid {'#3a3a5c' if dark else '#e0e0e0'};
+                border-radius: 12px 12px 12px 4px;
+            """)
+            self.text_label.setAlignment(Qt.AlignLeft)
+            self.text_label.setStyleSheet(f"""
+                color: {'#e0e0e0' if dark else '#2c3e50'};
+                padding: 10px 14px;
+                background: transparent;
+            """)
 
         layout.addWidget(self.text_label)
 

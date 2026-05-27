@@ -1,5 +1,3 @@
-# TTS Service - CosyVoice3 Streaming Integration
-
 import os
 import sys
 import re
@@ -14,7 +12,6 @@ except ImportError:
     pyaudio = None
 import time
 
-# Add CosyVoice to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from services.logger import get_logger
@@ -23,13 +20,10 @@ logger = get_logger(__name__)
 
 
 class TTSService:
-    """Text-to-Speech service using CosyVoice3 with streaming voice cloning."""
-
     def __init__(self):
         self.model = None
         self.sample_rate = None
-        self.prompt_wav = None
-        self.prompt_text = None
+        self.prompt_cache = None
         self.is_playing = False
         self.pyaudio = None
         self.stream = None
@@ -38,7 +32,6 @@ class TTSService:
         self._cleanup_old_temps(max_age_seconds=3600)
 
     def _cleanup_old_temps(self, max_age_seconds: int = 3600):
-        """Remove temp WAV files older than max_age_seconds."""
         try:
             now = time.time()
             for f in os.listdir(self.temp_dir):
@@ -48,105 +41,127 @@ class TTSService:
         except Exception as e:
             logger.warning(f"Temp cleanup failed: {e}")
 
+    def _download_model(self) -> str:
+        voxcpm_cache_dir = os.path.join(config.PROGRAM_ROOT, "models", "VoxCPM2")
+        if os.path.isdir(voxcpm_cache_dir) and os.path.exists(os.path.join(voxcpm_cache_dir, "config.json")):
+            logger.info(f"Found cached VoxCPM2 at: {voxcpm_cache_dir}")
+            return voxcpm_cache_dir
+
+        logger.info("Downloading VoxCPM2 from ModelScope...")
+        try:
+            from modelscope import snapshot_download
+            voxcpm_cache_dir = snapshot_download(
+                "OpenBMB/VoxCPM2",
+                local_dir=voxcpm_cache_dir,
+            )
+            logger.info(f"VoxCPM2 downloaded to: {voxcpm_cache_dir}")
+            return voxcpm_cache_dir
+        except Exception as e:
+            logger.warning(f"ModelScope download failed: {e}")
+
+        logger.info("Trying HuggingFace Hub as fallback...")
+        try:
+            from huggingface_hub import snapshot_download as hf_download
+            voxcpm_cache_dir = hf_download("openbmb/VoxCPM2")
+            logger.info(f"VoxCPM2 downloaded from HF to: {voxcpm_cache_dir}")
+            return voxcpm_cache_dir
+        except Exception as e:
+            raise RuntimeError(f"Failed to download VoxCPM2 from both ModelScope and HuggingFace: {e}")
+
     def load_model(self, progress_callback=None, **kwargs):
-        """Load CosyVoice3 model and prepare voice cloning prompt."""
         if progress_callback:
-            progress_callback("Loading CosyVoice3 model...")
+            progress_callback("Loading VoxCPM2 model...")
 
-        cosyvoice_dir = config.COSYVOICE_BASE_DIR
-        model_dir = config.COSYVOICE_MODEL_PATH
+        voxcpm_path = config.VOXCPM_MODEL_PATH
+        prompt_wav = config.VOICE_PROMPT_PATH
+        prompt_text = config.VOICE_PROMPT_TEXT
 
-        logger.info(f"Loading CosyVoice3 from: {model_dir}")
-        sys.path.insert(0, cosyvoice_dir)
-        matcha_path = os.path.join(cosyvoice_dir, 'third_party', 'Matcha-TTS')
-        if os.path.isdir(matcha_path) and matcha_path not in sys.path:
-            sys.path.insert(0, matcha_path)
+        logger.info(f"Loading VoxCPM2 from: {voxcpm_path or 'will auto-download'}")
 
-        from cosyvoice.cli.cosyvoice import AutoModel
-        self.model = AutoModel(model_dir=model_dir)
-        self.sample_rate = self.model.sample_rate
+        from voxcpm import VoxCPM
 
-        # Prepare voice cloning prompt
-        self.prompt_wav = config.VOICE_PROMPT_PATH
-        self.prompt_text = config.VOICE_PROMPT_TEXT
-
-        if self.prompt_wav and os.path.exists(self.prompt_wav):
-            logger.info(f"Voice prompt: {self.prompt_wav}")
-            # Cache speaker embedding for faster subsequent calls
-            try:
-                self.model.add_zero_shot_spk(
-                    self.prompt_text, self.prompt_wav, 'default_speaker'
-                )
-                self._use_cached_speaker = True
-                logger.info("Speaker embedding cached as 'default_speaker'")
-            except Exception as e:
-                logger.warning(f"Failed to cache speaker: {e}")
-                self._use_cached_speaker = False
+        if voxcpm_path and os.path.isdir(voxcpm_path):
+            self.model = VoxCPM(
+                voxcpm_model_path=voxcpm_path,
+                zipenhancer_model_path=None,
+                enable_denoiser=False,
+                optimize=True,
+            )
         else:
-            logger.warning(f"Voice prompt not found: {self.prompt_wav}")
-            self._use_cached_speaker = False
+            voxcpm_path = self._download_model()
+            self.model = VoxCPM(
+                voxcpm_model_path=voxcpm_path,
+                zipenhancer_model_path=None,
+                enable_denoiser=False,
+                optimize=True,
+            )
 
-        # Initialize PyAudio
+        self.sample_rate = self.model.tts_model.sample_rate
+
+        if prompt_wav and os.path.exists(prompt_wav):
+            logger.info(f"Voice prompt: {prompt_wav}")
+            try:
+                self.prompt_cache = self.model.tts_model.build_prompt_cache(
+                    prompt_text=prompt_text or "",
+                    prompt_wav_path=prompt_wav,
+                    reference_wav_path=prompt_wav,
+                )
+                logger.info("Voice prompt cache built for VoxCPM2 ultimate cloning")
+            except Exception as e:
+                logger.warning(f"Failed to build prompt cache: {e}")
+                self.prompt_cache = None
+        else:
+            logger.warning(f"Voice prompt not found: {prompt_wav}")
+            self.prompt_cache = None
+
         if pyaudio:
             self.pyaudio = pyaudio.PyAudio()
 
         if progress_callback:
-            progress_callback("CosyVoice3 loaded!")
+            progress_callback("VoxCPM2 loaded!")
 
         return True
 
     def warmup(self):
-        """Warmup the model with a short generation."""
-        logger.info("Warming up CosyVoice3...")
+        logger.info("Warming up VoxCPM2...")
         try:
             audio = self.generate("你好，很高兴认识你。")
             if audio is not None and len(audio) > 0:
-                logger.info(f"CosyVoice3 warmup successful. Generated {len(audio)} samples.")
+                logger.info(f"VoxCPM2 warmup successful. Generated {len(audio)} samples.")
             else:
                 logger.warning("Warmup generated empty audio, continuing...")
             return True
         except Exception as e:
-            logger.error(f"CosyVoice3 warmup failed: {e}")
+            logger.error(f"VoxCPM2 warmup failed: {e}")
             logger.exception("Exception occurred")
             return False
 
-    # ==================== Text Preprocessing ====================
-
     def _preprocess_text(self, text: str) -> str:
-        """Map FireRedTTS2-style tags to CosyVoice native tags and clean up."""
         if not text:
             return ""
 
-        # 0. Number range normalization: "8-10" → "8到10", "3~5" → "3到5"
         text = re.sub(r'(\d+)\s*[-~—–]\s*(\d+)', r'\1到\2', text)
 
-        # 1. Remove emotion tags (not supported in zero-shot mode)
         text = re.sub(r'<\|emotion_\w+\|>', '', text)
 
-        # 2. Map paralanguage tags to CosyVoice native [breath] / [laughter]
-        text = text.replace('<|breath|>', '[breath]')
-        text = text.replace('<|quick_breath|>', '[breath]')
-        text = text.replace('<|sigh|>', '[breath]')
-        text = text.replace('<|hem|>', '[breath]')
-        text = re.sub(r'<\|laugh_speak\|>(.*?)<\|/laugh_speak\|>', r'[laughter]\1', text)
+        text = re.sub(r'\[(?:breath|laughter)\]', '', text)
+        text = re.sub(r'<\|breath\|>', '', text)
+        text = re.sub(r'<\|quick_breath\|>', '', text)
+        text = re.sub(r'<\|sigh\|>', '', text)
+        text = re.sub(r'<\|hem\|>', '', text)
+        text = re.sub(r'<\|laugh_speak\|>(.*?)<\|/laugh_speak\|>', r'\1', text)
 
-        # 3. Strip any remaining <|...|> tags
         text = re.sub(r'<\|[^>]+\|>', '', text)
 
-        # 4. Strip LLM control tags
         text = re.sub(r'\[REC_[A-Z_]+\]', '', text)
         text = re.sub(r'\[END_[A-Z_]+\]', '', text)
         text = re.sub(r'【.*?】', '', text)
 
-        # 5. Normalize whitespace
         text = re.sub(r'\s+', ' ', text).strip()
 
         return text
 
-    # ==================== Streaming Playback ====================
-
     def _playback_worker(self, playback_queue, stream, stop_event, pre_buffer=5):
-        """Background thread that plays audio chunks from the queue."""
         buffered_chunks = []
         first_chunk = True
         try:
@@ -175,7 +190,6 @@ class TTSService:
                     logger.error(f"Playback worker error: {e}")
                     break
 
-            # Flush remaining buffered chunks
             if buffered_chunks:
                 for c in buffered_chunks:
                     if stream and stream.is_active():
@@ -185,7 +199,6 @@ class TTSService:
             logger.debug("Playback worker finished")
 
     def generate_and_play(self, text: str, **kwargs):
-        """Generate speech with CosyVoice3 and play in real-time (streaming)."""
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
@@ -215,7 +228,6 @@ class TTSService:
                 frames_per_buffer=2048
             )
 
-            # Start playback thread
             playback_thread = threading.Thread(
                 target=self._playback_worker,
                 args=(playback_queue, stream, stop_event),
@@ -223,27 +235,45 @@ class TTSService:
             )
             playback_thread.start()
 
-            # CosyVoice streaming synthesis
-            kwargs_gen = dict(
-                tts_text=clean_text,
-                prompt_text=self.prompt_text or '',
-                prompt_wav=self.prompt_wav or '',
-                stream=True,
-            )
-            if self._use_cached_speaker:
-                kwargs_gen['zero_shot_spk_id'] = 'default_speaker'
+            cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
+            inference_timesteps = kwargs.get("inference_timesteps", config.VOXCPM_INFERENCE_TIMESTEPS)
 
-            for chunk in self.model.inference_zero_shot(**kwargs_gen):
-                if not self.is_playing:
-                    logger.debug("Playback interrupted.")
-                    break
+            if self.prompt_cache is not None:
+                gen_result = self.model.tts_model._generate_with_prompt_cache(
+                    target_text=clean_text,
+                    prompt_cache=self.prompt_cache,
+                    cfg_value=cfg_value,
+                    inference_timesteps=inference_timesteps,
+                    streaming=True,
+                )
+                try:
+                    for wav, _, _ in gen_result:
+                        if not self.is_playing:
+                            logger.debug("Playback interrupted.")
+                            break
+                        audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
+                        if audio_np.ndim == 0 or len(audio_np) == 0:
+                            continue
+                        playback_queue.put(audio_np)
+                finally:
+                    gen_result.close()
+            else:
+                for chunk in self.model.generate_streaming(
+                    text=clean_text,
+                    reference_wav_path=config.VOICE_PROMPT_PATH,
+                    prompt_wav_path=config.VOICE_PROMPT_PATH,
+                    prompt_text=config.VOICE_PROMPT_TEXT or "",
+                    cfg_value=cfg_value,
+                    inference_timesteps=inference_timesteps,
+                ):
+                    if not self.is_playing:
+                        logger.debug("Playback interrupted.")
+                        break
+                    audio_np = chunk.astype(np.float32)
+                    if audio_np.ndim == 0 or len(audio_np) == 0:
+                        continue
+                    playback_queue.put(audio_np)
 
-                audio_np = chunk['tts_speech'].squeeze().float().cpu().numpy().astype(np.float32)
-                if audio_np.ndim == 0 or len(audio_np) == 0:
-                    continue
-                playback_queue.put(audio_np)
-
-            # Signal end
             playback_queue.put(None)
             playback_thread.join(timeout=10)
 
@@ -258,7 +288,6 @@ class TTSService:
             self.is_playing = False
 
     def generate(self, text: str, **kwargs) -> np.ndarray:
-        """Generate speech without playing (for saving)."""
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
@@ -266,37 +295,40 @@ class TTSService:
         if not clean_text:
             return np.array([])
 
+        cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
+        inference_timesteps = kwargs.get("inference_timesteps", config.VOXCPM_INFERENCE_TIMESTEPS)
+
         try:
-            kwargs_gen = dict(
-                tts_text=clean_text,
-                prompt_text=self.prompt_text or '',
-                prompt_wav=self.prompt_wav or '',
-                stream=False,
-            )
-            if self._use_cached_speaker:
-                kwargs_gen['zero_shot_spk_id'] = 'default_speaker'
-
-            audio_chunks = []
-            for chunk in self.model.inference_zero_shot(**kwargs_gen):
-                audio_np = chunk['tts_speech'].squeeze().float().cpu().numpy().astype(np.float32)
-                if audio_np.ndim > 0 and len(audio_np) > 0:
-                    audio_chunks.append(audio_np)
-
-            if audio_chunks:
-                return np.concatenate(audio_chunks)
-            return np.array([])
+            if self.prompt_cache is not None:
+                gen_result = self.model.tts_model._generate_with_prompt_cache(
+                    target_text=clean_text,
+                    prompt_cache=self.prompt_cache,
+                    cfg_value=cfg_value,
+                    inference_timesteps=inference_timesteps,
+                    streaming=False,
+                )
+                wav, _, _ = next(gen_result)
+                gen_result.close()
+                return wav.squeeze(0).cpu().numpy().astype(np.float32)
+            else:
+                return self.model.generate(
+                    text=clean_text,
+                    reference_wav_path=config.VOICE_PROMPT_PATH,
+                    prompt_wav_path=config.VOICE_PROMPT_PATH,
+                    prompt_text=config.VOICE_PROMPT_TEXT or "",
+                    cfg_value=cfg_value,
+                    inference_timesteps=inference_timesteps,
+                )
 
         except Exception as e:
-            logger.error(f"CosyVoice3 generate failed: {e}")
+            logger.error(f"VoxCPM2 generate failed: {e}")
             logger.exception("Exception occurred")
             return np.array([])
 
     def stop_playing(self):
-        """Stop audio playback."""
         self.is_playing = False
 
     def play_audio(self, audio: np.ndarray):
-        """Play pre-generated audio data synchronously."""
         if audio is None or len(audio) == 0:
             logger.warning("play_audio called with empty audio data")
             return
@@ -317,7 +349,7 @@ class TTSService:
                 frames_per_buffer=2048
             )
 
-            chunk_size = self.sample_rate  # 1-second chunks
+            chunk_size = self.sample_rate
             for i in range(0, len(audio), chunk_size):
                 if not self.is_playing:
                     break
@@ -335,21 +367,18 @@ class TTSService:
             self.is_playing = False
 
     def save_audio(self, audio: np.ndarray, filepath: str):
-        """Save audio to file."""
         if audio.size == 0:
             return
         audio_tensor = torch.from_numpy(audio).unsqueeze(0)
         torchaudio.save(filepath, audio_tensor, self.sample_rate)
 
     def cleanup(self):
-        """Clean up resources."""
         if self.stream:
             self.stream.close()
         if self.pyaudio:
             self.pyaudio.terminate()
 
 
-# Singleton
 _tts_service = None
 
 

@@ -7,10 +7,22 @@ import glob as _glob
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # Parent directory (for sibling model folders)
-PROGRAM_ROOT = os.path.dirname(APP_ROOT)
+PROGRAM_ROOT = os.path.dirname(os.path.dirname(APP_ROOT))
 
 # _BASE_DIR alias for backward compatibility
 _BASE_DIR = PROGRAM_ROOT
+
+# Offline deployment roots.  In an offline bundle the app usually lives at
+# <bundle>/app and large model assets live at <bundle>/models.  Developers can
+# override this with VOICECHAT_MODELS_DIR without editing config.py.
+OFFLINE_MODELS_ROOT = os.environ.get(
+    "VOICECHAT_MODELS_DIR",
+    os.path.join(PROGRAM_ROOT, "models"),
+)
+APP_MODELS_ROOT = os.path.join(APP_ROOT, "models")
+
+# Ollama host/model can be pinned by offline launch scripts.
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 
 # ============== Auto-detect Models ==============
@@ -25,25 +37,63 @@ def _find_dir(base, *candidates):
 
 def _detect_funasr():
     """Search for FunASR model in common locations."""
-    search_bases = [PROGRAM_ROOT, os.path.join(PROGRAM_ROOT, "CosyVoice")]
+    env_path = os.environ.get("FUNASR_MODEL_PATH")
+    if env_path and os.path.isdir(env_path):
+        return env_path
+
+    direct_candidates = [
+        os.path.join(APP_MODELS_ROOT, "funasr"),
+        os.path.join(APP_MODELS_ROOT, "funasr", "Fun-ASR-Nano-2512"),
+        os.path.join(OFFLINE_MODELS_ROOT, "funasr"),
+        os.path.join(OFFLINE_MODELS_ROOT, "funasr", "Fun-ASR-Nano-2512"),
+        os.path.join(PROGRAM_ROOT, "Fun-ASR-Nano-2512"),
+        os.path.join(PROGRAM_ROOT, "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512"),
+        os.path.join(PROGRAM_ROOT, "QWEN", "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512"),
+    ]
+    for candidate in direct_candidates:
+        if os.path.isdir(candidate) and (os.path.exists(os.path.join(candidate, "model.pt")) or os.path.exists(os.path.join(candidate, "model.py"))):
+            return candidate
+
+    search_bases = [
+        APP_MODELS_ROOT,
+        OFFLINE_MODELS_ROOT,
+        os.path.join(PROGRAM_ROOT, "CosyVoice"),
+        os.path.join(PROGRAM_ROOT, "QWEN", "CosyVoice"),
+    ]
     patterns = [
         os.path.join("**", "Fun-ASR-Nano-2512"),
         os.path.join("**", "FunASR*"),
         os.path.join("**", "funasr*"),
     ]
     for base in search_bases:
+        if not os.path.isdir(base):
+            continue
         for pat in patterns:
             matches = _glob.glob(os.path.join(base, pat), recursive=True)
             for m in matches:
-                if os.path.isdir(m) and os.path.exists(os.path.join(m, "model.py")):
+                if os.path.isdir(m) and (os.path.exists(os.path.join(m, "model.pt")) or os.path.exists(os.path.join(m, "model.py"))):
                     return m
     return None
 
 
 def _detect_cosyvoice():
     """Search for CosyVoice model directory."""
-    cosyvoice_base = _find_dir(PROGRAM_ROOT, "CosyVoice",
-                                os.path.join("qwen", "CosyVoice"))
+    env_base = os.environ.get("COSYVOICE_BASE_DIR")
+    env_model = os.environ.get("COSYVOICE_MODEL_PATH")
+    if env_base and os.path.isdir(env_base):
+        return env_base, env_model if env_model and os.path.isdir(env_model) else None
+
+    base_candidates = [
+        os.path.join(APP_MODELS_ROOT, "CosyVoice"),
+        os.path.join(OFFLINE_MODELS_ROOT, "CosyVoice"),
+        os.path.join(PROGRAM_ROOT, "CosyVoice"),
+        os.path.join(PROGRAM_ROOT, "QWEN", "CosyVoice"),
+    ]
+    cosyvoice_base = None
+    for candidate in base_candidates:
+        if os.path.isdir(os.path.join(candidate, "cosyvoice")):
+            cosyvoice_base = candidate
+            break
     if not cosyvoice_base:
         return None, None
     pretrained = os.path.join(cosyvoice_base, "pretrained_models")
@@ -61,15 +111,101 @@ def _detect_cosyvoice():
     return cosyvoice_base, None
 
 
+def _detect_voxcpm():
+    """Search for VoxCPM2 model directory."""
+    env_path = os.environ.get("VOXCPM_MODEL_PATH")
+    if env_path and os.path.isdir(env_path):
+        return env_path
+
+    candidates = [
+        os.path.join(APP_MODELS_ROOT, "VoxCPM2"),
+        os.path.join(OFFLINE_MODELS_ROOT, "VoxCPM2"),
+        os.path.join(PROGRAM_ROOT, "VoxCPM2"),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "config.json")):
+            return candidate
+
+    for base in [APP_MODELS_ROOT, OFFLINE_MODELS_ROOT, PROGRAM_ROOT]:
+        if not os.path.isdir(base):
+            continue
+        for pat in [os.path.join("**", "VoxCPM2"), os.path.join("**", "voxcpm*")]:
+            matches = _glob.glob(os.path.join(base, pat), recursive=True)
+            for m in matches:
+                if os.path.isdir(m) and os.path.exists(os.path.join(m, "config.json")):
+                    return m
+    return None
+
+
+def _detect_voice_prompt():
+    """Search for the zero-shot voice prompt in data/ and legacy locations."""
+    env_path = os.environ.get("VOICE_PROMPT_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    data_dir = os.path.join(APP_ROOT, "data")
+    if os.path.isdir(data_dir):
+        for ext in ["wav", "mp3", "flac"]:
+            for name in ["s1", "voice_prompt", "speaker"]:
+                candidate = os.path.join(data_dir, f"{name}.{ext}")
+                if os.path.exists(candidate):
+                    return candidate
+
+    candidates = [
+        os.path.join(APP_MODELS_ROOT, "voice_prompt", "s1.wav"),
+        os.path.join(APP_MODELS_ROOT, "voice_prompt", "s1.mp3"),
+        os.path.join(OFFLINE_MODELS_ROOT, "voice_prompt", "s1.wav"),
+        os.path.join(OFFLINE_MODELS_ROOT, "voice_prompt", "s1.mp3"),
+        os.path.join(PROGRAM_ROOT, "voicechat", "data", "s1.mp3"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[-1]
+
+
+def _detect_voice_prompt_text():
+    """Search for voice prompt transcript text."""
+    env_text = os.environ.get("VOICE_PROMPT_TEXT")
+    if env_text:
+        return env_text
+    s1_txt = os.path.join(APP_ROOT, "data", "S1.txt")
+    if os.path.exists(s1_txt):
+        try:
+            with open(s1_txt, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return "当阳光穿过斑驳的树影，洒向地面，属于洱海的浪漫邂逅，就此蔓延。"
+
+
 def _detect_ollama_model():
-    """Try to get the first available Ollama model."""
+    """Try to get the best available Ollama model for conversation.
+
+    Prefers the 72B model for high-quality chat; falls back to smaller
+    models if 72B is unavailable.  Compatible with both legacy dict
+    format and newer ollama SDK objects (``.model`` attribute).
+    """
     try:
         import ollama
         client = ollama.Client(host=OLLAMA_HOST)
-        models = client.list()
-        names = [m["name"] for m in models.get("models", [])]
-        if names:
-            return names[0]
+        raw = client.list()
+        model_list = raw.get("models", []) if isinstance(raw, dict) else []
+        names = []
+        for m in model_list:
+            if isinstance(m, dict):
+                name = m.get("model") or m.get("name")
+            else:
+                name = getattr(m, "model", None) or getattr(m, "name", None)
+            if name:
+                names.append(name)
+        if not names:
+            return None
+        for pref in ["72b", "32b", "14b", "8b"]:
+            for n in names:
+                if pref in n.lower():
+                    return n
+        return names[0]
     except Exception:
         pass
     return None
@@ -78,28 +214,40 @@ def _detect_ollama_model():
 # --- Run detection ---
 _FUNASR_DETECTED = _detect_funasr()
 _COSYVOICE_BASE_DETECTED, _COSYVOICE_MODEL_DETECTED = _detect_cosyvoice()
+_VOXCPM_DETECTED = _detect_voxcpm()
+_VOICE_PROMPT_DETECTED = _detect_voice_prompt()
+_VOICE_PROMPT_TEXT_DETECTED = _detect_voice_prompt_text()
 _OLLAMA_DETECTED = _detect_ollama_model()
 
 
 # ============== Paths (auto-detected with fallbacks) ==============
 # FunASR STT Model
 FUNASR_MODEL_PATH = _FUNASR_DETECTED or os.path.join(
-    PROGRAM_ROOT, "CosyVoice", "pretrained_models", "Fun-ASR-Nano-2512")
+    OFFLINE_MODELS_ROOT, "funasr", "Fun-ASR-Nano-2512")
 
-# CosyVoice3 Model
-COSYVOICE_BASE_DIR = _COSYVOICE_BASE_DETECTED or os.path.join(PROGRAM_ROOT, "CosyVoice")
+# CosyVoice3 Model (legacy, kept for backward compat)
+COSYVOICE_BASE_DIR = _COSYVOICE_BASE_DETECTED or os.path.join(OFFLINE_MODELS_ROOT, "CosyVoice")
 COSYVOICE_MODEL_PATH = _COSYVOICE_MODEL_DETECTED or os.path.join(
-    COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B-2512")
+    COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B")
 
-# Voice prompt audio for TTS voice cloning (CosyVoice zero-shot)
-VOICE_PROMPT_PATH = os.path.join(PROGRAM_ROOT, "voicechat", "data", "s1.mp3")
+# VoxCPM2 Model (current TTS backend)
+VOXCPM_MODEL_PATH = _VOXCPM_DETECTED
 
-# Data Storage Root
-DATA_ROOT = os.path.join(PROGRAM_ROOT, "voice_chat_data")
+# Voice prompt audio for TTS voice cloning
+VOICE_PROMPT_PATH = _VOICE_PROMPT_DETECTED
+
+# Voice prompt transcript text (auto-detected from S1.txt)
+VOICE_PROMPT_TEXT = _VOICE_PROMPT_TEXT_DETECTED
+
+# Data Storage Root. Portable/offline launchers set VOICECHAT_DATA_DIR so
+# session audio, transcripts, and reports stay beside the copied bundle.
+DATA_ROOT = os.environ.get(
+    "VOICECHAT_DATA_DIR",
+    r"D:\program\voice_chat_data",
+)
 
 # ============== Ollama ==============
-OLLAMA_MODEL = _OLLAMA_DETECTED or "gemma4:e2b"
-OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL") or _OLLAMA_DETECTED or "qwen2.5:72b"
 
 
 def print_model_status():
@@ -114,7 +262,8 @@ def print_model_status():
         print(f"  [{tag}] {label}: {path or 'not found'}")
 
     _status(FUNASR_MODEL_PATH, "FunASR STT")
-    _status(COSYVOICE_MODEL_PATH, "CosyVoice3")
+    _status(COSYVOICE_MODEL_PATH, "CosyVoice3 (legacy)")
+    _status(VOXCPM_MODEL_PATH, "VoxCPM2")
     _status(VOICE_PROMPT_PATH, "Voice Prompt")
     print(f"  [{'OK' if _OLLAMA_DETECTED else 'FALLBACK'}] Ollama Model: {OLLAMA_MODEL}")
     print("=" * 50)
@@ -404,13 +553,15 @@ CHANNELS = 1
 CHUNK_SIZE = 1024
 
 # ============== VAD (Voice Activity Detection) ==============
-USE_VAD_AUTO_STOP = True         # Enable auto-stop on silence
-VAD_SILENCE_THRESHOLD = 0.01     # RMS energy below this = silence
-VAD_SILENCE_DURATION = 1.5       # Seconds of continuous silence to trigger stop
-VAD_SPEECH_MIN_DURATION = 0.5    # Minimum speech before VAD activates
+USE_VAD_AUTO_STOP = True
+VAD_SILENCE_THRESHOLD = 0.01
+VAD_SILENCE_DURATION = 1.5
+VAD_SPEECH_MIN_DURATION = 0.5
 
-# VOICE_PROMPT_PATH is auto-detected above. Fallback text for voice cloning:
-VOICE_PROMPT_TEXT = "好的请找个舒适的位置坐下，闭上眼睛深吸一口气，然后慢慢呼出。"
+# ============== VoxCPM2 TTS ==============
+VOXCPM_CFG_VALUE = 2.0
+VOXCPM_INFERENCE_TIMESTEPS = 10
+TTS_SAMPLE_RATE = 48000
 
 # ============== UI ==============
 APP_NAME = "薇薇老师聊天室"
@@ -427,20 +578,31 @@ TIME_WARNING_MINUTES = 40           # Show warning at this point (5 min before l
 
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
-AGENT_MODEL = "qwen2.5:3b-instruct"          # 小模型做路由/报告
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen3:8b")
 AGENT_MODEL_SERVER = OLLAMA_HOST.rstrip('/') + '/v1'
 AGENT_API_KEY = 'EMPTY'
 
-AGENT_INTENT_SYSTEM_MESSAGE = """你是一个意图分类器。根据用户的输入，判断用户的主要意图类别。
+AGENT_INTENT_SYSTEM_MESSAGE = """你是心理咨询系统的意图分类器。系统有以下功能模块：
+1. 咨询对话（counseling）：核心功能，咨询师通过对话建立关系、共情、引导
+2. 放松训练（relaxation）：3种放松按钮——呼吸放松、肌肉放松、冥想放松
+3. 危机干预（crisis）：自杀/自残/逃跑倾向的紧急处理
+4. 娱乐互动（entertainment）：游戏等轻松互动
+5. 闲聊（chitchat）：打招呼、无关紧要的话
 
-分类规则：
-- counseling: 用户在表达情绪困扰、心理问题、寻求帮助（焦虑、抑郁、失眠、戒断、家庭问题等）
-- entertainment: 用户想听音乐、看电影、玩游戏、放松娱乐
-- crisis: 用户表达自杀念头、自残行为、严重危机
-- chitchat: 用户在闲聊、打招呼、说无关紧要的话
-- relaxation: 用户想做放松训练（呼吸、肌肉、冥想）
+分类规则（按优先级从高到低判断）：
+- crisis: 任何自杀、自残、逃跑、暴力倾向的表达 → 最高优先级
+- relaxation: 用户提到想做放松、深呼吸、冥想、肌肉放松，或出现急性焦虑/身体紧绷症状需要放松干预
+- counseling: 用户表达情绪困扰（焦虑、抑郁、失眠、戒断、家庭问题等）或需要心理帮助
+- entertainment: 用户想玩游戏、找乐子
+- chitchat: 打招呼、无关闲聊
 
-只返回JSON格式：{"intent": "类别名", "confidence": 0.0-1.0, "reason": "简短理由"}"""
+注意：
+- 用户说"我紧张""我心慌""我睡不着"→ counseling（不是relaxation，这些是倾诉情绪）
+- 用户说"我想做放松""教我深呼吸""有没有冥想"→ relaxation（主动请求放松训练）
+- 用户说"我不想活了""我想死"→ crisis（无论语气轻重）
+- 简短打招呼如"你好""在吗"→ chitchat
+
+只返回JSON：{"intent": "类别名", "confidence": 0.0-1.0, "reason": "简短理由"}"""
 
 AGENT_REPORT_SYSTEM_MESSAGE = """你是一位专业的心理咨询报告生成助手。请严格按照要求生成结构化输出。"""
 
@@ -472,21 +634,36 @@ AGENT_RELAXATION_SYSTEM_MESSAGE = """你是一个放松训练类型分类器。�
 
 只返回JSON格式：{"tag": "BREATHING|MUSCLE|MEDITATION|GAME|NONE", "confidence": 0.0-1.0}"""
 
-AGENT_EMOTION_SYSTEM_MESSAGE = """你是一个情绪分析器。分析用户或AI的文本，提取主要情绪状态。
+AGENT_EMOTION_SYSTEM_MESSAGE = """你是心理咨询系统的情绪分析器。分析戒毒人员的对话文本，判断其情绪状态。
 
-情绪类别：
-- neutral: 平静、中性
-- anxious: 焦虑、紧张、不安
-- depressed: 抑郁、低落、悲伤
-- angry: 愤怒、烦躁、生气
-- fearful: 恐惧、害怕、担心
-- hopeful: 有希望、积极、期待
-- grateful: 感激、感谢
-- lonely: 孤独、寂寞
-- confused: 困惑、迷茫
-- stressed: 压力大、疲惫
+情绪类别（优先匹配最强烈的情绪）：
+- neutral: 平静、无所谓、没感觉
+- anxious: 焦虑、紧张、不安、心慌、坐不住、担心
+- depressed: 抑郁、低落、悲伤、消沉、没意思、空虚
+- angry: 愤怒、烦躁、生气、恼火、不满、怨恨
+- fearful: 恐惧、害怕、担心出事、恐慌
+- hopeful: 有希望、积极、期待、想改变
+- grateful: 感激、感谢、信任
+- lonely: 孤独、寂寞、没人理解、想念家人
+- confused: 困惑、迷茫、不知道怎么办、不知所措
+- stressed: 压力大、疲惫、累、撑不住、受不了
 
-只返回JSON格式：{"emotion": "类别名", "intensity": 0.0-1.0, "keywords": ["触发词"]}"""
+判断要点：
+- 注意区分"表达情绪"（counseling）和"请求放松"（relaxation）
+- "我心慌""紧张得不行"→ anxious
+- "没意思""活着干啥"→ depressed
+- "烦""别烦我""滚"→ angry
+- "害怕""怕出事"→ fearful
+- "想回家""想变好"→ hopeful
+- "谢谢你""你说得对"→ grateful
+- "没人理解我""好孤独"→ lonely
+- "不知道怎么办""迷茫"→ confused
+- "累死了""撑不住了"→ stressed
+- "还行""没什么"→ neutral
+
+intensity根据情绪词汇的强烈程度评分：0.3(轻微) → 0.5(中等) → 0.8(强烈) → 1.0(极度)
+
+只返回JSON：{"emotion": "类别名", "intensity": 0.0-1.0, "keywords": ["触发词"]}"""
 
 AGENT_CRISIS_SYSTEM_MESSAGE = """你是一个心理危机风险评估器。分析用户输入，评估其危机风险等级。
 
@@ -563,6 +740,8 @@ AGENT_ENTERTAINMENT_KEYWORDS = [
     "无聊", "想放松", "想娱乐", "消遣", "解闷",
     "歌单", "音乐列表", "电影列表", "有什么可以看",
     "有什么可以听", "不知道看什么", "不知道听什么",
+    "打游戏", "玩游戏", "游戏", "想玩游戏", "互动游戏",
+    "心理游戏", "小游戏", "来个游戏", "玩一局",
 ]
 
 MEDIA_LIBRARY_PATH = os.path.join(APP_ROOT, "media_library")

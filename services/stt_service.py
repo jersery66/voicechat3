@@ -51,24 +51,62 @@ class STTService:
             progress_callback("Loading STT model...")
             
         try:
-            # Add model directory to sys.path to allow importing local model.py
             if self.model_path not in sys.path:
                 sys.path.insert(0, self.model_path)
-            
-            # Dynamic import of FunASRNano from model.py in the model directory
+
             try:
                 from model import FunASRNano
             except ImportError:
-                # Fallback: try to find it in the directory explicitly if simple import failed
                 logger.warning(f"Could not import FunASRNano from {self.model_path}, checking path...")
                 raise
 
-            # Load model and kwargs
-            self.model, self.model_kwargs = FunASRNano.from_pretrained(
-                model=self.model_path,
-                device=self.device
-            )
-            # Force Chinese language recognition
+            _orig_module_to = torch.nn.Module.to
+
+            def _patched_module_to(self_mod, *args, **kwargs):
+                try:
+                    return _orig_module_to(self_mod, *args, **kwargs)
+                except Exception as exc:
+                    if "meta tensor" in str(exc).lower() or "Cannot copy out of meta" in str(exc):
+                        device_arg = None
+                        for a in args:
+                            if isinstance(a, (torch.device, str)) and str(a) != 'cpu':
+                                device_arg = a
+                                break
+                        for k, v in kwargs.items():
+                            if k == 'device' and v is not None:
+                                device_arg = v
+                                break
+                        if device_arg is None:
+                            device_arg = self.device if hasattr(self, 'device') else 'cuda'
+                        tgt_device = torch.device(device_arg)
+                        self_mod = self_mod.to_empty(device=tgt_device)
+                        for name, param in self_mod.named_parameters():
+                            if param.is_meta:
+                                with torch.no_grad():
+                                    self_mod.register_parameter(
+                                        name,
+                                        torch.nn.Parameter(
+                                            torch.zeros_like(param, device=tgt_device)
+                                        ),
+                                    )
+                        for name, buf in self_mod.named_buffers():
+                            if buf.is_meta:
+                                self_mod.register_buffer(
+                                    name,
+                                    torch.zeros_like(buf, device=tgt_device),
+                                )
+                        return self_mod
+                    raise
+
+            torch.nn.Module.to = _patched_module_to
+            try:
+                self.model, self.model_kwargs = FunASRNano.from_pretrained(
+                    model=self.model_path,
+                    device=self.device
+                )
+            finally:
+                torch.nn.Module.to = _orig_module_to
+
             self.model_kwargs['language'] = 'zh'
             self.model.eval()
             

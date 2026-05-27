@@ -43,7 +43,12 @@ class LLMService:
         # Auto-detect model if not specified
         if model is None:
             available = self.get_available_models()
-            self.model = available[0] if available else OLLAMA_MODEL
+            if OLLAMA_MODEL in available:
+                self.model = OLLAMA_MODEL
+            elif available:
+                self.model = available[0]
+            else:
+                self.model = OLLAMA_MODEL
         else:
             self.model = model
         
@@ -202,16 +207,16 @@ class LLMService:
         """Get list of available Ollama models.
 
         Compatible with both legacy ollama responses (``name`` key) and newer
-        versions which use the ``model`` key.
+        versions which use the ``model`` attribute on ListResponse.Model objects.
         """
         try:
             models = self.client.list()
+            raw_models = getattr(models, 'models', None) or models.get("models", [])
             result: List[str] = []
-            for m in models.get("models", []):
+            for m in raw_models:
                 if isinstance(m, dict):
                     name = m.get("model") or m.get("name")
                 else:
-                    # Newer ollama returns objects with a `.model` attribute
                     name = getattr(m, "model", None) or getattr(m, "name", None)
                 if name:
                     result.append(name)

@@ -201,11 +201,12 @@ class ChatPanel(FrostedPanel):
         self._add_bubble(bubble)
         self._messages.append({"type": "user", "text": text, "bubble": bubble})
 
-    def add_system_message(self, text):
-        """Add a system message (centered, gray)."""
-        bubble = MessageBubble(text, is_system=True)
+    def add_system_message(self, text, as_ai=False):
+        """Add a system message (centered, gray) or as an AI-style message."""
+        bubble = MessageBubble(text, is_user=False, is_system=not as_ai)
         self._add_bubble(bubble)
-        self._messages.append({"type": "system", "text": text, "bubble": bubble})
+        msg_type = "ai" if as_ai else "system"
+        self._messages.append({"type": msg_type, "text": text, "bubble": bubble})
 
     def start_ai_message(self):
         """Start a new AI message bubble for streaming."""

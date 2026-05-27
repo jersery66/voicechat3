@@ -228,10 +228,18 @@ class ConversationPipeline:
                 self.data.save_user_message(None, result.user_text)
 
         # --- Intent + Emotion (parallel 3B calls) ---
+        emit("status", "正在分析...")
         with metrics.timer("agent.intent_emotion"):
             result.intent, result.emotion_result = self._classify_intent_and_emotion(
                 result.user_text
             )
+        logger.info(
+            f"[Pipeline] Intent: {result.intent} "
+            f"(confidence: {getattr(result, 'intent_confidence', 'N/A')}) "
+            f"| Emotion: {result.emotion_result.get('emotion', 'N/A')} "
+            f"(intensity: {result.emotion_result.get('intensity', 'N/A')}) "
+            f"| Agent used: {self.agent is not None}"
+        )
 
         # --- Emotion trend tracking ---
         if self.emotion_tracker:
@@ -256,6 +264,11 @@ class ConversationPipeline:
         # --- System suffix construction ---
         with metrics.timer("rag.system_suffix"):
             system_suffix = self._build_system_suffix(result.user_text)
+        logger.info(
+            f"[Pipeline] RAG suffix: {bool(system_suffix)} "
+            f"| Crisis risk: {result.crisis_risk} "
+            f"| Relaxation rec in suffix: {'REC_' in (system_suffix or '')}"
+        )
         if self.emotion_tracker:
             hint = self.emotion_tracker.get_intervention_hint()
             if hint:
@@ -267,7 +280,7 @@ class ConversationPipeline:
         # --- Scale suggestion (based on emotion trend) ---
         from services.scales import get_scale_manager
         scale_mgr = get_scale_manager()
-        suggested_scale = scale_mgr.should_administer(self.emotion_tracker, self.report)
+        suggested_scale = scale_mgr.should_administer(self.emotion_tracker, self.report, user_text=result.user_text)
         if suggested_scale:
             scale_guidance = scale_mgr.get_scale_guidance_for_prompt(suggested_scale)
             if scale_guidance:
@@ -294,10 +307,21 @@ class ConversationPipeline:
         result.end_type = detect_tag(result.full_response, END_PATTERNS)
         result.relaxation_rec = detect_tag(result.full_response, REC_TAGS)
         result.scale_tags = parse_scale_tags(result.full_response)
+        logger.info(
+            f"[Pipeline] End type: {result.end_type} "
+            f"| Relaxation rec: {result.relaxation_rec} "
+            f"| Scale tags: {result.scale_tags} "
+            f"| Spoken text length: {len(result.spoken_text)}"
+        )
+
+        # --- Auto-end on time/round limit: ask user instead of forcing ---
+        if not result.end_type and self.report and self.report.is_over_limit():
+            emit("time_limit_ask", None)
+            logger.info("Session time limit reached: asking user to continue or end")
 
         # --- Save assistant message ---
         if self.data:
-            self.data.save_assistant_message(None, result.full_response, sample_rate=24000)
+            self.data.save_assistant_message(None, result.full_response, sample_rate=48000)
 
         # --- TTS (optional) ---
         if config.use_tts and self.tts and result.tts_text:
@@ -375,40 +399,52 @@ class ConversationPipeline:
         analysis_text = ""
         spoken_text = ""
         found_separator = False
-        stream_buffer = ""
+        pre_separator_buffer = ""
 
         llm_gen = self.llm.chat(text, system_suffix=system_suffix)
 
         for chunk in llm_gen:
             full_response += chunk
-            stream_buffer += chunk
 
-            # Filter tags from stream buffer (uses pre-compiled regexes)
-            stream_buffer = _RE_REC_TAG.sub('', stream_buffer)
-            stream_buffer = _RE_END_TAG.sub('', stream_buffer)
-            stream_buffer = _RE_SCALE_TAG.sub('', stream_buffer)
-            stream_buffer = _RE_BRACKETS_CN.sub('', stream_buffer)
-            stream_buffer = _RE_BREATH_LAUGH.sub('', stream_buffer)
+            if not found_separator:
+                pre_separator_buffer += chunk
+                if '|||' in pre_separator_buffer:
+                    parts = pre_separator_buffer.split('|||', 1)
+                    analysis_text = parts[0].strip()
+                    spoken_buffer = parts[1]
+                    found_separator = True
+                    cleaned = _RE_PIPE_TAG.sub('', spoken_buffer)
+                    cleaned = _RE_REC_TAG.sub('', cleaned)
+                    cleaned = _RE_END_TAG.sub('', cleaned)
+                    cleaned = _RE_SCALE_TAG.sub('', cleaned)
+                    cleaned = _RE_BRACKETS_CN.sub('', cleaned)
+                    cleaned = _RE_BREATH_LAUGH.sub('', cleaned)
+                    if cleaned.strip():
+                        emit("stream_text", cleaned.strip())
+                continue
 
-            # Split on |||
-            if not found_separator and '|||' in stream_buffer:
-                parts = stream_buffer.split('|||', 1)
-                analysis_text = parts[0]
-                stream_buffer = parts[1]
-                found_separator = True
+            cleaned = _RE_PIPE_TAG.sub('', chunk)
+            cleaned = _RE_REC_TAG.sub('', cleaned)
+            cleaned = _RE_END_TAG.sub('', cleaned)
+            cleaned = _RE_SCALE_TAG.sub('', cleaned)
+            cleaned = _RE_BRACKETS_CN.sub('', cleaned)
+            cleaned = _RE_BREATH_LAUGH.sub('', cleaned)
+            if cleaned.strip():
+                emit("stream_text", cleaned.strip())
 
-            if found_separator and stream_buffer:
-                display_text = _RE_PIPE_TAG.sub('', stream_buffer)
-                if display_text:
-                    emit("stream_text", display_text)
-                stream_buffer = ""
-
-        # Parse full response
         if '|||' in full_response:
             parts = full_response.split('|||', 1)
             analysis_text = parts[0].strip()
             spoken_text = parts[1].strip()
         else:
             spoken_text = full_response.strip()
+            if not found_separator:
+                cleaned = _RE_PIPE_TAG.sub('', spoken_text)
+                cleaned = _RE_REC_TAG.sub('', cleaned)
+                cleaned = _RE_END_TAG.sub('', cleaned)
+                cleaned = _RE_SCALE_TAG.sub('', cleaned)
+                cleaned = _RE_BRACKETS_CN.sub('', cleaned)
+                cleaned = _RE_BREATH_LAUGH.sub('', cleaned)
+                emit("stream_text", cleaned.strip())
 
         return full_response, analysis_text, spoken_text

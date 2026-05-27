@@ -9,3 +9,4 @@ transformers>=4.40
 sentencepiece>=0.2
 librosa>=0.10
 PyAudio>=0.2
+voxcpm>=2.0

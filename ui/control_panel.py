@@ -23,8 +23,7 @@ class ControlPanel(FrostedPanel):
     play_muscle = Signal()
     play_meditation = Signal()
     play_game = Signal()
-    open_history = Signal()
-    open_stats = Signal()
+    play_media = Signal()
 
     def __init__(self, parent=None):
         super().__init__(alpha=0.65, radius=16, parent=None)
@@ -269,37 +268,25 @@ class ControlPanel(FrostedPanel):
         self.btn_game.clicked.connect(self.play_game.emit)
         layout.addWidget(self.btn_game)
 
-        # Researcher tools
-        self.btn_history = QPushButton("历史会话")
-        self.btn_history.setObjectName("relaxButton")
-        self.btn_history.setStyleSheet("""
+        self.btn_media = BlinkButton("🎵 影视音乐")
+        self.btn_media.setObjectName("relaxButton")
+        self.btn_media._base_color = "#26A69A"
+        self.btn_media.setStyleSheet("""
             QPushButton {
-                background-color: #78909C; color: white;
+                background-color: #26A69A; color: white;
                 border: none; border-radius: 8px;
                 padding: 7px; font-size: 12px; font-weight: bold;
             }
-            QPushButton:hover { background-color: #607D8B; }
+            QPushButton:hover { background-color: #009688; }
+            QPushButton:disabled { background-color: #26A69A; color: rgba(255,255,255,0.7); }
         """)
-        self.btn_history.clicked.connect(self.open_history.emit)
-        layout.addWidget(self.btn_history)
-
-        self.btn_stats = QPushButton("统计分析")
-        self.btn_stats.setObjectName("relaxButton")
-        self.btn_stats.setStyleSheet("""
-            QPushButton {
-                background-color: #5C6BC0; color: white;
-                border: none; border-radius: 8px;
-                padding: 7px; font-size: 12px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #3F51B5; }
-        """)
-        self.btn_stats.clicked.connect(self.open_stats.emit)
-        layout.addWidget(self.btn_stats)
+        self.btn_media.clicked.connect(self.play_media.emit)
+        layout.addWidget(self.btn_media)
 
         # Store blink buttons for easy access
         self._blink_buttons = [
             self.btn_breathing, self.btn_muscle,
-            self.btn_meditation, self.btn_game
+            self.btn_meditation, self.btn_game, self.btn_media
         ]
 
         # Spacer
@@ -424,6 +411,7 @@ class ControlPanel(FrostedPanel):
             "muscle": self.btn_muscle,
             "meditation": self.btn_meditation,
             "game": self.btn_game,
+            "media": self.btn_media,
         }
         btn = btn_map.get(btn_name)
         if btn:

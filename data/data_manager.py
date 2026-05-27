@@ -477,7 +477,7 @@ class DataManager:
             "text_path": str(text_path)
         }
     
-    def save_assistant_message(self, audio: np.ndarray, text: str, sample_rate: int = 24000) -> Dict[str, str]:
+    def save_assistant_message(self, audio: np.ndarray, text: str, sample_rate: int = 48000) -> Dict[str, str]:
         """
         Save assistant audio and response text.
 
@@ -493,7 +493,7 @@ class DataManager:
         audio_path = session_path / f"{prefix}.wav"
         text_path = session_path / f"{prefix}.txt"
 
-        # Save audio (TTS uses 24000 sample rate)
+        # Save audio (TTS uses 48000 sample rate)
         if audio is not None:
             self._save_wav(audio_path, audio, sample_rate=sample_rate)
 
