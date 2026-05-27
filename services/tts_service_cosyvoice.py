@@ -184,6 +184,25 @@ class TTSService:
         finally:
             logger.debug("Playback worker finished")
 
+    def _build_synthesis_kwargs(self, clean_text: str, stream: bool) -> dict | None:
+        """Build kwargs for model.inference_zero_shot. Returns None if no voice prompt available."""
+        if self._use_cached_speaker and hasattr(self.model, 'inference_zero_shot'):
+            return dict(
+                tts_text=clean_text,
+                prompt_text=self.prompt_text or '',
+                prompt_wav=self.prompt_wav or '',
+                stream=stream,
+                zero_shot_spk_id='default_speaker',
+            )
+        if self.prompt_wav and os.path.exists(self.prompt_wav):
+            return dict(
+                tts_text=clean_text,
+                prompt_text=self.prompt_text or '',
+                prompt_wav=self.prompt_wav,
+                stream=stream,
+            )
+        return None
+
     def generate_and_play(self, text: str, **kwargs):
         """Generate speech with CosyVoice3 and play in real-time (streaming)."""
         if self.model is None:
@@ -224,20 +243,16 @@ class TTSService:
             playback_thread.start()
 
             # CosyVoice streaming synthesis
-            kwargs_gen = dict(
-                tts_text=clean_text,
-                prompt_text=self.prompt_text or '',
-                prompt_wav=self.prompt_wav or '',
-                stream=True,
-            )
-            if self._use_cached_speaker:
-                kwargs_gen['zero_shot_spk_id'] = 'default_speaker'
+            kwargs_gen = self._build_synthesis_kwargs(clean_text, stream=True)
+            if kwargs_gen is None:
+                logger.warning("No prompt_wav available, skipping TTS generation")
+                self.is_playing = False
+                return
 
             for chunk in self.model.inference_zero_shot(**kwargs_gen):
                 if not self.is_playing:
                     logger.debug("Playback interrupted.")
                     break
-
                 audio_np = chunk['tts_speech'].squeeze().float().cpu().numpy().astype(np.float32)
                 if audio_np.ndim == 0 or len(audio_np) == 0:
                     continue
@@ -267,14 +282,10 @@ class TTSService:
             return np.array([])
 
         try:
-            kwargs_gen = dict(
-                tts_text=clean_text,
-                prompt_text=self.prompt_text or '',
-                prompt_wav=self.prompt_wav or '',
-                stream=False,
-            )
-            if self._use_cached_speaker:
-                kwargs_gen['zero_shot_spk_id'] = 'default_speaker'
+            kwargs_gen = self._build_synthesis_kwargs(clean_text, stream=False)
+            if kwargs_gen is None:
+                logger.warning("No prompt_wav available for generate, returning empty audio")
+                return np.array([])
 
             audio_chunks = []
             for chunk in self.model.inference_zero_shot(**kwargs_gen):

@@ -461,7 +461,84 @@ class AgentService:
             logger.debug(f"History summarization failed: {e}")
             return ""
 
-    # ==================== Scene Recommendation ====================
+    # ==================== Dynamic Greeting Generation ====================
+
+    def generate_greeting(self, timeout: float = None) -> str:
+        """Generate a unique opening greeting."""
+        timeout = timeout or 15.0
+        prompt = (
+            "你是薇薇老师，一位温暖、亲切的心理咨询师。请生成一句简短的欢迎问候语，"
+            "用于首次见面时对来访者说。要求：\n"
+            "1. 口语化、有温度，像老朋友打招呼\n"
+            "2. 不超过30个字\n"
+            "3. 不要重复以下已有句式：'你好啊我是薇薇老师'、'来了啊我是薇薇老师'、'咱们又见面了'\n"
+            "4. 可以提到聊天、放松、倾诉等，但不要提具体技术\n"
+            "只输出问候语本身，不要输出任何其他内容。"
+        )
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=80,
+                timeout=timeout,
+            )
+            text = resp.choices[0].message.content.strip()
+            if len(text) > 60:
+                text = text[:60]
+            return text
+        except Exception as e:
+            logger.debug(f"Greeting generation failed: {e}")
+            return ""
+
+    def generate_post_relaxation_greeting(self, relaxation_type: str = "", timeout: float = None) -> str:
+        """Generate a unique post-relaxation greeting."""
+        timeout = timeout or 15.0
+        relax_name = {"breathing": "呼吸放松", "muscle": "肌肉放松", "meditation": "冥想"}.get(relaxation_type, "放松训练")
+        prompt = (
+            f"你是薇薇老师。来访者刚完成了{relax_name}训练，"
+            "请生成一句简短的关心问候，问问他们感觉怎么样。要求：\n"
+            "1. 口语化、有温度，不超过25个字\n"
+            "2. 可以用[breath]标记表示深呼吸\n"
+            "3. 只输出问候语本身，不要输出其他内容。"
+        )
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=60,
+                timeout=timeout,
+            )
+            text = resp.choices[0].message.content.strip()
+            if len(text) > 50:
+                text = text[:50]
+            return text
+        except Exception as e:
+            logger.debug(f"Post-relaxation greeting generation failed: {e}")
+            return ""
+
+    def generate_fill_info_prompt(self, timeout: float = None) -> str:
+        """Generate a unique fill-info prompt."""
+        timeout = timeout or 15.0
+        prompt = (
+            "你是薇薇老师。请生成一句简短的话，引导来访者填写基本信息。要求：\n"
+            "1. 口语化、亲切，不超过30个字\n"
+            "2. 提到'左边'或'基本信息'或'确认'\n"
+            "3. 只输出这句话本身，不要输出其他内容。"
+        )
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=60,
+                timeout=timeout,
+            )
+            text = resp.choices[0].message.content.strip()
+            if len(text) > 50:
+                text = text[:50]
+            return text
+        except Exception as e:
+            logger.debug(f"Fill-info prompt generation failed: {e}")
+            return ""
 
     def recommend_scene(self, emotion: str = "neutral", intent: str = "counseling") -> list:
         """

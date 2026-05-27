@@ -1,15 +1,10 @@
 import os
 import sys
 import re
-import queue
-import threading
 import numpy as np
 import torch
 import torchaudio
-try:
-    import pyaudio
-except ImportError:
-    pyaudio = None
+import sounddevice as sd
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,8 +20,6 @@ class TTSService:
         self.sample_rate = None
         self.prompt_cache = None
         self.is_playing = False
-        self.pyaudio = None
-        self.stream = None
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_audio")
         os.makedirs(self.temp_dir, exist_ok=True)
         self._cleanup_old_temps(max_age_seconds=3600)
@@ -114,9 +107,6 @@ class TTSService:
             logger.warning(f"Voice prompt not found: {prompt_wav}")
             self.prompt_cache = None
 
-        if pyaudio:
-            self.pyaudio = pyaudio.PyAudio()
-
         if progress_callback:
             progress_callback("VoxCPM2 loaded!")
 
@@ -161,43 +151,6 @@ class TTSService:
 
         return text
 
-    def _playback_worker(self, playback_queue, stream, stop_event, pre_buffer=5):
-        buffered_chunks = []
-        first_chunk = True
-        try:
-            while not stop_event.is_set():
-                try:
-                    chunk = playback_queue.get(timeout=0.1)
-                    if chunk is None:
-                        break
-
-                    if first_chunk:
-                        buffered_chunks.append(chunk)
-                        if len(buffered_chunks) >= pre_buffer:
-                            for c in buffered_chunks:
-                                if stream and stream.is_active():
-                                    stream.write(c.tobytes())
-                            buffered_chunks = []
-                            first_chunk = False
-                        continue
-
-                    if stream and stream.is_active():
-                        stream.write(chunk.tobytes())
-
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logger.error(f"Playback worker error: {e}")
-                    break
-
-            if buffered_chunks:
-                for c in buffered_chunks:
-                    if stream and stream.is_active():
-                        stream.write(c.tobytes())
-
-        finally:
-            logger.debug("Playback worker finished")
-
     def generate_and_play(self, text: str, **kwargs):
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
@@ -211,32 +164,13 @@ class TTSService:
             self.is_playing = False
             return
 
-        playback_queue = queue.Queue(maxsize=200)
-        stop_event = threading.Event()
-
-        p = None
-        stream = None
-
         try:
-            if not self.pyaudio:
-                raise RuntimeError("PyAudio not initialized.")
-            stream = self.pyaudio.open(
-                format=pyaudio.paFloat32,
-                channels=1,
-                rate=self.sample_rate,
-                output=True,
-                frames_per_buffer=2048
-            )
-
-            playback_thread = threading.Thread(
-                target=self._playback_worker,
-                args=(playback_queue, stream, stop_event),
-                daemon=True
-            )
-            playback_thread.start()
-
             cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
             inference_timesteps = kwargs.get("inference_timesteps", config.VOXCPM_INFERENCE_TIMESTEPS)
+
+            # Collect all generated audio into a single buffer, then play.
+            # This avoids stutter from chunk-size mismatch in callback-based streaming.
+            audio_parts = []
 
             if self.prompt_cache is not None:
                 gen_result = self.model.tts_model._generate_with_prompt_cache(
@@ -249,12 +183,12 @@ class TTSService:
                 try:
                     for wav, _, _ in gen_result:
                         if not self.is_playing:
-                            logger.debug("Playback interrupted.")
+                            logger.debug("Generation interrupted.")
                             break
                         audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
                         if audio_np.ndim == 0 or len(audio_np) == 0:
                             continue
-                        playback_queue.put(audio_np)
+                        audio_parts.append(audio_np)
                 finally:
                     gen_result.close()
             else:
@@ -267,24 +201,28 @@ class TTSService:
                     inference_timesteps=inference_timesteps,
                 ):
                     if not self.is_playing:
-                        logger.debug("Playback interrupted.")
+                        logger.debug("Generation interrupted.")
                         break
                     audio_np = chunk.astype(np.float32)
                     if audio_np.ndim == 0 or len(audio_np) == 0:
                         continue
-                    playback_queue.put(audio_np)
+                    audio_parts.append(audio_np)
 
-            playback_queue.put(None)
-            playback_thread.join(timeout=10)
+            if not audio_parts:
+                logger.warning("No audio generated")
+                return
+
+            full_audio = np.concatenate(audio_parts)
+            logger.debug(f"Generated {len(full_audio)} samples ({len(full_audio)/self.sample_rate:.1f}s)")
+
+            # Play the complete audio
+            sd.play(full_audio, samplerate=self.sample_rate, blocking=True)
 
         except Exception as e:
             logger.error(f"generate_and_play failed: {e}")
             logger.exception("Exception occurred")
 
         finally:
-            if stream:
-                stream.stop_stream()
-                stream.close()
             self.is_playing = False
 
     def generate(self, text: str, **kwargs) -> np.ndarray:
@@ -336,34 +274,12 @@ class TTSService:
         logger.debug(f"play_audio called with {len(audio)} samples")
         self.is_playing = True
 
-        stream = None
-
         try:
-            if not self.pyaudio:
-                raise RuntimeError("PyAudio not initialized.")
-            stream = self.pyaudio.open(
-                format=pyaudio.paFloat32,
-                channels=1,
-                rate=self.sample_rate,
-                output=True,
-                frames_per_buffer=2048
-            )
-
-            chunk_size = self.sample_rate
-            for i in range(0, len(audio), chunk_size):
-                if not self.is_playing:
-                    break
-                chunk = audio[i:i + chunk_size]
-                stream.write(chunk.astype(np.float32).tobytes())
-
+            sd.play(audio, samplerate=self.sample_rate, blocking=True)
         except Exception as e:
             logger.error(f"play_audio error: {e}")
             logger.exception("Exception occurred")
-
         finally:
-            if stream:
-                stream.stop_stream()
-                stream.close()
             self.is_playing = False
 
     def save_audio(self, audio: np.ndarray, filepath: str):
@@ -373,10 +289,7 @@ class TTSService:
         torchaudio.save(filepath, audio_tensor, self.sample_rate)
 
     def cleanup(self):
-        if self.stream:
-            self.stream.close()
-        if self.pyaudio:
-            self.pyaudio.terminate()
+        sd.stop()
 
 
 _tts_service = None

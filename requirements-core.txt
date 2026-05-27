@@ -6,6 +6,7 @@ openai>=2.0.0
 numpy>=1.24
 sounddevice>=0.5
 soundfile>=0.13
+miniaudio>=1.5
 jieba>=0.42
 pygame>=2.6
 moviepy>=2.0

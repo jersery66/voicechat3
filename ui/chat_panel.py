@@ -208,6 +208,14 @@ class ChatPanel(FrostedPanel):
         msg_type = "ai" if as_ai else "system"
         self._messages.append({"type": msg_type, "text": text, "bubble": bubble})
 
+    def replace_last_ai_message(self, text):
+        """Replace the text of the last AI message bubble (for dynamic greeting updates)."""
+        for msg in reversed(self._messages):
+            if msg["type"] == "ai":
+                msg["bubble"].set_text(text)
+                msg["text"] = text
+                break
+
     def start_ai_message(self):
         """Start a new AI message bubble for streaming."""
         bubble = MessageBubble("", is_user=False)

@@ -192,16 +192,22 @@ class LLMService:
             )
 
     def chat_sync(self, user_message: str) -> str:
-        """
-        Send a message and return the complete response.
-        
-        Args:
-            user_message: The user's input message
-            
-        Returns:
-            Complete response text
-        """
         return "".join(self.chat(user_message))
+
+    def generate_short_text(self, prompt: str, max_tokens: int = 60) -> str:
+        """Generate a short text using the main LLM model (non-streaming)."""
+        try:
+            client = get_ollama_client()
+            response = client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"num_predict": max_tokens},
+            )
+            content = response.get("message", {}).get("content", "")
+            return content.strip()
+        except Exception as e:
+            logger.debug(f"Short text generation failed: {e}")
+            return ""
     
     def get_available_models(self) -> List[str]:
         """Get list of available Ollama models.

@@ -3,8 +3,35 @@
 import os
 import sys
 
-# Set environment variable to force soundfile backend before importing torchaudio
-os.environ["TORCHAUDIO_USE_BACKEND_DISPATCHER"] = "0"
+# Monkey-patch torchaudio.load to use soundfile/miniaudio (avoids torchcodec/ffmpeg dependency).
+# Must happen before funasr imports torchaudio.
+def _torchaudio_load_soundfile(filepath, **kwargs):
+    import torch as _torch
+    import numpy as _np
+    try:
+        import soundfile as _sf
+        data, sr = _sf.read(filepath, dtype='float32')
+        if data.ndim == 1:
+            data = data[:, _np.newaxis]
+        tensor = _torch.from_numpy(data).T  # (channels, samples)
+        return tensor, sr
+    except Exception:
+        pass
+    # Fallback: miniaudio handles flac/mp3/ogg without ffmpeg
+    import miniaudio
+    decoded = miniaudio.decode_file(str(filepath), output_format=miniaudio.SampleFormat.FLOAT32)
+    audio = _np.array(decoded.samples, dtype=_np.float32)
+    if decoded.nchannels > 1:
+        audio = audio.reshape(-1, decoded.nchannels)
+    else:
+        audio = audio[:, _np.newaxis]
+    return _torch.from_numpy(audio).T, decoded.sample_rate
+
+try:
+    import torchaudio
+    torchaudio.load = _torchaudio_load_soundfile
+except ImportError:
+    pass
 
 import queue
 import threading

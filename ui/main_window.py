@@ -59,8 +59,9 @@ class MainWindow(QMainWindow):
         self.rag_service = None
         self.agent_service = None
         self.session_emotions = []  # Accumulated emotion tags for report
-        self._scale_tags = {}       # Accumulated scale assessment tags
-        self._session_ending = False  # Guard against double report generation
+        self._scale_tags = {}
+        self._session_ending = False
+        self._pending_quit = False
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -689,6 +690,8 @@ class MainWindow(QMainWindow):
         self.orchestrator.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
             self.emotion_tracker.reset()
+        if hasattr(self, 'pipeline') and self.pipeline:
+            self.pipeline.reset_session()
         if self.llm_service:
             self.llm_service.reset_conversation()
             if self.data_manager and self.current_user_id:
@@ -924,20 +927,106 @@ class MainWindow(QMainWindow):
         threading.Thread(target=runner, daemon=True).start()
 
     def _play_opening_greeting(self):
-        """Play the opening greeting."""
-        greeting = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
-        self.chat_panel.add_system_message(greeting, as_ai=True)
-        self._play_tts_async(greeting)
+        """Play the opening greeting - dynamically generated or fallback."""
+        fallback = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
+        self.chat_panel.add_system_message(fallback, as_ai=True)
+        self._play_tts_async(fallback)
+
+        def _try_generate():
+            generated = ""
+            try:
+                if self.agent_service and self.agent_service.is_available():
+                    generated = self.agent_service.generate_greeting(timeout=5.0)
+                elif self.llm_service:
+                    generated = self.llm_service.generate_short_text(
+                        "你是薇薇老师，一位温暖亲切的心理咨询师。请生成一句简短欢迎问候语（不超过30字），口语化有温度像老朋友打招呼。只输出问候语本身。",
+                        max_tokens=60
+                    )
+            except Exception as e:
+                logger.debug(f"Greeting generation failed: {e}")
+            if generated and len(generated.strip()) > 5:
+                generated = generated.strip()
+                if len(generated) > 60:
+                    generated = generated[:60]
+                QTimer.singleShot(0, lambda g=generated: self._replace_greeting(g))
+        threading.Thread(target=_try_generate, daemon=True).start()
+
+    def _replace_greeting(self, new_greeting):
+        """Replace the last AI message with a new greeting."""
+        msgs = self.chat_panel._messages
+        if msgs and msgs[-1]["type"] == "ai":
+            bubble = msgs[-1]["bubble"]
+            bubble._full_text = new_greeting
+            bubble.text_label.setText(new_greeting)
+            self._play_tts_async(new_greeting)
 
     def _play_post_relaxation_greeting(self):
-        if POST_RELAXATION_MESSAGE:
-            message = random.choice(POST_RELAXATION_MESSAGE)
-            self.chat_panel.add_system_message(message)
-            self._play_tts_async(message)
+        """Play post-relaxation greeting - dynamically generated or fallback."""
+        fallback = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "做完啦，身上有没有舒服点呀？"
+        self.chat_panel.add_system_message(fallback)
+        self._play_tts_async(fallback)
+
+        relax_type = self.orchestrator.ctx.current_relaxation_type or ""
+        relax_name = {"breathing": "呼吸放松", "muscle": "肌肉放松", "meditation": "冥想"}.get(relax_type, "放松训练")
+
+        def _try_generate():
+            generated = ""
+            try:
+                if self.agent_service and self.agent_service.is_available():
+                    generated = self.agent_service.generate_post_relaxation_greeting(relax_type, timeout=5.0)
+                elif self.llm_service:
+                    generated = self.llm_service.generate_short_text(
+                        f"你是薇薇老师。来访者刚完成{relax_name}训练，生成一句简短关心问候（不超过25字）。只输出问候语本身。",
+                        max_tokens=50
+                    )
+            except Exception as e:
+                logger.debug(f"Post-relaxation greeting failed: {e}")
+            if generated and len(generated.strip()) > 3:
+                generated = generated.strip()
+                if len(generated) > 50:
+                    generated = generated[:50]
+                QTimer.singleShot(0, lambda g=generated: self._replace_last_system(g))
+        threading.Thread(target=_try_generate, daemon=True).start()
+
+    def _replace_last_system(self, new_text):
+        """Replace the last system message text."""
+        msgs = self.chat_panel._messages
+        if msgs and msgs[-1]["type"] == "system":
+            bubble = msgs[-1]["bubble"]
+            bubble._full_text = new_text
+            bubble.text_label.setText(new_text)
+            self._play_tts_async(new_text)
 
     def _play_fill_info_prompt(self):
-        if FILL_INFO_PROMPT:
-            self._play_tts_async(FILL_INFO_PROMPT)
+        """Play fill-info prompt - dynamically generated or fallback."""
+        fallback = FILL_INFO_PROMPT
+        self._play_tts_async(fallback)
+
+        def _try_generate():
+            generated = ""
+            try:
+                if self.agent_service and self.agent_service.is_available():
+                    generated = self.agent_service.generate_fill_info_prompt(timeout=5.0)
+                elif self.llm_service:
+                    generated = self.llm_service.generate_short_text(
+                        "你是薇薇老师。生成一句简短的话引导来访者填写左边的基本信息并点确认（不超过30字）。只输出这句话本身。",
+                        max_tokens=50
+                    )
+            except Exception as e:
+                logger.debug(f"Fill-info prompt generation failed: {e}")
+            if generated and len(generated.strip()) > 5:
+                self._play_tts_async(generated.strip()[:50])
+        threading.Thread(target=_try_generate, daemon=True).start()
+
+        if self.agent_service:
+            def _try_generate():
+                try:
+                    generated = self.agent_service.generate_fill_info_prompt(timeout=3.0)
+                    if generated:
+                        QTimer.singleShot(0, lambda: self._play_tts_async(generated))
+                except Exception:
+                    pass
+            threading.Thread(target=_try_generate, daemon=True).start()
 
     def _start_ollama_keepalive(self):
         """Keep Ollama model warm."""
@@ -961,13 +1050,8 @@ class MainWindow(QMainWindow):
         if self._session_ending:
             return
         if self.models_loaded and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE):
-            from ui.dialogs import ContinueOrEndDialog
-            dialog = ContinueOrEndDialog(parent=self)
-            dialog.setWindowTitle("退出确认")
-            dialog._setup_ui_for_timeout()
-            dialog.continue_chosen.connect(lambda: None)
-            dialog.end_chosen.connect(lambda: self._handle_session_end(EndType.QUIT))
-            dialog.exec()
+            self._pending_quit = True
+            self._handle_session_end(EndType.QUIT)
         else:
             if self.tts_service:
                 self.tts_service.cleanup()
@@ -1164,10 +1248,19 @@ class MainWindow(QMainWindow):
                 if self.data_manager:
                     self.data_manager.save_session_summary(summary=full_feedback[:500])
 
+                if self._pending_quit:
+                    self._pending_quit = False
+                    if self.tts_service:
+                        try:
+                            self.tts_service.cleanup()
+                        except Exception:
+                            pass
+                    QTimer.singleShot(0, QApplication.quit)
+
             except Exception as e:
                 logger.exception("Exception occurred")
                 self._session_ending = False
                 self.session_end_controller.reset()
-                logger.warning(f"报告生成失败: {e}")
+                logger.warning(f"Report generation failed: {e}")
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()

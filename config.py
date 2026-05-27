@@ -691,7 +691,7 @@ AGENT_SUMMARY_SYSTEM_MESSAGE = """你是一个对话摘要压缩器。将心理�
 
 摘要应该简洁（150字以内），用第三人称描述，供后续对话参考。"""
 
-AGENT_TIMEOUT = 10           # 意图分类超时（秒）
+AGENT_TIMEOUT = 6            # 意图分类超时（秒）
 AGENT_REPORT_TIMEOUT = 60    # 报告生成超时（秒）
 
 # ============== Media Scene Mapping ==============

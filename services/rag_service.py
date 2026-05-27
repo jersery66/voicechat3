@@ -435,8 +435,9 @@ class RAGService:
             logger.warning(f"RAG: Failed to save knowledge base: {e}")
 
     def warmup(self):
-        """Warmup the RAG service (preload models if using embedding)."""
-        logger.info("RAG Service warmed up")
+        """Warmup the RAG service (preload all knowledge including lazy files)."""
+        self._ensure_lazy_loaded()
+        logger.info(f"RAG Service warmed up: {len(self.knowledge_base)} entries loaded")
         return True
 
     def _segment_text(self, text: str) -> List[str]:

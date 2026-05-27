@@ -128,29 +128,42 @@ class ScaleManager:
             "max_score": scale["max_score"],
         }
 
+    # Round by which every participant must have been offered at least one scale
+    FORCE_SCALE_ROUND = 5
+
     def should_administer(self, emotion_tracker=None,
                           report_service=None,
-                          user_text=None) -> Optional[str]:
+                          user_text=None,
+                          administered: set = None) -> Optional[str]:
         """
         Determine if a scale should be administered based on session context.
         Returns scale name (e.g. "PHQ-9") or None.
-        
+
         Trigger conditions (relaxed):
-        - After 3 rounds of conversation
+        - After 1 round of conversation
         - User text contains negative emotion keywords
         - Emotion tracker detects negative dominant emotion
         - Emotion trend worsening/volatile
+        - Force PHQ-9 by round 5 if no scale has been given yet
         """
+        if administered is None:
+            administered = set()
+
+        rounds = 0
         if report_service:
             rounds = report_service.get_round_count()
-            if rounds < 3:
+            if rounds < 1:
                 return None
+
+        # Force a scale by round 5 if none administered yet
+        if rounds >= self.FORCE_SCALE_ROUND and not administered:
+            return "PHQ-9"
 
         if user_text:
             depression_kw = ["难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭", "抑郁", "失眠", "睡不着", "疲倦", "没活力"]
             anxiety_kw = ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁", "烦躁不安", "压力"]
-            trauma_kw = ["噩梦", "创伤", "应激", "闪回", "回忆", "惊吓"]
-            
+            trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓"]
+
             for kw in depression_kw:
                 if kw in user_text.lower():
                     return "PHQ-9"
@@ -174,6 +187,11 @@ class ScaleManager:
 
             trend = emotion_tracker.get_trend()
             if trend in ("worsening", "volatile"):
+                # Use dominant emotion to pick the right scale instead of always PHQ-9
+                if dominant in ("anxious", "stressed", "nervous"):
+                    return "GAD-7"
+                if dominant in ("fearful", "traumatized"):
+                    return "PCL-5"
                 return "PHQ-9"
 
         return None

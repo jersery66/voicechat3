@@ -164,11 +164,12 @@ class ConversationPipeline:
         self.data = data_manager
         self.session_emotions = session_emotions
         self.emotion_tracker = emotion_tracker
-        # Shared executor for parallel intent / emotion classification.
+        self._administered_scales: set = set()
+        # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
         self._executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="pipe-classify"
+            max_workers=3, thread_name_prefix="pipe-classify"
         )
 
     def shutdown(self):
@@ -177,6 +178,10 @@ class ConversationPipeline:
             self._executor.shutdown(wait=False)
         except Exception as e:
             logger.debug(f"executor shutdown error: {e}")
+
+    def reset_session(self):
+        """Reset per-session state (scale tracking). Call on new session."""
+        self._administered_scales.clear()
 
     def execute(self, config: PipelineConfig,
                 emit: Callable[[str, Any], None]) -> PipelineResult:
@@ -227,12 +232,11 @@ class ConversationPipeline:
             else:
                 self.data.save_user_message(None, result.user_text)
 
-        # --- Intent + Emotion (parallel 3B calls) ---
+        # --- Intent + Emotion + Crisis keyword (parallel 3B calls) ---
         emit("status", "正在分析...")
         with metrics.timer("agent.intent_emotion"):
-            result.intent, result.emotion_result = self._classify_intent_and_emotion(
-                result.user_text
-            )
+            result.intent, result.emotion_result, crisis_keyword_result = \
+                self._classify_intent_emotion_crisis(result.user_text)
         logger.info(
             f"[Pipeline] Intent: {result.intent} "
             f"(confidence: {getattr(result, 'intent_confidence', 'N/A')}) "
@@ -245,21 +249,20 @@ class ConversationPipeline:
         if self.emotion_tracker:
             self.emotion_tracker.add_emotion(result.emotion_result)
 
-        # --- Crisis risk assessment (before LLM, proactive) ---
-        crisis_result = None
-        if self.agent:
-            # Skip LLM call for neutral/positive emotions with low intensity
-            # — keyword fallback still catches critical cases instantly
+        # --- Crisis risk: use keyword result, upgrade with LLM if needed ---
+        crisis_result = crisis_keyword_result
+        if self.agent and crisis_result.get("risk_level", 0) < 7:
             emotion = result.emotion_result.get("emotion", "neutral")
             intensity = result.emotion_result.get("intensity", 0.0)
             use_llm = emotion != "neutral" or intensity >= 0.5
-            with metrics.timer("agent.crisis"):
-                crisis_result = self.agent.assess_crisis_risk(
-                    result.user_text, use_llm=use_llm)
-            result.crisis_risk = crisis_result.get("risk_level", 0)
-            result.crisis_indicators = crisis_result.get("indicators", [])
-            if crisis_result.get("immediate_action"):
-                emit("show_crisis", crisis_result)
+            if use_llm:
+                with metrics.timer("agent.crisis"):
+                    crisis_result = self.agent.assess_crisis_risk(
+                        result.user_text, use_llm=True)
+        result.crisis_risk = crisis_result.get("risk_level", 0)
+        result.crisis_indicators = crisis_result.get("indicators", [])
+        if crisis_result.get("immediate_action"):
+            emit("show_crisis", crisis_result)
 
         # --- System suffix construction ---
         with metrics.timer("rag.system_suffix"):
@@ -280,8 +283,12 @@ class ConversationPipeline:
         # --- Scale suggestion (based on emotion trend) ---
         from services.scales import get_scale_manager
         scale_mgr = get_scale_manager()
-        suggested_scale = scale_mgr.should_administer(self.emotion_tracker, self.report, user_text=result.user_text)
+        suggested_scale = scale_mgr.should_administer(
+            self.emotion_tracker, self.report,
+            user_text=result.user_text, administered=self._administered_scales,
+        )
         if suggested_scale:
+            self._administered_scales.add(suggested_scale)
             scale_guidance = scale_mgr.get_scale_guidance_for_prompt(suggested_scale)
             if scale_guidance:
                 system_suffix += "\n" + scale_guidance
@@ -335,18 +342,21 @@ class ConversationPipeline:
         metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
         return result
 
-    def _classify_intent_and_emotion(self, text: str) -> tuple:
-        """Parallel 3B calls for intent + emotion. Returns (intent_str, emotion_dict).
+    def _classify_intent_emotion_crisis(self, text: str) -> tuple:
+        """Parallel 3B calls for intent + emotion + crisis keyword check.
 
+        Returns (intent_str, emotion_dict, crisis_keyword_result).
         Uses the long-lived ``self._executor`` instead of constructing a fresh
         ``ThreadPoolExecutor`` on every turn.
         """
         intent_result = {"intent": "counseling", "confidence": 1.0}
         emotion_result = {"emotion": "neutral", "intensity": 0.0}
+        crisis_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
         if self.agent:
             futures = {
                 self._executor.submit(self.agent.classify_intent, text): "intent",
                 self._executor.submit(self.agent.detect_emotion, text): "emotion",
+                self._executor.submit(self.agent._keyword_crisis_risk, text): "crisis",
             }
             for future in as_completed(futures):
                 tag = futures[future]
@@ -354,18 +364,21 @@ class ConversationPipeline:
                     res = future.result()
                     if tag == "intent":
                         intent_result = res
-                    else:
+                    elif tag == "emotion":
                         emotion_result = res
                         self.session_emotions.append({"role": "user", **emotion_result})
+                    elif tag == "crisis":
+                        crisis_result = res
                 except Exception as e:
                     logger.warning(f"{tag} detection failed: {e}")
         intent = intent_result.get("intent", "counseling")
         logger.debug(
             f"Intent: {intent} ({intent_result.get('confidence', 0):.2f}) "
             f"| Emotion: {emotion_result.get('emotion', 'neutral')} "
-            f"({emotion_result.get('intensity', 0):.2f})"
+            f"({emotion_result.get('intensity', 0):.2f}) "
+            f"| Crisis keyword: {crisis_result.get('risk_level', 0)}"
         )
-        return intent, emotion_result
+        return intent, emotion_result, crisis_result
 
     def _build_system_suffix(self, text: str) -> str:
         """Build system suffix with round warning + RAG context."""
@@ -386,6 +399,7 @@ class ConversationPipeline:
             rag_suffix = self.rag.get_system_suffix(text)
             if rag_suffix:
                 system_suffix += "\n" + rag_suffix
+                logger.info("[Pipeline] RAG context injected into system suffix")
 
         return system_suffix
 
@@ -445,6 +459,22 @@ class ConversationPipeline:
                 cleaned = _RE_SCALE_TAG.sub('', cleaned)
                 cleaned = _RE_BRACKETS_CN.sub('', cleaned)
                 cleaned = _RE_BREATH_LAUGH.sub('', cleaned)
-                emit("stream_text", cleaned.strip())
+                if cleaned.strip():
+                    emit("stream_text", cleaned.strip())
+                else:
+                    logger.warning(f"Spoken text empty after cleaning, using raw response as fallback")
+                    fallback = _RE_REC_TAG.sub('', spoken_text)
+                    fallback = _RE_END_TAG.sub('', fallback)
+                    fallback = _RE_SCALE_TAG.sub('', fallback)
+                    fallback = _RE_BREATH_LAUGH.sub('', fallback)
+                    if fallback.strip():
+                        emit("stream_text", fallback.strip())
+                        spoken_text = fallback.strip()
+                    else:
+                        spoken_text = spoken_text
+
+        if not spoken_text and full_response:
+            spoken_text = full_response.strip()
+            logger.warning(f"spoken_text was empty, falling back to full_response")
 
         return full_response, analysis_text, spoken_text

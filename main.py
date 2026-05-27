@@ -4,8 +4,9 @@
 import os
 import sys
 
-# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+os.environ["TORCHAUDIO_USE_BACKEND_DISPATCHER"] = "0"
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
@@ -43,7 +44,15 @@ def main():
     window = MainWindow()
     window.showMaximized()
 
-    sys.exit(app.exec())
+    try:
+        sys.exit(app.exec())
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

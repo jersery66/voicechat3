@@ -31,6 +31,7 @@ node_modules/
 *.original
 *.log
 crash_debug.log
+logs/
 temp/
 temp_audio/
 voice_chat_data/
