@@ -485,6 +485,9 @@ class MainWindow(QMainWindow):
                 elif msg_type == "video_finished":
                     QTimer.singleShot(500, lambda c=content: self._on_video_finished(c))
 
+                elif msg_type == "game_finished":
+                    QTimer.singleShot(500, self._on_game_finished)
+
                 elif msg_type == "loading_progress":
                     if self.loading_screen:
                         self.loading_screen.set_progress(content)
@@ -846,12 +849,53 @@ class MainWindow(QMainWindow):
         self._post_relaxation_dialog = None
 
     def _play_game(self):
-        try:
-            from services.game_service import get_game_service
-            game = get_game_service()
-            game.launch()
-        except Exception as e:
-            logger.warning(f"Game error: {e}")
+        if not self.orchestrator.can_play_video():
+            return
+        self.orchestrator.transition_to(SessionState.VIDEO_PLAYING)
+        self.control_panel.stop_all_blinks()
+
+        def game_runner():
+            try:
+                from services.game_service import get_game_service
+                game = get_game_service()
+                game.launch()
+            except Exception as e:
+                logger.warning(f"Game error: {e}")
+            finally:
+                self.processing_queue.put(("game_finished", None))
+
+        threading.Thread(target=game_runner, daemon=True).start()
+
+    def _on_game_finished(self):
+        """Game finished — greeting + continue/end dialog, same as post-relaxation."""
+        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
+
+        # Post-game greeting
+        fallback = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "玩完啦，感觉怎么样？放松一点了吗？"
+        self.chat_panel.add_system_message(fallback)
+        self._play_tts_async(fallback)
+
+        # Timeout timer
+        self.orchestrator.ctx.post_relaxation_timed_out = False
+        self._start_post_relaxation_timeout()
+
+        # Continue/end dialog
+        dialog = ContinueOrEndDialog(self)
+        self._post_relaxation_dialog = dialog
+        dialog.continue_chosen.connect(self._on_continue_chosen)
+        dialog.end_chosen.connect(self._on_end_chosen)
+
+        def on_dialog_finished():
+            self._cancel_post_relaxation_timer()
+            if self.orchestrator.state == SessionState.POST_RELAXATION:
+                if self.orchestrator.ctx.post_relaxation_timed_out:
+                    self._on_post_relaxation_timeout()
+                else:
+                    self._on_continue_chosen()
+
+        dialog.finished.connect(on_dialog_finished)
+        dialog.exec()
+        self._post_relaxation_dialog = None
 
     def _ask_continue_or_end(self):
         """Ask user whether to continue or end when time limit is reached."""
