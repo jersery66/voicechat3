@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self._session_ending = False
         self._pending_quit = False
         self._asking_scales = False
+        self._user_explicit_end = False
         self._exit_wait_dialog = None
 
         # Tools (initialized in load_models; guarded against partial init)
@@ -693,6 +694,7 @@ class MainWindow(QMainWindow):
         self._scale_tags = {}
         self._session_ending = False
         self._asking_scales = False
+        self._user_explicit_end = False
         self._pending_scale_prompt = None
         self.session_end_controller.reset()
         self.orchestrator.reset()
@@ -854,7 +856,10 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("会话时间提醒")
         dialog._setup_ui_for_timeout()
         dialog.continue_chosen.connect(self._on_timeout_continue)
-        dialog.end_chosen.connect(lambda: self._handle_session_end(EndType.TIME_LIMIT))
+        def _on_end():
+            self._user_explicit_end = True
+            self._handle_session_end(EndType.TIME_LIMIT)
+        dialog.end_chosen.connect(_on_end)
         dialog.exec()
 
     def _on_timeout_continue(self):
@@ -1102,6 +1107,7 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
             self._pending_quit = True
+            self._user_explicit_end = True
             self._show_exit_waiting_dialog()
             self._handle_session_end(EndType.QUIT)
         else:
@@ -1297,8 +1303,13 @@ class MainWindow(QMainWindow):
             return
         self._session_ending = True
 
+        # If user explicitly chose to end (from time-limit dialog or exit button),
+        # skip forced relaxation — respect their choice.
+        user_explicit = self._user_explicit_end
+        self._user_explicit_end = False  # consume the flag
+
         # Use orchestrator to decide: force relaxation or generate reports
-        if not relaxation_tag and not self.orchestrator.ctx.current_relaxation_type:
+        if not user_explicit and not relaxation_tag and not self.orchestrator.ctx.current_relaxation_type:
             if self.relaxation_tool is None:
                 relaxation_tag = "呼吸"
             else:
