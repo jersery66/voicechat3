@@ -1127,7 +1127,12 @@ class MainWindow(QMainWindow):
             self.processing_queue.put(("error", f"处理出错: {str(e)}"))
 
     def _show_exit_waiting_dialog(self):
-        """Show a non-closable 'generating reports' dialog until quit happens."""
+        """Show a non-modal 'processing' dialog until quit happens.
+
+        Must be non-modal — a modal dialog would block the main event loop,
+        preventing the background report thread from draining processing_queue,
+        which causes a deadlock.
+        """
         if hasattr(self, '_exit_wait_dialog') and self._exit_wait_dialog is not None:
             return  # already shown
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
@@ -1135,7 +1140,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QFont
         dlg = QDialog(self)
         dlg.setWindowTitle("正在退出")
-        dlg.setModal(True)
+        dlg.setModal(False)  # non-modal: event loop keeps running
         dlg.setMinimumSize(320, 140)
         dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowCloseButtonHint)
         layout = QVBoxLayout(dlg)
