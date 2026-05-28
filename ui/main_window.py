@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self._scale_tags = {}
         self._session_ending = False
         self._pending_quit = False
+        self._exit_clicks = 0
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -1048,36 +1049,38 @@ class MainWindow(QMainWindow):
 
     def _exit_app(self):
         if self._session_ending:
-            # Session end in progress — nudge stuck threads, set quit flag again,
-            # and start a safety timer that force-quits after 8 seconds.
+            # Session end already in progress (reports generating).
+            # 1st extra click: stop TTS playback so it feels responsive.
+            # 2nd extra click: force quit without waiting for reports.
             self._pending_quit = True
-            if self.tts_service:
-                try:
-                    self.tts_service.stop_playing()
-                except Exception:
-                    pass
-            QTimer.singleShot(8000, self._force_quit)
-            return
+            if self._exit_clicks == 0:
+                self._exit_clicks = 1
+                if self.tts_service:
+                    try:
+                        self.tts_service.stop_playing()
+                    except Exception:
+                        pass
+                self.control_panel.set_status("正在生成报告，再点一次强制退出...")
+                return
+            else:
+                # User clicked exit twice while reports generating — force quit
+                logger.warning("Force quit: user clicked exit while reports generating")
+                if self.tts_service:
+                    try:
+                        self.tts_service.cleanup()
+                    except Exception:
+                        pass
+                self._cleanup_partial_services()
+                QApplication.quit()
+                return
         if self.models_loaded and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE):
             self._pending_quit = True
+            self._exit_clicks = 0
             self._handle_session_end(EndType.QUIT)
         else:
             if self.tts_service:
                 self.tts_service.cleanup()
             QApplication.quit()
-
-    def _force_quit(self):
-        """Safety net: force-quit if _pending_quit is still stuck."""
-        if not self._pending_quit:
-            return
-        logger.warning("Force quit triggered — session end thread may be stuck")
-        if self.tts_service:
-            try:
-                self.tts_service.cleanup()
-            except Exception:
-                pass
-        self._cleanup_partial_services()
-        QApplication.quit()
 
     def _cleanup_partial_services(self):
         """Safely release any services that were partially initialized."""
