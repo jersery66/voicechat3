@@ -1078,7 +1078,7 @@ class MainWindow(QMainWindow):
 
             from PySide6.QtWidgets import QMessageBox
             reply = QMessageBox.question(
-                self, "退出确认", "确定要退出吗？\n系统将生成本次会话报告后退出。",
+                self, "退出确认", "确定要退出吗？",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No
             )
             if reply != QMessageBox.Yes:
@@ -1140,7 +1140,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowCloseButtonHint)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(30, 25, 30, 25)
-        label = QLabel("正在生成会话报告，请稍候...")
+        label = QLabel("正在处理，请稍候...")
         label.setFont(QFont("Microsoft YaHei", 13))
         label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
