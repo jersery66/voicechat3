@@ -499,6 +499,10 @@ class MainWindow(QMainWindow):
                     else:
                         self.control_panel.set_buttons_enabled(False)
 
+                elif msg_type == "quit":
+                    self._close_exit_dialog_and_quit()
+                    return  # stop processing further queue items
+
                 elif msg_type == "error":
                     from PySide6.QtWidgets import QMessageBox
                     QMessageBox.critical(self, "错误", content)
@@ -1192,8 +1196,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_exit_wait_dialog') and self._exit_wait_dialog is not None:
             return  # already shown
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import Qt, QTimer
         from PySide6.QtGui import QFont
+        import os as _os
         dlg = QDialog(self)
         dlg.setWindowTitle("正在退出")
         dlg.setModal(False)  # non-modal: event loop keeps running
@@ -1207,6 +1212,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(label)
         self._exit_wait_dialog = dlg
         dlg.show()
+        # Safety: force-quit after 30s if normal quit path fails
+        QTimer.singleShot(30000, lambda: _os._exit(0))
 
     def _close_exit_dialog_and_quit(self):
         """Close the waiting dialog (if any) and quit the application."""
@@ -1438,6 +1445,7 @@ class MainWindow(QMainWindow):
                             self.tts_service.cleanup()
                         except Exception:
                             pass
-                    QTimer.singleShot(0, self._close_exit_dialog_and_quit)
+                    # Use processing_queue — the main thread's QTimer drains it.
+                    self.processing_queue.put(("quit", None))
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()
