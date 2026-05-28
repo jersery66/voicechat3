@@ -283,9 +283,40 @@ class ConversationPipeline:
                 self._stream_llm(result.user_text, final_suffix, emit)
         emit("finish_streaming", None)
 
-        # --- Collect agent results (should already be done by now) ---
+        # --- Prepare TTS text immediately ---
+        result.clean_spoken = clean_for_display(result.spoken_text)
+        emit("clean_last_ai", result.clean_spoken)
+        result.tts_text = clean_for_tts(result.spoken_text)
+
+        # --- Tag detection ---
+        result.end_type = detect_tag(result.full_response, END_PATTERNS)
+        result.relaxation_rec = detect_tag(result.full_response, REC_TAGS)
+        result.scale_tags = parse_scale_tags(result.full_response)
+        logger.info(
+            f"[Pipeline] End type: {result.end_type} "
+            f"| Relaxation rec: {result.relaxation_rec} "
+            f"| Scale tags: {result.scale_tags} "
+            f"| Spoken text length: {len(result.spoken_text)}"
+        )
+
+        # --- Auto-end on time/round limit ---
+        if not result.end_type and self.report and self.report.is_over_limit():
+            emit("time_limit_ask", None)
+
+        # --- Save assistant message ---
+        if self.data:
+            self.data.save_assistant_message(None, result.full_response, sample_rate=48000)
+
+        # --- TTS + Agent post-processing (concurrent) ---
+        # TTS doesn't need agent results. Run both in parallel to save 1-3s.
+        tts_future = None
+        if config.use_tts and self.tts and result.tts_text:
+            emit("status", "正在播放...")
+            tts_future = self._executor.submit(self._play_tts, result.tts_text)
+
+        # Agent results + emotion tracking + crisis (parallel with TTS)
         try:
-            agent_done = agent_future.result(timeout=5)
+            agent_done = agent_future.result(timeout=10)
             result.intent, result.emotion_result, crisis_keyword_result = agent_done
         except Exception as e:
             logger.warning(f"Agent classification failed: {e}")
@@ -299,11 +330,9 @@ class ConversationPipeline:
             f"(intensity: {result.emotion_result.get('intensity', 'N/A')})"
         )
 
-        # --- Emotion trend tracking ---
         if self.emotion_tracker:
             self.emotion_tracker.add_emotion(result.emotion_result)
 
-        # --- Crisis risk: keyword check, upgrade with LLM if needed ---
         crisis_result = crisis_keyword_result
         if self.agent and crisis_result.get("risk_level", 0) < 7:
             emotion = result.emotion_result.get("emotion", "neutral")
@@ -322,44 +351,23 @@ class ConversationPipeline:
             f"| Crisis risk: {result.crisis_risk}"
         )
 
-        # --- Clean for display ---
-        result.clean_spoken = clean_for_display(result.spoken_text)
-        emit("clean_last_ai", result.clean_spoken)
-
-        # --- TTS text (keep [breath]/[laughter] for CosyVoice) ---
-        result.tts_text = clean_for_tts(result.spoken_text)
-
-        # --- Tag detection (single source of truth) ---
-        result.end_type = detect_tag(result.full_response, END_PATTERNS)
-        result.relaxation_rec = detect_tag(result.full_response, REC_TAGS)
-        result.scale_tags = parse_scale_tags(result.full_response)
-        logger.info(
-            f"[Pipeline] End type: {result.end_type} "
-            f"| Relaxation rec: {result.relaxation_rec} "
-            f"| Scale tags: {result.scale_tags} "
-            f"| Spoken text length: {len(result.spoken_text)}"
-        )
-
-        # --- Auto-end on time/round limit: ask user instead of forcing ---
-        if not result.end_type and self.report and self.report.is_over_limit():
-            emit("time_limit_ask", None)
-            logger.info("Session time limit reached: asking user to continue or end")
-
-        # --- Save assistant message ---
-        if self.data:
-            self.data.save_assistant_message(None, result.full_response, sample_rate=48000)
-
-        # --- TTS (optional) ---
-        if config.use_tts and self.tts and result.tts_text:
-            emit("status", "正在播放...")
+        # Wait for TTS to finish playing (if still running)
+        if tts_future is not None:
             try:
-                with metrics.timer("tts.play"):
-                    self.tts.generate_and_play(result.tts_text)
+                tts_future.result(timeout=120)
             except Exception as e:
                 logger.warning(f"TTS error: {e}")
 
         metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
         return result
+
+    def _play_tts(self, text: str):
+        """Generate and play TTS. Runs on a worker thread."""
+        try:
+            with get_metrics().timer("tts.play"):
+                self.tts.generate_and_play(text)
+        except Exception as e:
+            logger.warning(f"TTS error: {e}")
 
     def _classify_intent_emotion_crisis(self, text: str) -> tuple:
         """Parallel 3B calls for intent + emotion + crisis keyword check.
