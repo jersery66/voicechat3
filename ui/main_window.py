@@ -1048,6 +1048,15 @@ class MainWindow(QMainWindow):
 
     def _exit_app(self):
         if self._session_ending:
+            # Session end in progress — nudge stuck threads, set quit flag again,
+            # and start a safety timer that force-quits after 8 seconds.
+            self._pending_quit = True
+            if self.tts_service:
+                try:
+                    self.tts_service.stop_playing()
+                except Exception:
+                    pass
+            QTimer.singleShot(8000, self._force_quit)
             return
         if self.models_loaded and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE):
             self._pending_quit = True
@@ -1056,6 +1065,19 @@ class MainWindow(QMainWindow):
             if self.tts_service:
                 self.tts_service.cleanup()
             QApplication.quit()
+
+    def _force_quit(self):
+        """Safety net: force-quit if _pending_quit is still stuck."""
+        if not self._pending_quit:
+            return
+        logger.warning("Force quit triggered — session end thread may be stuck")
+        if self.tts_service:
+            try:
+                self.tts_service.cleanup()
+            except Exception:
+                pass
+        self._cleanup_partial_services()
+        QApplication.quit()
 
     def _cleanup_partial_services(self):
         """Safely release any services that were partially initialized."""
@@ -1248,6 +1270,13 @@ class MainWindow(QMainWindow):
                 if self.data_manager:
                     self.data_manager.save_session_summary(summary=full_feedback[:500])
 
+            except Exception as e:
+                logger.exception("Exception occurred")
+                self._session_ending = False
+                self.session_end_controller.reset()
+                logger.warning(f"Report generation failed: {e}")
+
+            finally:
                 if self._pending_quit:
                     self._pending_quit = False
                     if self.tts_service:
@@ -1256,11 +1285,5 @@ class MainWindow(QMainWindow):
                         except Exception:
                             pass
                     QTimer.singleShot(0, QApplication.quit)
-
-            except Exception as e:
-                logger.exception("Exception occurred")
-                self._session_ending = False
-                self.session_end_controller.reset()
-                logger.warning(f"Report generation failed: {e}")
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()
