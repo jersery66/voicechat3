@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
         self._scale_tags = {}
         self._session_ending = False
         self._pending_quit = False
-        self._exit_clicks = 0
+        self._exit_wait_dialog = None
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -1049,38 +1049,54 @@ class MainWindow(QMainWindow):
 
     def _exit_app(self):
         if self._session_ending:
-            # Session end already in progress (reports generating).
-            # 1st extra click: stop TTS playback so it feels responsive.
-            # 2nd extra click: force quit without waiting for reports.
-            self._pending_quit = True
-            if self._exit_clicks == 0:
-                self._exit_clicks = 1
-                if self.tts_service:
-                    try:
-                        self.tts_service.stop_playing()
-                    except Exception:
-                        pass
-                self.control_panel.set_status("正在生成报告，再点一次强制退出...")
-                return
-            else:
-                # User clicked exit twice while reports generating — force quit
-                logger.warning("Force quit: user clicked exit while reports generating")
-                if self.tts_service:
-                    try:
-                        self.tts_service.cleanup()
-                    except Exception:
-                        pass
-                self._cleanup_partial_services()
-                QApplication.quit()
-                return
+            # Reports already generating — show waiting dialog (if not shown yet)
+            self._show_exit_waiting_dialog()
+            return
+
         if self.models_loaded and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE):
+            # Active session — confirm then generate reports
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, "退出确认", "确定要退出吗？\n系统将生成本次会话报告后退出。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
             self._pending_quit = True
-            self._exit_clicks = 0
+            self._show_exit_waiting_dialog()
             self._handle_session_end(EndType.QUIT)
         else:
             if self.tts_service:
                 self.tts_service.cleanup()
             QApplication.quit()
+
+    def _show_exit_waiting_dialog(self):
+        """Show a non-closable 'generating reports' dialog until quit happens."""
+        if hasattr(self, '_exit_wait_dialog') and self._exit_wait_dialog is not None:
+            return  # already shown
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont
+        dlg = QDialog(self)
+        dlg.setWindowTitle("正在退出")
+        dlg.setModal(True)
+        dlg.setMinimumSize(320, 140)
+        dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowCloseButtonHint)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(30, 25, 30, 25)
+        label = QLabel("正在生成会话报告，请稍候...")
+        label.setFont(QFont("Microsoft YaHei", 13))
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        self._exit_wait_dialog = dlg
+        dlg.show()
+
+    def _close_exit_dialog_and_quit(self):
+        """Close the waiting dialog (if any) and quit the application."""
+        if self._exit_wait_dialog:
+            self._exit_wait_dialog.close()
+            self._exit_wait_dialog = None
+        QApplication.quit()
 
     def _cleanup_partial_services(self):
         """Safely release any services that were partially initialized."""
@@ -1287,6 +1303,7 @@ class MainWindow(QMainWindow):
                             self.tts_service.cleanup()
                         except Exception:
                             pass
-                    QTimer.singleShot(0, QApplication.quit)
+                    # Close the waiting dialog, then quit
+                    QTimer.singleShot(0, self._close_exit_dialog_and_quit)
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()
