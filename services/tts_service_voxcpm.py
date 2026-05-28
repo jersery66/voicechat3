@@ -164,33 +164,63 @@ class TTSService:
             self.is_playing = False
             return
 
+        cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
+        inference_timesteps = kwargs.get("inference_timesteps", config.VOXCPM_INFERENCE_TIMESTEPS)
+
+        # Streaming playback: producer thread generates audio, playback thread plays.
+        # Pre-buffers ~0.3s of audio before starting playback to avoid stutter.
+        import queue as _queue
+        import threading as _threading
+
+        audio_q = _queue.Queue()
+        _SENTINEL = object()
+        pre_buffer_nsamples = int(self.sample_rate * 0.3)  # 0.3s pre-buffer
+
+        def _playback_worker():
+            """Pre-buffer, then play chunks as they arrive."""
+            buf = []
+            buffered = 0
+            started = False
+            while True:
+                try:
+                    chunk = audio_q.get(timeout=30)
+                except _queue.Empty:
+                    break
+                if chunk is _SENTINEL:
+                    # Flush remaining buffer
+                    if buf:
+                        sd.play(np.concatenate(buf), samplerate=self.sample_rate, blocking=True)
+                    break
+                if not started:
+                    buf.append(chunk)
+                    buffered += len(chunk)
+                    if buffered >= pre_buffer_nsamples:
+                        sd.play(np.concatenate(buf), samplerate=self.sample_rate, blocking=True)
+                        buf.clear()
+                        started = True
+                else:
+                    sd.play(chunk, samplerate=self.sample_rate, blocking=True)
+
+        play_thread = _threading.Thread(target=_playback_worker, daemon=True)
+        play_thread.start()
+
+        gen = None
         try:
-            cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
-            inference_timesteps = kwargs.get("inference_timesteps", config.VOXCPM_INFERENCE_TIMESTEPS)
-
-            # Collect all generated audio into a single buffer, then play.
-            # This avoids stutter from chunk-size mismatch in callback-based streaming.
-            audio_parts = []
-
             if self.prompt_cache is not None:
-                gen_result = self.model.tts_model._generate_with_prompt_cache(
+                gen = self.model.tts_model._generate_with_prompt_cache(
                     target_text=clean_text,
                     prompt_cache=self.prompt_cache,
                     cfg_value=cfg_value,
                     inference_timesteps=inference_timesteps,
                     streaming=True,
                 )
-                try:
-                    for wav, _, _ in gen_result:
-                        if not self.is_playing:
-                            logger.debug("Generation interrupted.")
-                            break
-                        audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
-                        if audio_np.ndim == 0 or len(audio_np) == 0:
-                            continue
-                        audio_parts.append(audio_np)
-                finally:
-                    gen_result.close()
+                for wav, _, _ in gen:
+                    if not self.is_playing:
+                        break
+                    audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
+                    if audio_np.ndim == 0 or len(audio_np) == 0:
+                        continue
+                    audio_q.put(audio_np)
             else:
                 for chunk in self.model.generate_streaming(
                     text=clean_text,
@@ -201,28 +231,21 @@ class TTSService:
                     inference_timesteps=inference_timesteps,
                 ):
                     if not self.is_playing:
-                        logger.debug("Generation interrupted.")
                         break
                     audio_np = chunk.astype(np.float32)
                     if audio_np.ndim == 0 or len(audio_np) == 0:
                         continue
-                    audio_parts.append(audio_np)
-
-            if not audio_parts:
-                logger.warning("No audio generated")
-                return
-
-            full_audio = np.concatenate(audio_parts)
-            logger.debug(f"Generated {len(full_audio)} samples ({len(full_audio)/self.sample_rate:.1f}s)")
-
-            # Play the complete audio
-            sd.play(full_audio, samplerate=self.sample_rate, blocking=True)
-
+                    audio_q.put(audio_np)
         except Exception as e:
-            logger.error(f"generate_and_play failed: {e}")
-            logger.exception("Exception occurred")
-
+            logger.error(f"generate_and_play generation error: {e}")
         finally:
+            audio_q.put(_SENTINEL)
+            play_thread.join(timeout=60)
+            if gen is not None:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
             self.is_playing = False
 
     def generate(self, text: str, **kwargs) -> np.ndarray:
@@ -265,6 +288,7 @@ class TTSService:
 
     def stop_playing(self):
         self.is_playing = False
+        sd.stop()
 
     def play_audio(self, audio: np.ndarray):
         if audio is None or len(audio) == 0:

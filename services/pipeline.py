@@ -232,55 +232,10 @@ class ConversationPipeline:
             else:
                 self.data.save_user_message(None, result.user_text)
 
-        # --- Intent + Emotion + Crisis keyword (parallel 3B calls) ---
-        emit("status", "正在分析...")
-        with metrics.timer("agent.intent_emotion"):
-            result.intent, result.emotion_result, crisis_keyword_result = \
-                self._classify_intent_emotion_crisis(result.user_text)
-        logger.info(
-            f"[Pipeline] Intent: {result.intent} "
-            f"(confidence: {getattr(result, 'intent_confidence', 'N/A')}) "
-            f"| Emotion: {result.emotion_result.get('emotion', 'N/A')} "
-            f"(intensity: {result.emotion_result.get('intensity', 'N/A')}) "
-            f"| Agent used: {self.agent is not None}"
-        )
-
-        # --- Emotion trend tracking ---
-        if self.emotion_tracker:
-            self.emotion_tracker.add_emotion(result.emotion_result)
-
-        # --- Crisis risk: use keyword result, upgrade with LLM if needed ---
-        crisis_result = crisis_keyword_result
-        if self.agent and crisis_result.get("risk_level", 0) < 7:
-            emotion = result.emotion_result.get("emotion", "neutral")
-            intensity = result.emotion_result.get("intensity", 0.0)
-            use_llm = emotion != "neutral" or intensity >= 0.5
-            if use_llm:
-                with metrics.timer("agent.crisis"):
-                    crisis_result = self.agent.assess_crisis_risk(
-                        result.user_text, use_llm=True)
-        result.crisis_risk = crisis_result.get("risk_level", 0)
-        result.crisis_indicators = crisis_result.get("indicators", [])
-        if crisis_result.get("immediate_action"):
-            emit("show_crisis", crisis_result)
-
-        # --- System suffix construction ---
+        # --- System suffix: RAG + round warning + scale (no agent dependency) ---
         with metrics.timer("rag.system_suffix"):
             system_suffix = self._build_system_suffix(result.user_text)
-        logger.info(
-            f"[Pipeline] RAG suffix: {bool(system_suffix)} "
-            f"| Crisis risk: {result.crisis_risk} "
-            f"| Relaxation rec in suffix: {'REC_' in (system_suffix or '')}"
-        )
-        if self.emotion_tracker:
-            hint = self.emotion_tracker.get_intervention_hint()
-            if hint:
-                system_suffix += "\n" + hint
-        if crisis_result and crisis_result.get("immediate_action"):
-            from config import CRISIS_INTERVENTION_SUFFIX
-            system_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
 
-        # --- Scale suggestion (based on emotion trend) ---
         from services.scales import get_scale_manager
         scale_mgr = get_scale_manager()
         suggested_scale = scale_mgr.should_administer(
@@ -294,14 +249,64 @@ class ConversationPipeline:
                 system_suffix += "\n" + scale_guidance
                 logger.info(f"Scale suggested: {suggested_scale}")
 
+        if self.emotion_tracker:
+            hint = self.emotion_tracker.get_intervention_hint()
+            if hint:
+                system_suffix += "\n" + hint
+
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
-        # --- LLM streaming ---
+        # --- LLM stream + Agent classification (concurrent) ---
+        # Start LLM immediately with RAG/scale context; agent runs in parallel.
+        # This saves 1-3s of agent wait time before first LLM token.
         emit("start_ai_message", None)
+        agent_future = self._executor.submit(
+            self._classify_intent_emotion_crisis, result.user_text
+        )
+
         with metrics.timer("llm.stream"):
             result.full_response, result.analysis_text, result.spoken_text = \
                 self._stream_llm(result.user_text, final_suffix, emit)
         emit("finish_streaming", None)
+
+        # --- Collect agent results (should already be done by now) ---
+        try:
+            agent_done = agent_future.result(timeout=5)
+            result.intent, result.emotion_result, crisis_keyword_result = agent_done
+        except Exception as e:
+            logger.warning(f"Agent classification failed: {e}")
+            result.intent = "counseling"
+            result.emotion_result = {"emotion": "neutral", "intensity": 0.0}
+            crisis_keyword_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
+
+        logger.info(
+            f"[Pipeline] Intent: {result.intent} "
+            f"| Emotion: {result.emotion_result.get('emotion', 'N/A')} "
+            f"(intensity: {result.emotion_result.get('intensity', 'N/A')})"
+        )
+
+        # --- Emotion trend tracking ---
+        if self.emotion_tracker:
+            self.emotion_tracker.add_emotion(result.emotion_result)
+
+        # --- Crisis risk: keyword check, upgrade with LLM if needed ---
+        crisis_result = crisis_keyword_result
+        if self.agent and crisis_result.get("risk_level", 0) < 7:
+            emotion = result.emotion_result.get("emotion", "neutral")
+            intensity = result.emotion_result.get("intensity", 0.0)
+            if emotion != "neutral" or intensity >= 0.5:
+                with metrics.timer("agent.crisis"):
+                    crisis_result = self.agent.assess_crisis_risk(
+                        result.user_text, use_llm=True)
+        result.crisis_risk = crisis_result.get("risk_level", 0)
+        result.crisis_indicators = crisis_result.get("indicators", [])
+        if crisis_result.get("immediate_action"):
+            emit("show_crisis", crisis_result)
+
+        logger.info(
+            f"[Pipeline] RAG suffix: {bool(final_suffix)} "
+            f"| Crisis risk: {result.crisis_risk}"
+        )
 
         # --- Clean for display ---
         result.clean_spoken = clean_for_display(result.spoken_text)
