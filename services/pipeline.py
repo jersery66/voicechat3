@@ -299,11 +299,23 @@ class ConversationPipeline:
 
         from services.scales import get_scale_manager
         scale_mgr = get_scale_manager()
+        # Build recent user messages as context for scale recommendation
+        scale_context = ""
+        if self.llm and hasattr(self.llm, 'conversation_history'):
+            recent_user = [
+                m["content"] for m in self.llm.conversation_history[-6:]
+                if m.get("role") == "user"
+            ]
+            if recent_user:
+                scale_context = "\n".join(recent_user[:-1])  # exclude current msg
         suggested_scale = scale_mgr.should_administer(
             self.emotion_tracker, self.report,
             user_text=result.user_text, administered=self._administered_scales,
             agent_service=self.agent,
+            conversation_context=scale_context,
         )
+        logger.warning(f"[ScaleDebug] text={result.user_text!r}, context={scale_context!r}, "
+                       f"result={suggested_scale}, administered={self._administered_scales}")
         if suggested_scale:
             self._administered_scales.add(suggested_scale)
             scale_guidance = scale_mgr.get_scale_guidance_for_prompt(suggested_scale)

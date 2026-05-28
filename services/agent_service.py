@@ -617,18 +617,25 @@ class AgentService:
 
     # ==================== Scale Recommendation ====================
 
-    def recommend_scale(self, user_text: str, timeout: float = None) -> Optional[str]:
+    def recommend_scale(self, user_text: str, timeout: float = None,
+                        context: str = "") -> Optional[str]:
         """
         Ask the 3B model whether a clinical scale should be administered.
         Returns scale name ("PHQ-9", "GAD-7", "PCL-5") or None.
+
+        Args:
+            user_text: Current user message.
+            context: Recent conversation history for multi-turn judgment.
         """
         if not user_text:
             return None
 
+        query = f"对话历史：\n{context}\n\n用户最新发言：{user_text}" if context else user_text
+
         timeout = timeout or AGENT_TIMEOUT
         try:
             result = self._call_json(
-                AGENT_SCALE_SYSTEM_MESSAGE, user_text,
+                AGENT_SCALE_SYSTEM_MESSAGE, query,
                 max_tokens=60, temperature=0.1, timeout=timeout,
             )
             rec = result.get("recommend", "none")

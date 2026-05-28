@@ -129,13 +129,14 @@ class ScaleManager:
         }
 
     # Round by which every participant must have been offered at least one scale
-    FORCE_SCALE_ROUND = 5
+    FORCE_SCALE_ROUND = 2
 
     def should_administer(self, emotion_tracker=None,
                           report_service=None,
                           user_text=None,
                           administered: set = None,
-                          agent_service=None) -> Optional[str]:
+                          agent_service=None,
+                          conversation_context: str = "") -> Optional[str]:
         """
         Determine if a scale should be administered based on session context.
         Returns scale name (e.g. "PHQ-9") or None.
@@ -159,9 +160,14 @@ class ScaleManager:
         _log.info(f"Scale check: rounds={rounds}, user_text={user_text!r}, "
                   f"agent={'yes' if agent_service else 'no'}, administered={administered}")
 
-        # Force a scale by round 5 if none administered yet
+        # Force a scale by round N if none administered yet
         if rounds >= self.FORCE_SCALE_ROUND and not administered:
-            _log.info("Force PHQ-9: round 5+ with no scales given")
+            _log.info(f"Force PHQ-9: round {rounds} with no scales given")
+            return "PHQ-9"
+
+        # Debug trigger
+        if user_text and "量表测试" in user_text:
+            _log.warning("DEBUG scale trigger: 量表测试 -> PHQ-9")
             return "PHQ-9"
 
         # Keyword matching first (fast, reliable for obvious signals)
@@ -198,7 +204,8 @@ class ScaleManager:
         # Agent model for nuanced cases (keywords didn't match)
         if user_text and agent_service and agent_service.is_available():
             _log.info("No keyword match, trying agent model...")
-            agent_result = agent_service.recommend_scale(user_text)
+            agent_result = agent_service.recommend_scale(
+                user_text, context=conversation_context)
             if agent_result:
                 _log.info(f"Agent recommended: {agent_result}")
                 return agent_result
