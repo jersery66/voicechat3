@@ -687,6 +687,15 @@ class RAGService:
         Returns:
             Context string to inject into LLM prompt, or None if not needed
         """
+        # Debug trigger
+        if "知识库测试" in user_text:
+            results = self._simple_search("失眠 焦虑 戒断", top_k=3)
+            logger.warning(f"[RagDebug] DEBUG trigger '知识库测试' results="
+                          f"{[{'title': r.get('title'), 'score': r.get('score')} for r in results]}")
+            if results:
+                return "\n\n".join(f"【{r['title']}】\n{r['content']}" for r in results)
+            return None
+
         # Fast rule-based check first, then 3B agent for ambiguous cases
         if self._intent_routing(user_text):
             pass  # Rule-based matched, proceed to search
@@ -709,9 +718,10 @@ class RAGService:
                 logger.warning(f"Agent RAG routing failed: {e}")
                 return None
 
-        logger.info(f"RAG triggered for: {user_text[:50]}...")
-
         results = self._simple_search(user_text, top_k=3)
+
+        logger.warning(f"[RagDebug] query={user_text!r} results="
+                      f"{[{'title': r.get('title'), 'score': round(r.get('score', 0), 1)} for r in results]}")
 
         if not results:
             return None
@@ -746,8 +756,10 @@ class RAGService:
 刚刚检索到以下与来访者问题相关的临床心理学知识：
 {rag_context}
 
-【强制约束】
-请将上述知识作为你【策略选择】的理论依据，但在生成口语回复时，必须把这些专业术语转化为戒毒所环境内通俗、有温度的老朋友口吻，**严禁直接照本宣科或像背书一样读出来**。
+【使用要求】
+1. 必须在|||左侧【策略选择】中写明"知识库依据：XXX"，说明你参考了哪条知识。
+2. |||右侧口语回复中不要照搬专业术语，但必须至少转化出一个具体、可执行的小建议。
+3. 如果知识库内容与当前来访者表达无关，不要强行使用。
 """
         return rag_instruction
 

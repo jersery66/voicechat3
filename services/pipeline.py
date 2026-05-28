@@ -509,10 +509,18 @@ class ConversationPipeline:
             )
 
         if self.rag:
-            rag_suffix = self.rag.get_system_suffix(text)
+            # Use multi-turn context for RAG retrieval
+            rag_text = text
+            if self.llm and hasattr(self.llm, 'conversation_history'):
+                recent = [m["content"] for m in self.llm.conversation_history[-6:]
+                          if m.get("role") == "user"]
+                if recent:
+                    rag_text = "\n".join(recent[-3:] + [text])
+            rag_suffix = self.rag.get_system_suffix(rag_text)
+            logger.warning(f"[RagDebug] user_text={text!r} rag_text={rag_text!r} "
+                          f"injected={bool(rag_suffix)} len={len(rag_suffix) if rag_suffix else 0}")
             if rag_suffix:
                 system_suffix += "\n" + rag_suffix
-                logger.info("[Pipeline] RAG context injected into system suffix")
 
         return system_suffix
 
