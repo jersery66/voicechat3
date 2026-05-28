@@ -177,7 +177,7 @@ class ConversationPipeline:
     def shutdown(self):
         """Release the shared classification executor. Call on app exit."""
         try:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception as e:
             logger.debug(f"executor shutdown error: {e}")
 
@@ -307,7 +307,7 @@ class ConversationPipeline:
                 if m.get("role") == "user"
             ]
             if recent_user:
-                scale_context = "\n".join(recent_user[:-1])  # exclude current msg
+                scale_context = "\n".join(recent_user[-3:])
         suggested_scale = scale_mgr.should_administer(
             self.emotion_tracker, self.report,
             user_text=result.user_text, administered=self._administered_scales,
@@ -440,7 +440,7 @@ class ConversationPipeline:
         # Wait for TTS to finish playing (if still running)
         if tts_future is not None:
             try:
-                tts_future.result(timeout=120)
+                tts_future.result(timeout=30)
             except Exception as e:
                 logger.warning(f"TTS error: {e}")
 

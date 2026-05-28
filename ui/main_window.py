@@ -1079,16 +1079,6 @@ class MainWindow(QMainWindow):
                 self._play_tts_async(generated.strip()[:50])
         threading.Thread(target=_try_generate, daemon=True).start()
 
-        if self.agent_service:
-            def _try_generate():
-                try:
-                    generated = self.agent_service.generate_fill_info_prompt(timeout=3.0)
-                    if generated:
-                        QTimer.singleShot(0, lambda: self._play_tts_async(generated))
-                except Exception:
-                    pass
-            threading.Thread(target=_try_generate, daemon=True).start()
-
     def _start_ollama_keepalive(self):
         """Keep Ollama model warm."""
         self._keepalive_timer = QTimer(self)
@@ -1145,23 +1135,27 @@ class MainWindow(QMainWindow):
                 if clicked == buttons.get("relax"):
                     self._exit_with_relaxation()
                     return
-                # fall through to exit
-
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.question(
-                self, "退出确认", "确定要退出吗？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
-            if reply != QMessageBox.Yes:
+                # "直接退出" — fast quit, no farewell/TTS/report
+                self._force_quit_now()
                 return
-            self._pending_quit = True
-            self._user_explicit_end = True
-            self._show_exit_waiting_dialog()
-            self._handle_session_end(EndType.QUIT)
+
+            # No incomplete items — offer "结束会话" (full) or "直接退出" (fast)
+            from PySide6.QtWidgets import QMessageBox, QPushButton
+            box = QMessageBox(self)
+            box.setWindowTitle("退出确认")
+            box.setText("确定要退出吗？")
+            btn_end = box.addButton("结束会话并退出", QMessageBox.AcceptRole)
+            btn_quit = box.addButton("直接退出", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() == btn_end:
+                self._pending_quit = True
+                self._user_explicit_end = True
+                self._show_exit_waiting_dialog()
+                self._handle_session_end(EndType.QUIT)
+            elif box.clickedButton() == btn_quit:
+                self._force_quit_now()
         else:
-            if self.tts_service:
-                self.tts_service.cleanup()
-            QApplication.quit()
+            self._force_quit_now()
 
     def _exit_with_relaxation(self):
         """Start relaxation training, then exit after it completes."""
@@ -1229,6 +1223,37 @@ class MainWindow(QMainWindow):
             logger.exception("Exception occurred")
             self._asking_scales = False
             self.processing_queue.put(("error", f"处理出错: {str(e)}"))
+
+    def _force_quit_now(self):
+        """Immediate quit — stop all services and exit, no farewell/report."""
+        self._session_ending = True
+        # Stop timers
+        for timer_name in ("_queue_timer", "_progress_timer", "_keepalive_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+        # Stop audio
+        try:
+            if self.stt_service:
+                self.stt_service.stop_recording()
+        except Exception:
+            pass
+        try:
+            if self.tts_service:
+                self.tts_service.stop_playing()
+                self.tts_service.cleanup()
+        except Exception:
+            pass
+        # Shutdown pipeline executor
+        try:
+            if hasattr(self, "pipeline") and self.pipeline:
+                self.pipeline.shutdown()
+        except Exception:
+            pass
+        QApplication.quit()
 
     def _show_exit_waiting_dialog(self):
         """Show a non-modal 'processing' dialog until quit happens.
