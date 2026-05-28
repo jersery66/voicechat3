@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self._scale_tags = {}
         self._session_ending = False
         self._pending_quit = False
+        self._asking_scales = False
         self._exit_wait_dialog = None
 
         # Tools (initialized in load_models; guarded against partial init)
@@ -349,14 +350,18 @@ class MainWindow(QMainWindow):
 
             if text is not None:
                 self.processing_queue.put(("set_buttons_state", "disabled"))
-                config = PipelineConfig(use_stt=False, use_tts=True, user_text=text)
+                extra = getattr(self, '_pending_scale_prompt', '') or ''
+                self._pending_scale_prompt = None
+                config = PipelineConfig(use_stt=False, use_tts=True, user_text=text, extra_system_suffix=extra)
             else:
                 # Voice mode: STT + TTS
                 audio_data = self.stt_service.stop_recording()
                 if len(audio_data) == 0:
                     self.processing_queue.put(("status", "未检测到语音"))
                     return
-                config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data)
+                extra = getattr(self, '_pending_scale_prompt', '') or ''
+                self._pending_scale_prompt = None
+                config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data, extra_system_suffix=extra)
 
             result = self.pipeline.execute(config, lambda mt, ct: self.processing_queue.put((mt, ct)))
             self._scale_tags = result.scale_tags
@@ -376,7 +381,7 @@ class MainWindow(QMainWindow):
             if et == EndType.SAFETY and result.crisis_risk < 7:
                 self.processing_queue.put(("show_crisis", None))
             self._handle_session_end(et, result.relaxation_rec)
-        elif result.relaxation_rec:
+        elif result.relaxation_rec and not self._asking_scales:
             self.processing_queue.put(("highlight_relax", result.relaxation_rec))
             self.processing_queue.put(("status", "准备就绪"))
         elif result.intent == "entertainment":
@@ -687,6 +692,8 @@ class MainWindow(QMainWindow):
         self.session_emotions = []
         self._scale_tags = {}
         self._session_ending = False
+        self._asking_scales = False
+        self._pending_scale_prompt = None
         self.session_end_controller.reset()
         self.orchestrator.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
@@ -1060,14 +1067,10 @@ class MainWindow(QMainWindow):
 
             if incomplete:
                 from PySide6.QtWidgets import QMessageBox, QPushButton
-                scale_info = "\n".join(
-                    f"  {s['scale_name']}: 已答 {s['answered']}/{s['total']} 题"
-                    for s in incomplete
-                )
                 box = QMessageBox(self)
-                box.setWindowTitle("量表未完成")
-                box.setText(f"以下量表还有题目未完成：\n\n{scale_info}\n\n建议先完成量表再退出，结果会更准确。")
-                btn_continue = box.addButton("继续完成量表", QMessageBox.AcceptRole)
+                box.setWindowTitle("")
+                box.setText("我还有几个问题想问你，你想继续聊聊天吗？")
+                btn_continue = box.addButton("继续聊天", QMessageBox.AcceptRole)
                 btn_exit = box.addButton("直接退出", QMessageBox.RejectRole)
                 box.exec()
                 if box.clickedButton() == btn_continue:
@@ -1100,7 +1103,8 @@ class MainWindow(QMainWindow):
             return
         # Store for next pipeline run
         self._pending_scale_prompt = remaining_prompt
-        self.chat_panel.add_system_message("退出前，我再问你几个小问题，很快就好。")
+        self._asking_scales = True
+        self.chat_panel.add_system_message("我再问你几个小问题，很快就好。")
         # Send a trigger message with scale questions as system context
         threading.Thread(
             target=self._run_pipeline_with_scale_context,
@@ -1122,8 +1126,20 @@ class MainWindow(QMainWindow):
             )
             self._scale_tags = result.scale_tags
             self._post_pipeline_routing(result)
+            # Check if more scale questions remain; if not, clear flag
+            if self.pipeline.get_incomplete_scales():
+                # Still have unanswered questions — keep _asking_scales True
+                # and prepare next round of questions
+                remaining = self.pipeline.get_remaining_scale_prompt()
+                if remaining:
+                    self._pending_scale_prompt = remaining
+                    self._asking_scales = True
+                    return
+            # All done or no more questions
+            self._asking_scales = False
         except Exception as e:
             logger.exception("Exception occurred")
+            self._asking_scales = False
             self.processing_queue.put(("error", f"处理出错: {str(e)}"))
 
     def _show_exit_waiting_dialog(self):
