@@ -27,6 +27,7 @@ from config import (
     AGENT_EMOTION_SYSTEM_MESSAGE,
     AGENT_SUMMARY_SYSTEM_MESSAGE,
     AGENT_CRISIS_SYSTEM_MESSAGE,
+    AGENT_SCALE_SYSTEM_MESSAGE,
     AGENT_TIMEOUT,
     AGENT_REPORT_TIMEOUT,
     AGENT_ENTERTAINMENT_KEYWORDS,
@@ -613,6 +614,31 @@ class AgentService:
                 break
 
         return results[:limit]
+
+    # ==================== Scale Recommendation ====================
+
+    def recommend_scale(self, user_text: str, timeout: float = None) -> Optional[str]:
+        """
+        Ask the 3B model whether a clinical scale should be administered.
+        Returns scale name ("PHQ-9", "GAD-7", "PCL-5") or None.
+        """
+        if not user_text:
+            return None
+
+        timeout = timeout or AGENT_TIMEOUT
+        try:
+            result = self._call_json(
+                AGENT_SCALE_SYSTEM_MESSAGE, user_text,
+                max_tokens=60, temperature=0.1, timeout=timeout,
+            )
+            rec = result.get("recommend", "none")
+            if rec in ("PHQ-9", "GAD-7", "PCL-5"):
+                logger.info(f"Agent recommends scale: {rec} — {result.get('reason', '')}")
+                return rec
+            return None
+        except Exception as e:
+            logger.debug(f"Scale recommendation failed: {e}")
+            return None
 
 
 # Singleton

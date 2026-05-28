@@ -302,6 +302,7 @@ class ConversationPipeline:
         suggested_scale = scale_mgr.should_administer(
             self.emotion_tracker, self.report,
             user_text=result.user_text, administered=self._administered_scales,
+            agent_service=self.agent,
         )
         if suggested_scale:
             self._administered_scales.add(suggested_scale)

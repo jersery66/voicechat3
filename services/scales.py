@@ -134,17 +134,14 @@ class ScaleManager:
     def should_administer(self, emotion_tracker=None,
                           report_service=None,
                           user_text=None,
-                          administered: set = None) -> Optional[str]:
+                          administered: set = None,
+                          agent_service=None) -> Optional[str]:
         """
         Determine if a scale should be administered based on session context.
         Returns scale name (e.g. "PHQ-9") or None.
 
-        Trigger conditions (relaxed):
-        - After 1 round of conversation
-        - User text contains negative emotion keywords
-        - Emotion tracker detects negative dominant emotion
-        - Emotion trend worsening/volatile
-        - Force PHQ-9 by round 5 if no scale has been given yet
+        Uses 3B agent model for intelligent judgment when available,
+        falls back to keyword matching.
         """
         if administered is None:
             administered = set()
@@ -159,10 +156,26 @@ class ScaleManager:
         if rounds >= self.FORCE_SCALE_ROUND and not administered:
             return "PHQ-9"
 
+        # Try agent model first (smarter, context-aware)
+        if user_text and agent_service and agent_service.is_available():
+            agent_result = agent_service.recommend_scale(user_text)
+            if agent_result:
+                return agent_result
+
+        # Fallback: keyword matching
         if user_text:
-            depression_kw = ["难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭", "抑郁", "失眠", "睡不着", "疲倦", "没活力"]
-            anxiety_kw = ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁", "烦躁不安", "压力"]
-            trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓"]
+            depression_kw = [
+                "难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭",
+                "抑郁", "失眠", "睡不着", "疲倦", "没活力", "心情不好",
+                "不开心", "难受", "痛苦", "消沉", "颓废", "沮丧", "郁闷",
+                "活着没意思", "不想活", "累", "没劲", "无聊", "空虚",
+            ]
+            anxiety_kw = [
+                "焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌",
+                "烦躁", "烦躁不安", "压力", "慌", "坐立不安", "心烦",
+                "睡不好", "做噩梦", "心跳快", "喘不过气",
+            ]
+            trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓", "被打", "被欺负", "事故"]
 
             for kw in depression_kw:
                 if kw in user_text.lower():
