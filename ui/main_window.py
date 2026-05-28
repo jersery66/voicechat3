@@ -1049,12 +1049,33 @@ class MainWindow(QMainWindow):
 
     def _exit_app(self):
         if self._session_ending:
-            # Reports already generating — show waiting dialog (if not shown yet)
             self._show_exit_waiting_dialog()
             return
 
         if self.models_loaded and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE):
-            # Active session — confirm then generate reports
+            # Check for incomplete scales
+            incomplete = []
+            if hasattr(self, 'pipeline') and self.pipeline:
+                incomplete = self.pipeline.get_incomplete_scales()
+
+            if incomplete:
+                from PySide6.QtWidgets import QMessageBox, QPushButton
+                scale_info = "\n".join(
+                    f"  {s['scale_name']}: 已答 {s['answered']}/{s['total']} 题"
+                    for s in incomplete
+                )
+                box = QMessageBox(self)
+                box.setWindowTitle("量表未完成")
+                box.setText(f"以下量表还有题目未完成：\n\n{scale_info}\n\n建议先完成量表再退出，结果会更准确。")
+                btn_continue = box.addButton("继续完成量表", QMessageBox.AcceptRole)
+                btn_exit = box.addButton("直接退出", QMessageBox.RejectRole)
+                box.exec()
+                if box.clickedButton() == btn_continue:
+                    # Ask remaining scale questions in conversation
+                    self._ask_remaining_scales()
+                    return
+                # else: fall through to exit
+
             from PySide6.QtWidgets import QMessageBox
             reply = QMessageBox.question(
                 self, "退出确认", "确定要退出吗？\n系统将生成本次会话报告后退出。",
@@ -1069,6 +1090,41 @@ class MainWindow(QMainWindow):
             if self.tts_service:
                 self.tts_service.cleanup()
             QApplication.quit()
+
+    def _ask_remaining_scales(self):
+        """Ask remaining scale questions in conversation via LLM."""
+        if not hasattr(self, 'pipeline') or not self.pipeline:
+            return
+        remaining_prompt = self.pipeline.get_remaining_scale_prompt()
+        if not remaining_prompt:
+            return
+        # Store for next pipeline run
+        self._pending_scale_prompt = remaining_prompt
+        self.chat_panel.add_system_message("退出前，我再问你几个小问题，很快就好。")
+        # Send a trigger message with scale questions as system context
+        threading.Thread(
+            target=self._run_pipeline_with_scale_context,
+            daemon=True
+        ).start()
+
+    def _run_pipeline_with_scale_context(self):
+        """Run pipeline with remaining scale questions as system context."""
+        try:
+            extra_suffix = getattr(self, '_pending_scale_prompt', '')
+            self._pending_scale_prompt = None
+            config = PipelineConfig(
+                use_stt=False, use_tts=True,
+                user_text="好的",
+                extra_system_suffix=extra_suffix,
+            )
+            result = self.pipeline.execute(
+                config, lambda mt, ct: self.processing_queue.put((mt, ct))
+            )
+            self._scale_tags = result.scale_tags
+            self._post_pipeline_routing(result)
+        except Exception as e:
+            logger.exception("Exception occurred")
+            self.processing_queue.put(("error", f"处理出错: {str(e)}"))
 
     def _show_exit_waiting_dialog(self):
         """Show a non-closable 'generating reports' dialog until quit happens."""

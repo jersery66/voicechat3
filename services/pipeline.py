@@ -138,6 +138,7 @@ class PipelineConfig:
     use_tts: bool = False       # True for voice output, False for text-only
     audio_data: Optional[Any] = None  # Raw audio numpy array if use_stt=True
     user_text: str = ""         # Text input if use_stt=False
+    extra_system_suffix: str = ""  # Additional system context (e.g. scale questions)
 
 
 # ==================== Unified Conversation Pipeline ====================
@@ -165,6 +166,7 @@ class ConversationPipeline:
         self.session_emotions = session_emotions
         self.emotion_tracker = emotion_tracker
         self._administered_scales: set = set()
+        self._scale_answers: Dict[str, Dict[int, int]] = {}  # {scale_name: {q_num: score}}
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -182,6 +184,65 @@ class ConversationPipeline:
     def reset_session(self):
         """Reset per-session state (scale tracking). Call on new session."""
         self._administered_scales.clear()
+        self._scale_answers.clear()
+
+    def get_incomplete_scales(self) -> List[Dict[str, Any]]:
+        """Return scales with unanswered questions.
+
+        Each entry: {scale_name, total, answered, remaining_questions,
+                     remaining_nums}.
+        """
+        from services.scales import SCALES
+        incomplete = []
+        for scale_name in self._administered_scales:
+            scale_def = SCALES.get(scale_name)
+            if not scale_def:
+                continue
+            total = len(scale_def["questions"])
+            answered = self._scale_answers.get(scale_name, {})
+            answered_count = len(answered)
+            if answered_count < total:
+                remaining = []
+                remaining_nums = []
+                for i, q in enumerate(scale_def["questions"]):
+                    q_num = i + 1
+                    if q_num not in answered:
+                        remaining.append(q)
+                        remaining_nums.append(q_num)
+                incomplete.append({
+                    "scale_name": scale_name,
+                    "total": total,
+                    "answered": answered_count,
+                    "remaining_questions": remaining,
+                    "remaining_nums": remaining_nums,
+                })
+        return incomplete
+
+    def get_remaining_scale_prompt(self) -> Optional[str]:
+        """Generate a prompt for the LLM to ask remaining scale questions."""
+        incomplete = self.get_incomplete_scales()
+        if not incomplete:
+            return None
+        from services.scales import SCALES
+        parts = []
+        for info in incomplete:
+            scale_name = info["scale_name"]
+            scale_def = SCALES[scale_name]
+            options_text = " / ".join(
+                f"{opt['score']}-{opt['label']}" for opt in scale_def["options"]
+            )
+            questions_text = "\n".join(
+                f"  Q{info['remaining_nums'][i]}: {q}"
+                for i, q in enumerate(info["remaining_questions"])
+            )
+            parts.append(
+                f"【量表补问 - {scale_name}】\n"
+                f"已答 {info['answered']}/{info['total']} 题，还需问以下题目：\n"
+                f"{questions_text}\n"
+                f"评分标准：{options_text}\n"
+                f"记录规则：以 [SCALE:{scale_name}:Q题号:S分数] 格式嵌入回复末尾。"
+            )
+        return "\n\n".join(parts)
 
     def execute(self, config: PipelineConfig,
                 emit: Callable[[str, Any], None]) -> PipelineResult:
@@ -256,6 +317,13 @@ class ConversationPipeline:
 
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
+        # Append extra system context (e.g. remaining scale questions at exit)
+        if config.extra_system_suffix:
+            if final_suffix:
+                final_suffix += "\n" + config.extra_system_suffix
+            else:
+                final_suffix = config.extra_system_suffix
+
         # --- Quick crisis keyword check (fast, before LLM) ---
         # The full agent classification runs in parallel with LLM, but crisis
         # keywords must be checked BEFORE LLM starts so the crisis suffix can
@@ -292,6 +360,11 @@ class ConversationPipeline:
         result.end_type = detect_tag(result.full_response, END_PATTERNS)
         result.relaxation_rec = detect_tag(result.full_response, REC_TAGS)
         result.scale_tags = parse_scale_tags(result.full_response)
+        # Track answered questions per scale
+        for scale_name, answers in result.scale_tags.items():
+            if scale_name not in self._scale_answers:
+                self._scale_answers[scale_name] = {}
+            self._scale_answers[scale_name].update(answers)
         logger.info(
             f"[Pipeline] End type: {result.end_type} "
             f"| Relaxation rec: {result.relaxation_rec} "
