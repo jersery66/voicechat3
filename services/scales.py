@@ -234,7 +234,7 @@ class ScaleManager:
         return None
 
     def get_scale_guidance_for_prompt(self, scale_name: str) -> str:
-        """Generate a natural-language prompt for the LLM to administer a scale."""
+        """Generate a forceful prompt that makes the LLM administer a scale THIS turn."""
         scale = SCALES.get(scale_name)
         if not scale:
             return ""
@@ -247,17 +247,26 @@ class ScaleManager:
         )
 
         return f"""【量表评估 - {scale['name']}】
-请在接下来的对话中自然地询问以下问题。不要一次性抛出所有题目，每次只问1-2题，像平常聊天一样穿插在对话中。
+
+【本轮强制任务】
+你已经决定启动该量表。当前这一轮必须执行量表追问，不能只做普通共情或开放式追问。
+回复结构：先简短反映用户情绪一句（不超过15字），然后立刻询问量表第1题。
+禁止继续泛泛询问"发生了什么事""具体什么事情""为什么不开心"。
+
+【提问要求】
+每次只问1题，优先从Q1开始。问题必须自然口语化，但语义必须对应量表原题。
 评分标准：{options_text}
 题目：
 {questions_text}
 
-询问方式示例：
-- "最近两周，你有没有觉得做什么事都提不起劲？是完全没有，还是有那么几天？"
-- "睡眠方面怎么样？入睡困难吗？"
+【记录规则】
+用户回答了某题后，将答案映射为0-{len(scale['options'])-1}的分数。
+必须以 [SCALE:{scale_name}:Q题号:S分数] 格式嵌入回复末尾。
+本轮只是提问、用户尚未回答，则不要输出SCALE标签。
 
-记录规则：将用户的回答映射为0-{len(scale['options'])-1}的分数，以 [SCALE:{scale_name}:Q题号:S分数] 格式嵌入口语回复的末尾。
-例如：用户回答了第1题的答案为"好几天"，则在你的回复末尾加上 [SCALE:PHQ-9:Q1:S1]"""
+【示例】
+用户说"我不开心好久了"：
+|||这阵子一直不开心，确实挺耗人。[breath]我先问一个简单的，最近两周，你做事还有没有兴趣？"""
 
 
 # Singleton
