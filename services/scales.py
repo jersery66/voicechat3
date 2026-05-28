@@ -143,6 +143,9 @@ class ScaleManager:
         Uses 3B agent model for intelligent judgment when available,
         falls back to keyword matching.
         """
+        import logging
+        _log = logging.getLogger(__name__)
+
         if administered is None:
             administered = set()
 
@@ -150,25 +153,26 @@ class ScaleManager:
         if report_service:
             rounds = report_service.get_round_count()
             if rounds < 1:
+                _log.debug(f"Scale check skipped: rounds={rounds} < 1")
                 return None
+
+        _log.info(f"Scale check: rounds={rounds}, user_text={user_text!r}, "
+                  f"agent={'yes' if agent_service else 'no'}, administered={administered}")
 
         # Force a scale by round 5 if none administered yet
         if rounds >= self.FORCE_SCALE_ROUND and not administered:
+            _log.info("Force PHQ-9: round 5+ with no scales given")
             return "PHQ-9"
 
-        # Try agent model first (smarter, context-aware)
-        if user_text and agent_service and agent_service.is_available():
-            agent_result = agent_service.recommend_scale(user_text)
-            if agent_result:
-                return agent_result
-
-        # Fallback: keyword matching
+        # Keyword matching first (fast, reliable for obvious signals)
         if user_text:
+            text_lower = user_text.lower()
             depression_kw = [
                 "难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭",
                 "抑郁", "失眠", "睡不着", "疲倦", "没活力", "心情不好",
                 "不开心", "难受", "痛苦", "消沉", "颓废", "沮丧", "郁闷",
                 "活着没意思", "不想活", "累", "没劲", "无聊", "空虚",
+                "感觉不好", "感觉很差", "状态不好", "情绪不好",
             ]
             anxiety_kw = [
                 "焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌",
@@ -178,14 +182,27 @@ class ScaleManager:
             trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓", "被打", "被欺负", "事故"]
 
             for kw in depression_kw:
-                if kw in user_text.lower():
+                if kw in text_lower:
+                    _log.info(f"Keyword match (depression): '{kw}' -> PHQ-9")
                     return "PHQ-9"
             for kw in anxiety_kw:
-                if kw in user_text.lower():
+                if kw in text_lower:
+                    _log.info(f"Keyword match (anxiety): '{kw}' -> GAD-7")
                     return "GAD-7"
             for kw in trauma_kw:
-                if kw in user_text.lower():
+                if kw in text_lower:
+                    _log.info(f"Keyword match (trauma): '{kw}' -> PCL-5")
                     return "PCL-5"
+            _log.info(f"No keyword match for: {user_text!r}")
+
+        # Agent model for nuanced cases (keywords didn't match)
+        if user_text and agent_service and agent_service.is_available():
+            _log.info("No keyword match, trying agent model...")
+            agent_result = agent_service.recommend_scale(user_text)
+            if agent_result:
+                _log.info(f"Agent recommended: {agent_result}")
+                return agent_result
+            _log.info("Agent also returned no recommendation")
 
         if emotion_tracker:
             data = emotion_tracker.get_emotion_data()
