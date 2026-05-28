@@ -256,6 +256,20 @@ class ConversationPipeline:
 
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
+        # --- Quick crisis keyword check (fast, before LLM) ---
+        # The full agent classification runs in parallel with LLM, but crisis
+        # keywords must be checked BEFORE LLM starts so the crisis suffix can
+        # be injected into the system prompt for safety-critical responses.
+        if self.agent:
+            quick_crisis = self.agent._keyword_crisis_risk(result.user_text)
+            if quick_crisis.get("immediate_action"):
+                from config import CRISIS_INTERVENTION_SUFFIX
+                if final_suffix:
+                    final_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
+                else:
+                    final_suffix = CRISIS_INTERVENTION_SUFFIX
+                logger.warning(f"[Pipeline] Crisis keywords detected pre-LLM: risk={quick_crisis.get('risk_level')}")
+
         # --- LLM stream + Agent classification (concurrent) ---
         # Start LLM immediately with RAG/scale context; agent runs in parallel.
         # This saves 1-3s of agent wait time before first LLM token.

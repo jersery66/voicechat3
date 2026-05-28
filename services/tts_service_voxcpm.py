@@ -181,15 +181,17 @@ class TTSService:
             buf = []
             buffered = 0
             started = False
-            while True:
+            while self.is_playing:
                 try:
-                    chunk = audio_q.get(timeout=30)
+                    chunk = audio_q.get(timeout=0.5)
                 except _queue.Empty:
-                    break
+                    continue
                 if chunk is _SENTINEL:
                     # Flush remaining buffer
-                    if buf:
+                    if buf and self.is_playing:
                         sd.play(np.concatenate(buf), samplerate=self.sample_rate, blocking=True)
+                    break
+                if not self.is_playing:
                     break
                 if not started:
                     buf.append(chunk)
