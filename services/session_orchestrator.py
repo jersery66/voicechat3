@@ -106,7 +106,7 @@ class SessionOrchestrator:
         from services.report_service import EndType
 
         should_force = (
-            end_type not in (EndType.SAFETY, EndType.INVALID)
+            end_type not in (EndType.SAFETY, EndType.INVALID, EndType.QUIT)
             and not self.ctx.current_relaxation_type
             and not self.ctx.has_forced_relaxation_rec
         )
