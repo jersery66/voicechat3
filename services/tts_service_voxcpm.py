@@ -167,49 +167,62 @@ class TTSService:
         cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
         inference_timesteps = kwargs.get("inference_timesteps", config.VOXCPM_INFERENCE_TIMESTEPS)
 
-        # Streaming playback with pre-buffering.
-        # Producer writes chunks to a list. Playback thread accumulates
-        # chunks until 0.5s is buffered, then plays batches via sd.play().
-        # sd.play() queues audio internally via PortAudio, so consecutive
-        # calls with 0.5s+ batches produce continuous output.
-        import queue as _queue
+        # Streaming playback via sd.OutputStream callback.
+        # A single PortAudio stream stays open; the audio callback reads
+        # continuously from a shared buffer. The producer appends chunks
+        # as they are generated. No open/close overhead between batches.
         import threading as _threading
 
-        audio_q = _queue.Queue()
-        _SENTINEL = object()
-        min_batch_nsamples = int(self.sample_rate * 0.5)
+        buf = np.zeros(int(self.sample_rate * 120), dtype=np.float32)
+        write_pos = 0
+        read_pos = 0
+        lock = _threading.Lock()
+        done_flag = _threading.Event()
+        started = _threading.Event()
+        min_prebuffer = int(self.sample_rate * 0.3)
 
-        def _playback_worker():
-            buf = []
-            buf_nsamples = 0
-            started = False
-            while True:
-                try:
-                    chunk = audio_q.get(timeout=30)
-                except _queue.Empty:
-                    break
-                if chunk is _SENTINEL:
-                    if buf and self.is_playing:
-                        sd.play(np.concatenate(buf), samplerate=self.sample_rate, blocking=True)
-                    break
-                if not self.is_playing:
-                    break
-                buf.append(chunk)
-                buf_nsamples += len(chunk)
-                if not started:
-                    if buf_nsamples >= min_batch_nsamples:
-                        sd.play(np.concatenate(buf), samplerate=self.sample_rate, blocking=True)
-                        buf = []
-                        buf_nsamples = 0
-                        started = True
-                else:
-                    if buf_nsamples >= min_batch_nsamples:
-                        sd.play(np.concatenate(buf), samplerate=self.sample_rate, blocking=True)
-                        buf = []
-                        buf_nsamples = 0
+        def _callback(outdata, frames, time_info, status):
+            nonlocal read_pos
+            if status:
+                logger.debug(f"OutputStream: {status}")
+            with lock:
+                avail = write_pos - read_pos
+                if avail <= 0:
+                    if done_flag.is_set():
+                        raise sd.CallbackStop
+                    outdata[:, 0] = 0
+                    return
+                n = min(frames, avail)
+                outdata[:n, 0] = buf[read_pos:read_pos + n]
+                if n < frames:
+                    outdata[n:, 0] = 0
+                read_pos += n
 
-        play_thread = _threading.Thread(target=_playback_worker, daemon=True)
-        play_thread.start()
+        def _stream_worker():
+            # Wait for minimum pre-buffer before opening the stream
+            while self.is_playing:
+                with lock:
+                    if write_pos >= min_prebuffer:
+                        break
+                if done_flag.is_set():
+                    break
+                _threading.Event().wait(0.01)
+            if not self.is_playing:
+                return
+            started.set()
+            stream = sd.OutputStream(
+                samplerate=self.sample_rate, channels=1,
+                dtype='float32', blocksize=0, callback=_callback,
+            )
+            with stream:
+                while self.is_playing:
+                    _threading.Event().wait(0.1)
+                    with lock:
+                        if done_flag.is_set() and write_pos <= read_pos:
+                            break
+
+        stream_thread = _threading.Thread(target=_stream_worker, daemon=True)
+        stream_thread.start()
 
         gen = None
         try:
@@ -227,7 +240,10 @@ class TTSService:
                     audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
                     if audio_np.ndim == 0 or len(audio_np) == 0:
                         continue
-                    audio_q.put(audio_np)
+                    with lock:
+                        n = len(audio_np)
+                        buf[write_pos:write_pos + n] = audio_np
+                        write_pos += n
             else:
                 for chunk in self.model.generate_streaming(
                     text=clean_text,
@@ -242,12 +258,15 @@ class TTSService:
                     audio_np = chunk.astype(np.float32)
                     if audio_np.ndim == 0 or len(audio_np) == 0:
                         continue
-                    audio_q.put(audio_np)
+                    with lock:
+                        n = len(audio_np)
+                        buf[write_pos:write_pos + n] = audio_np
+                        write_pos += n
         except Exception as e:
             logger.error(f"generate_and_play generation error: {e}")
         finally:
-            audio_q.put(_SENTINEL)
-            play_thread.join(timeout=120)
+            done_flag.set()
+            stream_thread.join(timeout=60)
             if gen is not None:
                 try:
                     gen.close()
