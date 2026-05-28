@@ -1060,24 +1060,39 @@ class MainWindow(QMainWindow):
             return
 
         if self.models_loaded and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE):
-            # Check for incomplete scales
+            # Determine what's incomplete
             incomplete = []
             if hasattr(self, 'pipeline') and self.pipeline:
                 incomplete = self.pipeline.get_incomplete_scales()
+            has_relaxed = bool(self.orchestrator.ctx.current_relaxation_type)
 
-            if incomplete:
+            if incomplete or not has_relaxed:
                 from PySide6.QtWidgets import QMessageBox, QPushButton
                 box = QMessageBox(self)
                 box.setWindowTitle("")
-                box.setText("我还有几个问题想问你，你想继续聊聊天吗？")
-                btn_continue = box.addButton("继续聊天", QMessageBox.AcceptRole)
-                btn_exit = box.addButton("直接退出", QMessageBox.RejectRole)
+                buttons = {}
+                if incomplete and not has_relaxed:
+                    box.setText("在结束之前，你想再聊几个问题，还是试试放松训练？")
+                    buttons["questions"] = box.addButton("再问几个问题", QMessageBox.AcceptRole)
+                    buttons["relax"] = box.addButton("试试放松训练", QMessageBox.AcceptRole)
+                    buttons["exit"] = box.addButton("直接退出", QMessageBox.RejectRole)
+                elif incomplete:
+                    box.setText("我还有几个问题想问你，你想继续聊聊天吗？")
+                    buttons["questions"] = box.addButton("继续聊天", QMessageBox.AcceptRole)
+                    buttons["exit"] = box.addButton("直接退出", QMessageBox.RejectRole)
+                else:
+                    box.setText("要不要试试放松训练？只需几分钟，效果很好的。")
+                    buttons["relax"] = box.addButton("试试放松训练", QMessageBox.AcceptRole)
+                    buttons["exit"] = box.addButton("直接退出", QMessageBox.RejectRole)
                 box.exec()
-                if box.clickedButton() == btn_continue:
-                    # Ask remaining scale questions in conversation
+                clicked = box.clickedButton()
+                if clicked == buttons.get("questions"):
                     self._ask_remaining_scales()
                     return
-                # else: fall through to exit
+                if clicked == buttons.get("relax"):
+                    self._exit_with_relaxation()
+                    return
+                # fall through to exit
 
             from PySide6.QtWidgets import QMessageBox
             reply = QMessageBox.question(
@@ -1093,6 +1108,25 @@ class MainWindow(QMainWindow):
             if self.tts_service:
                 self.tts_service.cleanup()
             QApplication.quit()
+
+    def _exit_with_relaxation(self):
+        """Start relaxation training, then exit after it completes."""
+        self._pending_quit = True
+        tag = "呼吸"
+        if self.relaxation_tool:
+            try:
+                tag = self.relaxation_tool.execute(
+                    conversation_history=self.llm_service.conversation_history
+                )
+            except Exception:
+                pass
+        tag_cn_map = {"breathing": "呼吸", "muscle": "肌肉放松", "meditation": "冥想", "呼吸": "呼吸", "肌肉": "肌肉放松", "冥想": "冥想"}
+        tag_cn = tag_cn_map.get(tag, tag)
+        rec_text = f"好的，我们先做个{tag_cn}放松训练，做完再走。"
+        self.chat_panel.add_system_message(rec_text)
+        self._play_tts_async(rec_text)
+        self.orchestrator.ctx.current_relaxation_type = tag
+        QTimer.singleShot(1500, lambda: self._play_relaxation_video(tag))
 
     def _ask_remaining_scales(self):
         """Ask remaining scale questions in conversation via LLM."""
@@ -1307,6 +1341,7 @@ class MainWindow(QMainWindow):
                     tag_map = {"呼吸": "BREATHING", "肌肉": "MUSCLE", "冥想": "MEDITATION"}
                     relaxation_rec = tag_map.get(relaxation_tag)
 
+                # --- Phase 1: Generate farewell text via LLM streaming ---
                 self.processing_queue.put(("start_ai_message", None))
                 full_feedback = ""
                 try:
@@ -1327,7 +1362,6 @@ class MainWindow(QMainWindow):
                     full_feedback = "今天的聊天到此结束，希望对你有所帮助。有事儿随时来找我唠。"
 
                 self.processing_queue.put(("finish_streaming", None))
-                self._play_tts_async(full_feedback)
 
                 if end_type == EndType.SAFETY:
                     self.processing_queue.put(("show_crisis", None))
@@ -1335,36 +1369,49 @@ class MainWindow(QMainWindow):
                 self.orchestrator.transition_to(SessionState.SESSION_ENDED)
                 self.processing_queue.put(("status", "会话已结束 - 可开始新会话"))
 
-                researcher_report = None
-                try:
-                    researcher_report = self.report_service.generate_researcher_report(
-                        conversation_history, user_id, end_type,
-                        user_info=current_user_info, relaxation_info=relaxation_rec or relax_str,
-                        session_emotions=self.session_emotions
-                    )
-                    if isinstance(researcher_report, dict):
-                        researcher_report["relaxation_completed"] = True
-                        researcher_report["relaxation_type"] = relax_str
-                        if self.emotion_tracker:
-                            researcher_report["emotion_tracker_data"] = self.emotion_tracker.get_session_emotion_data()
-                    if isinstance(researcher_report, dict) and hasattr(self.report_service, 'activity_log'):
-                        researcher_report["activity_log"] = self.report_service.activity_log
-                except Exception as e:
-                    logger.warning(f"Researcher report generation failed: {e}")
-
-                save_result = None
-                if self.data_manager and researcher_report:
+                # --- Phase 2: Play farewell TTS synchronously ---
+                # Must finish before cleanup so audio isn't killed mid-playback.
+                if self.tts_service and full_feedback:
                     try:
-                        save_result = self.data_manager.save_session_report(
-                            researcher_report, full_feedback, end_type.value
-                        )
+                        self.tts_service.generate_and_play(full_feedback)
                     except Exception as e:
-                        logger.warning(f"Report save failed: {e}")
+                        logger.warning(f"Farewell TTS failed: {e}")
 
-                self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
+                # --- Phase 3: Generate report + PDF in background ---
+                # Report generation is slow (LLM call). Run it after TTS finishes
+                # so it doesn't block audio playback or UI exit.
+                def _save_report():
+                    try:
+                        researcher_report = self.report_service.generate_researcher_report(
+                            conversation_history, user_id, end_type,
+                            user_info=current_user_info, relaxation_info=relaxation_rec or relax_str,
+                            session_emotions=self.session_emotions
+                        )
+                        if isinstance(researcher_report, dict):
+                            researcher_report["relaxation_completed"] = True
+                            researcher_report["relaxation_type"] = relax_str
+                            if self.emotion_tracker:
+                                researcher_report["emotion_tracker_data"] = self.emotion_tracker.get_session_emotion_data()
+                        if isinstance(researcher_report, dict) and hasattr(self.report_service, 'activity_log'):
+                            researcher_report["activity_log"] = self.report_service.activity_log
 
-                if self.data_manager:
-                    self.data_manager.save_session_summary(summary=full_feedback[:500])
+                        save_result = None
+                        if self.data_manager and researcher_report:
+                            try:
+                                save_result = self.data_manager.save_session_report(
+                                    researcher_report, full_feedback, end_type.value
+                                )
+                            except Exception as e:
+                                logger.warning(f"Report save failed: {e}")
+
+                        self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
+
+                        if self.data_manager:
+                            self.data_manager.save_session_summary(summary=full_feedback[:500])
+                    except Exception as e:
+                        logger.warning(f"Background report generation failed: {e}")
+
+                threading.Thread(target=_save_report, daemon=True).start()
 
             except Exception as e:
                 logger.exception("Exception occurred")
@@ -1380,7 +1427,6 @@ class MainWindow(QMainWindow):
                             self.tts_service.cleanup()
                         except Exception:
                             pass
-                    # Close the waiting dialog, then quit
                     QTimer.singleShot(0, self._close_exit_dialog_and_quit)
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()
