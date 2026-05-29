@@ -374,6 +374,28 @@ class ControlPanel(FrostedPanel):
         self.user_status_label.setStyleSheet("color: #E53935; font-size: 11px; padding: 2px;")
         self.modify_user.emit()
 
+    def reset_form(self):
+        """Clear all form fields and reset to initial state (for next subject)."""
+        self._info_confirmed = False
+        self.id_input.clear()
+        self.gender_combo.setCurrentIndex(0)
+        self.age_input.clear()
+        self.edu_combo.setCurrentIndex(0)
+        self.marital_combo.setCurrentIndex(0)
+        self.drug_combo.setCurrentIndex(0)
+        self.btn_confirm.setEnabled(True)
+        self.btn_modify.setEnabled(False)
+        self.btn_modify.setStyleSheet("""
+            QPushButton {
+                background-color: #ddd; color: #999;
+                border: 1px solid #ccc; border-radius: 8px;
+                padding: 5px; font-size: 11px;
+            }
+        """)
+        self.record_button.setEnabled(False)
+        self.user_status_label.setText("请填写基本信息后开始对话")
+        self.user_status_label.setStyleSheet("color: #E53935; font-size: 11px; padding: 2px;")
+
     def get_user_info(self):
         return {
             "user_id": self.id_input.text().strip() or "default_user",

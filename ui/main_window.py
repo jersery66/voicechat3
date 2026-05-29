@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self._exit_wait_dialog = None
         self._current_report_generated = False
         self._current_report_generating = False
+        self._pipeline_busy = False
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -279,6 +280,11 @@ class MainWindow(QMainWindow):
             self.control_panel.reset_recording()
             return
 
+        if self._pipeline_busy:
+            self.chat_panel.add_system_message("正在回复中，请稍等")
+            self.control_panel.reset_recording()
+            return
+
         # Stop any playing TTS
         if self.tts_service:
             self.tts_service.stop_playing()
@@ -327,6 +333,9 @@ class MainWindow(QMainWindow):
         """Handle text input from chat panel."""
         if not text.strip():
             return
+        if self._pipeline_busy:
+            self.chat_panel.add_system_message("正在回复中，请稍等")
+            return
         if not self.models_loaded or not self.pipeline:
             self.chat_panel.add_system_message("模型尚未加载完成，请稍候")
             return
@@ -344,6 +353,7 @@ class MainWindow(QMainWindow):
     def _run_pipeline(self, text=None):
         """Unified pipeline entry point. Runs on a background thread.
         text=None for voice mode (STT+TTS), text=str for text mode."""
+        self._pipeline_busy = True
         try:
             if self.orchestrator.state in (SessionState.SESSION_ENDING, SessionState.SESSION_ENDED):
                 self.processing_queue.put(("status", "会话已结束，请开始新对话"))
@@ -376,6 +386,7 @@ class MainWindow(QMainWindow):
             logger.exception("Exception occurred")
             self.processing_queue.put(("error", f"处理出错: {str(e)}"))
         finally:
+            self._pipeline_busy = False
             if text is not None:
                 self.processing_queue.put(("set_buttons_state", "normal"))
 
@@ -712,6 +723,7 @@ class MainWindow(QMainWindow):
         self._pending_scale_prompt = None
         self._current_report_generated = False
         self._current_report_generating = False
+        self._pipeline_busy = False
         self.session_end_controller.reset()
         self.orchestrator.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
@@ -1111,7 +1123,7 @@ class MainWindow(QMainWindow):
         if self._session_ending:
             # Session end flow already running — just mark for quit after it finishes
             self._pending_quit = True
-            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...")
+            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...", force_quit_timeout=120000)
             return
 
         has_active_session = (
@@ -1123,7 +1135,7 @@ class MainWindow(QMainWindow):
             # Need to generate report before quitting
             self._pending_quit = True
             self._user_explicit_end = True
-            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...")
+            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...", force_quit_timeout=120000)
             self._handle_session_end(EndType.QUIT)
             return
 
@@ -1155,10 +1167,11 @@ class MainWindow(QMainWindow):
         self._session_ending = False
         self.session_end_controller.reset()
         self._start_new_session()
-        self.control_panel.set_buttons_enabled(True)
+        self.current_user_id = None
+        self.user_info = {}
         self.info_confirmed = False
-        self.control_panel.btn_confirm.setEnabled(True)
-        self.control_panel.record_button.setEnabled(False)
+        self.control_panel.reset_form()
+        self.control_panel.set_buttons_enabled(True)
         self.chat_panel.add_system_message(
             '当前会话已结束，报告已保存。请填写下一位被试信息，然后点击"确认信息并开始"。'
         )
@@ -1194,12 +1207,12 @@ class MainWindow(QMainWindow):
             pass
         QApplication.quit()
 
-    def _show_exit_waiting_dialog(self, message="正在处理，请稍候..."):
+    def _show_exit_waiting_dialog(self, message="正在处理，请稍候...", force_quit_timeout=None):
         """Show a non-modal 'processing' dialog until quit/session-end finishes.
 
-        Must be non-modal — a modal dialog would block the main event loop,
-        preventing the background report thread from draining processing_queue,
-        which causes a deadlock.
+        Args:
+            force_quit_timeout: ms before os._exit(0). None = no force quit
+            (used for "end session" which should never kill the process).
         """
         if hasattr(self, '_exit_wait_dialog') and self._exit_wait_dialog is not None:
             return  # already shown
@@ -1220,8 +1233,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(label)
         self._exit_wait_dialog = dlg
         dlg.show()
-        # Safety: force-quit after 30s if normal quit path fails
-        QTimer.singleShot(30000, lambda: _os._exit(0))
+        if force_quit_timeout:
+            QTimer.singleShot(force_quit_timeout, lambda: _os._exit(0))
 
     def _close_exit_dialog_and_quit(self):
         """Close the waiting dialog (if any) and quit the application."""
@@ -1249,8 +1262,8 @@ class MainWindow(QMainWindow):
                 pass
 
     def closeEvent(self, event):
-        self._cleanup_partial_services()
-        event.accept()
+        event.ignore()
+        self._on_exit_program()
 
     # ==================== Missing Business Logic ====================
 
@@ -1403,46 +1416,44 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         logger.warning(f"Farewell TTS failed: {e}")
 
-                # --- Phase 3: Generate report + PDF in background ---
-                # Report generation is slow (LLM call). Run it after TTS finishes
-                # so it doesn't block audio playback or UI exit.
-                def _save_report():
-                    self._current_report_generating = True
-                    try:
-                        researcher_report = self.report_service.generate_researcher_report(
-                            conversation_history, user_id, end_type,
-                            user_info=current_user_info, relaxation_info=relaxation_rec or relax_str,
-                            session_emotions=self.session_emotions
-                        )
-                        if isinstance(researcher_report, dict):
-                            researcher_report["relaxation_completed"] = True
-                            researcher_report["relaxation_type"] = relax_str
-                            if self.emotion_tracker:
-                                researcher_report["emotion_tracker_data"] = self.emotion_tracker.get_session_emotion_data()
-                        if isinstance(researcher_report, dict) and hasattr(self.report_service, 'activity_log'):
-                            researcher_report["activity_log"] = self.report_service.activity_log
+                # --- Phase 3: Generate report + PDF (synchronous) ---
+                # This runs inside generate_farewell_and_reports which is already
+                # a background thread. Must complete before session_finished/quit.
+                self._current_report_generating = True
+                try:
+                    researcher_report = self.report_service.generate_researcher_report(
+                        conversation_history, user_id, end_type,
+                        user_info=current_user_info, relaxation_info=relaxation_rec or relax_str,
+                        session_emotions=self.session_emotions
+                    )
+                    if isinstance(researcher_report, dict):
+                        relaxation_done = relax_str not in ("未进行", "", None, "未知")
+                        researcher_report["relaxation_completed"] = relaxation_done
+                        researcher_report["relaxation_type"] = relax_str if relaxation_done else "未进行"
+                        if self.emotion_tracker:
+                            researcher_report["emotion_tracker_data"] = self.emotion_tracker.get_session_emotion_data()
+                    if isinstance(researcher_report, dict) and hasattr(self.report_service, 'activity_log'):
+                        researcher_report["activity_log"] = self.report_service.activity_log
 
-                        save_result = None
-                        if self.data_manager and researcher_report:
-                            try:
-                                save_result = self.data_manager.save_session_report(
-                                    researcher_report, full_feedback, end_type.value
-                                )
-                            except Exception as e:
-                                logger.warning(f"Report save failed: {e}")
+                    save_result = None
+                    if self.data_manager and researcher_report:
+                        try:
+                            save_result = self.data_manager.save_session_report(
+                                researcher_report, full_feedback, end_type.value
+                            )
+                        except Exception as e:
+                            logger.warning(f"Report save failed: {e}")
 
-                        self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
+                    self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
 
-                        if self.data_manager:
-                            self.data_manager.save_session_summary(summary=full_feedback[:500])
+                    if self.data_manager:
+                        self.data_manager.save_session_summary(summary=full_feedback[:500])
 
-                        self._current_report_generated = True
-                    except Exception as e:
-                        logger.warning(f"Background report generation failed: {e}")
-                    finally:
-                        self._current_report_generating = False
-
-                threading.Thread(target=_save_report, daemon=True).start()
+                    self._current_report_generated = True
+                except Exception as e:
+                    logger.warning(f"Report generation failed: {e}")
+                finally:
+                    self._current_report_generating = False
 
             except Exception as e:
                 logger.exception("Exception occurred")
