@@ -137,6 +137,12 @@ class LLMService:
 
         except Exception as e:
             logger.error(f"LLM Generation Failed (chunks_yielded={chunks_yielded}): {e}")
+            # CUDA OOM / runner terminated — try to recover by reloading model
+            err_str = str(e).lower()
+            if ("cuda" in err_str or "terminated" in err_str or "buffer" in err_str
+                    or "status code: 500" in err_str):
+                logger.warning("[LLM] Detected CUDA/OOM error, attempting model reload...")
+                self._try_reload_model()
             if chunks_yielded == 0:
                 # No chunk reached the UI: safe to drop the user turn entirely.
                 if self.conversation_history and self.conversation_history[-1]["role"] == "user":
@@ -158,6 +164,28 @@ class LLMService:
 
         # Compress history if too long
         self._maybe_summarize()
+
+    def _try_reload_model(self):
+        """Attempt to recover from CUDA OOM by asking Ollama to reload the model."""
+        try:
+            import requests
+            host = self.client._base_url if hasattr(self.client, '_base_url') else None
+            if not host:
+                from config import OLLAMA_HOST
+                host = OLLAMA_HOST
+            # Unload the model to free VRAM
+            resp = requests.post(f"{host}/api/generate", json={
+                "model": self.model, "keep_alive": 0
+            }, timeout=10)
+            logger.info(f"[LLM] Unload model response: {resp.status_code}")
+            time.sleep(2)
+            # Pre-load the model again
+            resp2 = requests.post(f"{host}/api/generate", json={
+                "model": self.model, "keep_alive": -1
+            }, timeout=60)
+            logger.info(f"[LLM] Reload model response: {resp2.status_code}")
+        except Exception as reload_err:
+            logger.warning(f"[LLM] Model reload failed: {reload_err}")
         
     def _maybe_summarize(self):
         """Compress conversation history using the 3B agent when it grows too long."""

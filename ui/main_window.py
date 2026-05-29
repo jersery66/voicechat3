@@ -385,7 +385,11 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             logger.exception("Exception occurred")
-            self.processing_queue.put(("error", f"处理出错: {str(e)}"))
+            err_msg = str(e)
+            if "cuda" in err_msg.lower() or "buffer" in err_msg.lower() or "terminated" in err_msg.lower():
+                self.processing_queue.put(("error", "模型显存不足，正在自动恢复，请稍后再试"))
+            else:
+                self.processing_queue.put(("error", f"处理出错: {err_msg}"))
         finally:
             self._pipeline_busy = False
             if text is not None:
