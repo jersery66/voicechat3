@@ -409,7 +409,7 @@ class MainWindow(QMainWindow):
         elif result.all_scales_completed:
             # All triggered scales done — recommend a short relaxation
             self.processing_queue.put(("all_scales_completed", None))
-        elif result.relaxation_rec and not self._asking_scales:
+        elif result.relaxation_rec and not result.scale_active:
             self.processing_queue.put(("highlight_relax", result.relaxation_rec))
             self.processing_queue.put(("status", "准备就绪"))
         elif result.intent == "entertainment":
@@ -873,7 +873,7 @@ class MainWindow(QMainWindow):
     # ==================== Video / Game ====================
 
     def _play_relaxation_video(self, relaxation_type):
-        """统一的放松视频播放流程：全屏播放 → 记录 → 弹窗
+        """统一的放松视频播放流程：全屏播放 → 弹窗
         relaxation_type: 'breathing', 'muscle', 'meditation'
         """
         if not self.orchestrator.can_play_video():
@@ -882,18 +882,8 @@ class MainWindow(QMainWindow):
         self.orchestrator.transition_to(SessionState.VIDEO_PLAYING)
         self.control_panel.stop_all_blinks()
 
-        # Record relaxation BEFORE video (authoritative record)
-        relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
-        if relax_name:
-            self.orchestrator.ctx.current_relaxation_type = relax_name
-            if self.report_service:
-                self.report_service.record_relaxation(relax_name)
-                self.report_service.activity_log.append({
-                    "type": "relaxation",
-                    "relaxation_type": relaxation_type,
-                    "relaxation_name": relax_name,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                })
+        # Store type for recording after video finishes (not before — video may fail)
+        self._pending_relaxation_type = relaxation_type
 
         def video_runner():
             try:
@@ -906,10 +896,21 @@ class MainWindow(QMainWindow):
         threading.Thread(target=video_runner, daemon=True).start()
 
     def _on_video_finished(self, relaxation_type):
-        """视频播放完成后的处理：问候 → 弹窗 + 超时"""
+        """视频播放完成后的处理：记录 → 问候 → 弹窗 + 超时"""
         self.orchestrator.transition_to(SessionState.POST_RELAXATION)
 
-        # NOTE: record_relaxation already called in _play_relaxation_video before video plays
+        # Record relaxation AFTER video finishes (only if it actually played)
+        relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
+        if relax_name:
+            self.orchestrator.ctx.current_relaxation_type = relax_name
+            if self.report_service:
+                self.report_service.record_relaxation(relax_name)
+                self.report_service.activity_log.append({
+                    "type": "relaxation",
+                    "relaxation_type": relaxation_type,
+                    "relaxation_name": relax_name,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
 
         # 1. 播放放松后问候
         self._play_post_relaxation_greeting()

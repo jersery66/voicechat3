@@ -112,7 +112,7 @@ NATURAL_SCALE_QUESTIONS = {
     ("GAD-7", 5): "有没有不安到坐不住的时候？",
     ("GAD-7", 6): "最近会不会比平时更容易烦、容易急？",
     ("GAD-7", 7): "有没有总觉得要出什么不好的事？",
-    ("PCL-5", 1): "那件 stressful 的事，会不会不由自主地反复想起来？",
+    ("PCL-5", 1): "那件让你压力很大的事，会不会不由自主地反复想起来？",
     ("PCL-5", 2): "有没有做过跟那件事有关的噩梦？",
     ("PCL-5", 3): "会不会尽量不去想、不去提那件事？",
     ("PCL-5", 4): "跟那件事相关的人、地方、活动，会不会尽量避开？",
@@ -197,6 +197,7 @@ class PipelineResult:
     crisis_risk: int = 0
     crisis_indicators: list = field(default_factory=list)
     scale_tags: dict = field(default_factory=dict)
+    scale_active: bool = False             # True when a scale is currently being administered
     scale_completed: bool = False
     all_scales_completed: bool = False
     completed_scale_name: Optional[str] = None
@@ -531,13 +532,29 @@ class ConversationPipeline:
 
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
+        # --- Quick crisis keyword check (fast, before LLM) ---
+        # Must run BEFORE the programmatic scale branch so that crisis responses
+        # are never skipped by a scale question being generated directly.
+        _skip_programmatic_scale = False
+        if self.agent:
+            quick_crisis = self.agent._keyword_crisis_risk(result.user_text)
+            if quick_crisis.get("immediate_action"):
+                from config import CRISIS_INTERVENTION_SUFFIX
+                if final_suffix:
+                    final_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
+                else:
+                    final_suffix = CRISIS_INTERVENTION_SUFFIX
+                _skip_programmatic_scale = True
+                logger.warning(f"[Pipeline] Crisis keywords detected pre-LLM: risk={quick_crisis.get('risk_level')}")
+
         # --- Programmatic first scale question (bypass LLM) ---
         # If we just started a new scale or moved to a new question and are NOT
         # waiting for an answer, generate the question directly from a template
         # instead of relying on the LLM (which may ignore the scale prompt in
         # favor of relaxation training recommendations from SYSTEM_PROMPT).
+        # Skipped when crisis keywords are detected — safety takes priority.
         _programmatic_scale = False
-        if self._active_scale and not self._active_scale_waiting_answer:
+        if self._active_scale and not self._active_scale_waiting_answer and not _skip_programmatic_scale:
             from services.scales import SCALES
             scale_def = SCALES.get(self._active_scale)
             if scale_def:
@@ -608,20 +625,6 @@ class ConversationPipeline:
                 final_suffix += "\n" + config.extra_system_suffix
             else:
                 final_suffix = config.extra_system_suffix
-
-        # --- Quick crisis keyword check (fast, before LLM) ---
-        # The full agent classification runs in parallel with LLM, but crisis
-        # keywords must be checked BEFORE LLM starts so the crisis suffix can
-        # be injected into the system prompt for safety-critical responses.
-        if self.agent:
-            quick_crisis = self.agent._keyword_crisis_risk(result.user_text)
-            if quick_crisis.get("immediate_action"):
-                from config import CRISIS_INTERVENTION_SUFFIX
-                if final_suffix:
-                    final_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
-                else:
-                    final_suffix = CRISIS_INTERVENTION_SUFFIX
-                logger.warning(f"[Pipeline] Crisis keywords detected pre-LLM: risk={quick_crisis.get('risk_level')}")
 
         # --- LLM stream + Agent classification (concurrent) ---
         # Start LLM immediately with RAG/scale context; agent runs in parallel.
@@ -783,6 +786,7 @@ class ConversationPipeline:
             except Exception as e:
                 logger.warning(f"TTS error: {e}")
 
+        result.scale_active = bool(self._active_scale)
         metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
         return result
 

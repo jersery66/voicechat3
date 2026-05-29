@@ -20,6 +20,7 @@ class TTSService:
         self.sample_rate = None
         self.prompt_cache = None
         self.is_playing = False
+        self._play_lock = __import__('threading').Lock()
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_audio")
         os.makedirs(self.temp_dir, exist_ok=True)
         self._cleanup_old_temps(max_age_seconds=3600)
@@ -152,6 +153,11 @@ class TTSService:
         return text
 
     def generate_and_play(self, text: str, **kwargs):
+        with self._play_lock:
+            self.stop_playing()
+            return self._generate_and_play_inner(text, **kwargs)
+
+    def _generate_and_play_inner(self, text: str, **kwargs):
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
@@ -317,6 +323,11 @@ class TTSService:
         sd.stop()
 
     def play_audio(self, audio: np.ndarray):
+        with self._play_lock:
+            self.stop_playing()
+            return self._play_audio_inner(audio)
+
+    def _play_audio_inner(self, audio: np.ndarray):
         if audio is None or len(audio) == 0:
             logger.warning("play_audio called with empty audio data")
             return
