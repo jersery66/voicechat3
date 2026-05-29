@@ -536,7 +536,7 @@ class MainWindow(QMainWindow):
                     self._on_session_finished()
 
                 elif msg_type == "quit":
-                    self._close_exit_dialog_and_quit()
+                    self._force_quit_now()
                     return  # stop processing further queue items
 
                 elif msg_type == "error":
@@ -1351,9 +1351,10 @@ class MainWindow(QMainWindow):
 
     def _force_quit_now(self):
         """Immediate quit — stop all services and exit, no farewell/report."""
+        import os as _os
         self._session_ending = True
         # Stop timers
-        for timer_name in ("_queue_timer", "_progress_timer", "_keepalive_timer"):
+        for timer_name in ("_queue_timer", "_progress_timer", "_keepalive_timer", "_post_relaxation_timer"):
             timer = getattr(self, timer_name, None)
             if timer:
                 try:
@@ -1378,7 +1379,16 @@ class MainWindow(QMainWindow):
                 self.pipeline.shutdown()
         except Exception:
             pass
+        # Close exit waiting dialog
+        if self._exit_wait_dialog:
+            try:
+                self._exit_wait_dialog.close()
+            except Exception:
+                pass
+            self._exit_wait_dialog = None
         QApplication.quit()
+        # Hard fallback: torch/sounddevice/ollama threads may keep process alive
+        QTimer.singleShot(2000, lambda: _os._exit(0))
 
     def _show_exit_waiting_dialog(self, message="正在处理，请稍候...", force_quit_timeout=None):
         """Show a non-modal 'processing' dialog until quit/session-end finishes.
@@ -1697,15 +1707,12 @@ class MainWindow(QMainWindow):
                 if self._pending_quit:
                     # Exit program path — quit after report
                     self._pending_quit = False
-                    if self.tts_service:
-                        try:
-                            self.tts_service.cleanup()
-                        except Exception:
-                            pass
+                    logger.info("[ExitDebug] report done, queuing quit")
                     # Use processing_queue — the main thread's QTimer drains it.
                     self.processing_queue.put(("quit", None))
                 else:
                     # End session path — prepare for next subject, don't quit
+                    logger.info("[ExitDebug] report done, queuing session_finished")
                     self.processing_queue.put(("session_finished", None))
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()
