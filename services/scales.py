@@ -131,6 +131,46 @@ class ScaleManager:
     # Round by which every participant must have been offered at least one scale
     FORCE_SCALE_ROUND = 5
 
+    def recommend_scale_candidates(self, user_text: str,
+                                   administered: set = None) -> List[str]:
+        """Recommend one or more scales based on keyword analysis of user text.
+
+        Returns a list of scale names (e.g. ["PHQ-9", "GAD-7"]) that match
+        the user's language.  Empty list if no keywords match.
+        Unlike should_administer(), this does NOT force a scale by round count
+        or use emotion tracker — it's purely keyword-based.
+        """
+        if administered is None:
+            administered = set()
+
+        candidates = []
+        if not user_text:
+            return candidates
+
+        text_lower = user_text.lower()
+
+        depression_kw = ["难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭", "抑郁", "失眠", "睡不着", "疲倦", "没活力"]
+        anxiety_kw = ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁", "烦躁不安", "压力"]
+        trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓"]
+
+        if "PHQ-9" not in administered:
+            for kw in depression_kw:
+                if kw in text_lower:
+                    candidates.append("PHQ-9")
+                    break
+        if "GAD-7" not in administered:
+            for kw in anxiety_kw:
+                if kw in text_lower:
+                    candidates.append("GAD-7")
+                    break
+        if "PCL-5" not in administered:
+            for kw in trauma_kw:
+                if kw in text_lower:
+                    candidates.append("PCL-5")
+                    break
+
+        return candidates
+
     def should_administer(self, emotion_tracker=None,
                           report_service=None,
                           user_text=None,
