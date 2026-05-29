@@ -718,6 +718,36 @@ class MainWindow(QMainWindow):
 
     # ==================== Session Management ====================
 
+    def _prepare_next_subject(self):
+        """Clean up after session end — prepare for next subject without creating a new session.
+
+        Resets UI and in-memory state but does NOT call data_manager.start_new_session()
+        or report_service.start_session(). Those are deferred to _start_new_session()
+        which runs only when the next subject confirms their info.
+        """
+        self.chat_panel.clear_chat()
+        self.session_emotions = []
+        self._scale_tags = {}
+        self._session_ending = False
+        self._pending_quit = False
+        self._pipeline_busy = False
+        self._completion_status = None
+        self.current_user_id = None
+        self.user_info = {}
+        self.info_confirmed = False
+        self.control_panel.reset_form()
+        self.session_end_controller.reset()
+        if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
+            self.emotion_tracker.reset()
+        if hasattr(self, 'pipeline') and self.pipeline:
+            self.pipeline.reset_session()
+        if self.llm_service:
+            self.llm_service.reset_conversation(clear_context=True)
+        # Keep orchestrator in a terminal state (IDLE/SESSION_ENDED) so
+        # _on_exit_program() knows there is no active session.
+        if self.orchestrator.state not in (SessionState.IDLE, SessionState.SESSION_ENDED):
+            self.orchestrator.transition_to(SessionState.SESSION_ENDED)
+
     def _start_new_session(self):
         self.chat_panel.clear_chat()
         self.session_emotions = []
@@ -759,7 +789,7 @@ class MainWindow(QMainWindow):
             report_path=report_path, play_audio=play_audio
         )
         if dialog.exec():
-            self._start_new_session()
+            self._prepare_next_subject()
             self._play_opening_greeting()
 
     def _show_crisis_dialog(self, risk_data=None):
@@ -1132,6 +1162,16 @@ class MainWindow(QMainWindow):
             self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...", force_quit_timeout=120000)
             return
 
+        # No current subject — just quit immediately, no report needed.
+        no_current_subject = (
+            not self.info_confirmed
+            or not self.current_user_id
+            or self.orchestrator.state in (SessionState.IDLE, SessionState.SESSION_ENDED)
+        )
+        if no_current_subject:
+            self._force_quit_now()
+            return
+
         has_active_session = (
             self.models_loaded
             and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE)
@@ -1155,8 +1195,7 @@ class MainWindow(QMainWindow):
         if not self.models_loaded or self.orchestrator.state in (
             SessionState.SESSION_ENDED, SessionState.IDLE
         ):
-            self._start_new_session()
-            self.chat_panel.add_system_message("当前没有进行中的会话。请填写下一位被试信息。")
+            self.chat_panel.add_system_message("当前没有进行中的会话。请填写参与者信息后开始。")
             return
 
         state = self._get_end_readiness_state()
@@ -1271,13 +1310,7 @@ class MainWindow(QMainWindow):
         if self._exit_wait_dialog:
             self._exit_wait_dialog.close()
             self._exit_wait_dialog = None
-        self._session_ending = False
-        self.session_end_controller.reset()
-        self._start_new_session()
-        self.current_user_id = None
-        self.user_info = {}
-        self.info_confirmed = False
-        self.control_panel.reset_form()
+        self._prepare_next_subject()
         self.control_panel.set_buttons_enabled(True)
         self.chat_panel.add_system_message(
             '会话已结束。请填写下一位参与者信息，然后点击"确认信息并开始"。'
@@ -1551,7 +1584,8 @@ class MainWindow(QMainWindow):
                 report_ok = False
                 try:
                     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-                    with ThreadPoolExecutor(max_workers=1) as report_pool:
+                    report_pool = ThreadPoolExecutor(max_workers=1)
+                    try:
                         future = report_pool.submit(
                             self.report_service.generate_researcher_report,
                             conversation_history, user_id, end_type,
@@ -1559,6 +1593,8 @@ class MainWindow(QMainWindow):
                             self.session_emotions
                         )
                         researcher_report = future.result(timeout=60)
+                    finally:
+                        report_pool.shutdown(wait=False, cancel_futures=True)
 
                     if isinstance(researcher_report, dict):
                         relaxation_done = relax_str not in ("未进行", "", None, "未知")
@@ -1583,13 +1619,15 @@ class MainWindow(QMainWindow):
 
                     # PDF with timeout
                     try:
-                        from concurrent.futures import ThreadPoolExecutor as Pool2
-                        with Pool2(max_workers=1) as pdf_pool:
+                        pdf_pool = ThreadPoolExecutor(max_workers=1)
+                        try:
                             pdf_future = pdf_pool.submit(
                                 self._generate_and_save_pdf,
                                 researcher_report, user_id, end_type, save_result
                             )
                             pdf_future.result(timeout=30)
+                        finally:
+                            pdf_pool.shutdown(wait=False, cancel_futures=True)
                     except Exception as e:
                         logger.warning(f"PDF generation timed out or failed: {e}")
 

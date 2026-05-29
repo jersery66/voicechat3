@@ -58,9 +58,16 @@ class LLMService:
             self.model = model
         logger.info(f"[LLM] Using model: {self.model}")
         
-    def reset_conversation(self):
-        """Clear conversation history."""
+    def reset_conversation(self, clear_context: bool = False):
+        """Clear conversation history.
+
+        Args:
+            clear_context: If True, also clear the history_context (user profile
+                and past summaries). Use when switching to a new subject.
+        """
         self.conversation_history = []
+        if clear_context:
+            self.history_context = ""
         
     def set_system_prompt(self, prompt: str):
         """Set the system prompt."""
