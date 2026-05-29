@@ -376,25 +376,19 @@ class EndSessionDecisionDialog(BaseDialog):
         relax_done = self._state.get("relax_done", False)
         incomplete = self._state.get("incomplete_scales", [])
 
-        # Title & description based on state
+        # Title & description based on state (no clinical jargon exposed to participant)
         if scale_inc and not relax_done:
-            title_text = "还有任务未完成"
-            desc_lines = []
-            if incomplete:
-                names = [s["scale_name"] for s in incomplete]
-                desc_lines.append(f"量表未完成：{', '.join(names)}")
-            desc_lines.append("放松训练未进行")
-            desc_text = "当前" + "，".join(desc_lines) + "。\n你想怎么结束？"
+            title_text = "确定要结束吗？"
+            desc_text = "我们还没聊完，放松训练也还没做。\n你想怎么处理？"
         elif scale_inc and relax_done:
-            title_text = "量表尚未完成"
-            names = [s["scale_name"] for s in incomplete] if incomplete else []
-            desc_text = f"放松训练已完成，但量表 {', '.join(names)} 还有题目没问完。\n你想怎么结束？"
+            title_text = "确定要结束吗？"
+            desc_text = "放松训练做完了，不过我们还可以再聊聊。\n你想怎么处理？"
         elif not scale_inc and not relax_done:
-            title_text = "放松训练未完成"
-            desc_text = "量表问题已完成，但还没有做放松训练。\n结束前要做一个短放松吗？"
+            title_text = "确定要结束吗？"
+            desc_text = "聊天部分结束了，结束前做个短放松吧？"
         else:
-            title_text = "可以结束会话"
-            desc_text = "量表和放松训练都已完成，可以结束并生成报告。"
+            title_text = "会话结束"
+            desc_text = "今天的对话到这里，感谢你的参与。"
 
         title = QLabel(title_text)
         title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
@@ -417,7 +411,7 @@ class EndSessionDecisionDialog(BaseDialog):
         )
 
         if scale_inc:
-            btn_continue = QPushButton("继续聊聊并补问问题")
+            btn_continue = QPushButton("继续聊天")
             btn_continue.setStyleSheet("""
                 QPushButton {
                     background-color: #4CAF50; color: white;
@@ -442,7 +436,7 @@ class EndSessionDecisionDialog(BaseDialog):
             btn_relax.clicked.connect(self._on_relax)
             btn_layout.addWidget(btn_relax)
 
-        end_label = "结束并生成报告" if (not scale_inc and relax_done) else "直接结束并生成报告"
+        end_label = "结束会话"
         btn_end = QPushButton(end_label)
         btn_end.setStyleSheet("""
             QPushButton {

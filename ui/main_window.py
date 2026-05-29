@@ -1248,7 +1248,7 @@ class MainWindow(QMainWindow):
             }
         else:
             self._completion_status = {"ended_by_user": True}
-        self._show_exit_waiting_dialog("正在保存会话数据并生成报告，请稍候...")
+        self._show_exit_waiting_dialog("会话结束，感谢你的参与，请稍候...")
         self._handle_session_end(EndType.GOAL_ACHIEVED, allow_force_relaxation=False)
 
     def _end_session_with_relaxation(self):
@@ -1280,7 +1280,7 @@ class MainWindow(QMainWindow):
         self.control_panel.reset_form()
         self.control_panel.set_buttons_enabled(True)
         self.chat_panel.add_system_message(
-            '当前会话已结束，报告已保存。请填写下一位被试信息，然后点击"确认信息并开始"。'
+            '会话已结束。请填写下一位参与者信息，然后点击"确认信息并开始"。'
         )
 
     def _force_quit_now(self):
