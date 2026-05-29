@@ -168,7 +168,9 @@ class ConversationPipeline:
         self._administered_scales: set = set()
         self._scale_answers: Dict[str, Dict[int, int]] = {}  # {scale_name: {q_num: score}}
         self._active_scale: Optional[str] = None   # currently in-progress scale name
-        self._active_scale_q: int = 1              # next question number to ask
+        self._active_scale_q: int = 1              # current question number
+        self._active_scale_waiting_answer: bool = False  # True = asked, waiting for user reply
+        self._scale_queue: List[str] = []           # scales queued while one is active
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -189,6 +191,8 @@ class ConversationPipeline:
         self._scale_answers.clear()
         self._active_scale = None
         self._active_scale_q = 1
+        self._active_scale_waiting_answer = False
+        self._scale_queue.clear()
 
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
@@ -307,13 +311,18 @@ class ConversationPipeline:
         # Active scale takes priority — keep asking until completed
         if self._active_scale:
             active_prompt = self._build_active_scale_prompt(
-                self._active_scale, self._active_scale_q
+                self._active_scale, self._active_scale_q,
+                self._active_scale_waiting_answer
             )
             if active_prompt:
                 system_suffix += "\n" + active_prompt
-                logger.warning(f"[ScaleDebug] active scale {self._active_scale} Q{self._active_scale_q}")
-        else:
-            # No active scale — check if we should start one
+                logger.warning(f"[ScaleDebug] active scale {self._active_scale} "
+                               f"Q{self._active_scale_q} waiting={self._active_scale_waiting_answer}")
+            # Mark that we've asked the question — next turn is a user answer
+            if not self._active_scale_waiting_answer:
+                self._active_scale_waiting_answer = True
+
+            # Still detect other scales to queue them (don't discard)
             scale_context = ""
             if self.llm and hasattr(self.llm, 'conversation_history'):
                 recent_user = [
@@ -322,22 +331,53 @@ class ConversationPipeline:
                 ]
                 if recent_user:
                     scale_context = "\n".join(recent_user[-3:])
-            suggested_scale = scale_mgr.should_administer(
+            other_scale = scale_mgr.should_administer(
                 self.emotion_tracker, self.report,
                 user_text=result.user_text, administered=self._administered_scales,
                 agent_service=self.agent,
                 conversation_context=scale_context,
             )
-            logger.warning(f"[ScaleDebug] text={result.user_text!r}, context={scale_context!r}, "
-                           f"result={suggested_scale}, administered={self._administered_scales}")
-            if suggested_scale:
-                self._administered_scales.add(suggested_scale)
-                self._active_scale = suggested_scale
+            if other_scale and other_scale != self._active_scale and other_scale not in self._scale_queue:
+                self._scale_queue.append(other_scale)
+                logger.warning(f"[ScaleDebug] queued {other_scale} (active: {self._active_scale})")
+        else:
+            # No active scale — check queue first, then detect new
+            if self._scale_queue:
+                next_scale = self._scale_queue.pop(0)
+                self._administered_scales.add(next_scale)
+                self._active_scale = next_scale
                 self._active_scale_q = 1
-                active_prompt = self._build_active_scale_prompt(suggested_scale, 1)
+                self._active_scale_waiting_answer = False
+                active_prompt = self._build_active_scale_prompt(next_scale, 1, False)
                 if active_prompt:
                     system_suffix += "\n" + active_prompt
-                    logger.warning(f"[ScaleDebug] started {suggested_scale}, asking Q1")
+                    logger.warning(f"[ScaleDebug] started queued {next_scale}, asking Q1")
+            else:
+                scale_context = ""
+                if self.llm and hasattr(self.llm, 'conversation_history'):
+                    recent_user = [
+                        m["content"] for m in self.llm.conversation_history[-6:]
+                        if m.get("role") == "user"
+                    ]
+                    if recent_user:
+                        scale_context = "\n".join(recent_user[-3:])
+                suggested_scale = scale_mgr.should_administer(
+                    self.emotion_tracker, self.report,
+                    user_text=result.user_text, administered=self._administered_scales,
+                    agent_service=self.agent,
+                    conversation_context=scale_context,
+                )
+                logger.warning(f"[ScaleDebug] text={result.user_text!r}, context={scale_context!r}, "
+                               f"result={suggested_scale}, administered={self._administered_scales}")
+                if suggested_scale:
+                    self._administered_scales.add(suggested_scale)
+                    self._active_scale = suggested_scale
+                    self._active_scale_q = 1
+                    self._active_scale_waiting_answer = False
+                    active_prompt = self._build_active_scale_prompt(suggested_scale, 1, False)
+                    if active_prompt:
+                        system_suffix += "\n" + active_prompt
+                        logger.warning(f"[ScaleDebug] started {suggested_scale}, asking Q1")
 
         if self.emotion_tracker:
             hint = self.emotion_tracker.get_intervention_hint()
@@ -402,19 +442,37 @@ class ConversationPipeline:
             if scale_def:
                 total = len(scale_def["questions"])
                 answered = self._scale_answers.get(self._active_scale, {})
-                # Move to first unanswered question
-                next_q = None
-                for i in range(1, total + 1):
-                    if i not in answered:
-                        next_q = i
-                        break
-                if next_q is None:
-                    logger.warning(f"[ScaleDebug] completed scale {self._active_scale}: {answered}")
-                    self._active_scale = None
-                    self._active_scale_q = 1
+                current_q = self._active_scale_q
+
+                if current_q in answered:
+                    # Current question was scored successfully — advance
+                    next_q = None
+                    for i in range(1, total + 1):
+                        if i not in answered:
+                            next_q = i
+                            break
+                    if next_q is None:
+                        # Scale complete
+                        logger.warning(f"[ScaleDebug] completed scale {self._active_scale}: {answered}")
+                        self._active_scale = None
+                        self._active_scale_q = 1
+                        self._active_scale_waiting_answer = False
+                        # Start next queued scale if any
+                        if self._scale_queue:
+                            next_scale = self._scale_queue.pop(0)
+                            self._administered_scales.add(next_scale)
+                            self._active_scale = next_scale
+                            self._active_scale_q = 1
+                            self._active_scale_waiting_answer = False
+                            logger.warning(f"[ScaleDebug] starting queued {next_scale}")
+                    else:
+                        self._active_scale_q = next_q
+                        self._active_scale_waiting_answer = False  # need to ask next_q
+                        logger.warning(f"[ScaleDebug] active scale {self._active_scale}, next Q{self._active_scale_q}")
                 else:
-                    self._active_scale_q = next_q
-                    logger.warning(f"[ScaleDebug] active scale {self._active_scale}, next Q{self._active_scale_q}")
+                    # No score for current Q — LLM was clarifying or asking again
+                    self._active_scale_waiting_answer = True
+                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting")
 
         logger.info(
             f"[Pipeline] End type: {result.end_type} "
@@ -531,7 +589,8 @@ class ConversationPipeline:
         )
         return intent, emotion_result, crisis_result
 
-    def _build_active_scale_prompt(self, scale_name: str, q_num: int) -> str:
+    def _build_active_scale_prompt(self, scale_name: str, q_num: int,
+                                    waiting_answer: bool) -> str:
         """Build a prompt that tells the LLM exactly which scale question to ask/score."""
         from services.scales import SCALES
         scale = SCALES.get(scale_name)
@@ -547,22 +606,24 @@ class ConversationPipeline:
         next_q_num = q_num + 1
         next_q_text = scale["questions"][next_q_num - 1] if next_q_num <= total else None
 
-        # First question — just ask, no scoring yet
-        if q_num == 1 and scale_name not in self._scale_answers:
+        # Not yet asked — ask current question, no scoring
+        if not waiting_answer:
             return f"""
 【量表进行中 - {scale_name}】
-当前任务：启动量表并询问第 {q_num}/{total} 题。
+当前任务：询问第 {q_num}/{total} 题。
 本轮必须问这个问题，不能泛泛追问原因。
 
 题目：{q_text}
 评分标准：{options_text}
 
 回复要求：
-先简短共情一句，然后自然询问该题。
+先简短共情一句（不超过15字），然后自然询问该题。
 本轮用户还没有回答该题，所以不要输出 SCALE 标签。
+
+【优先级】如果本轮同时存在知识库提示，必须以量表任务为主。知识库内容只能作为一句简短支持或过渡，不能替代量表追问。
 """
 
-        # Middle questions — score previous answer, ask next
+        # Waiting for answer — score this turn
         if next_q_text:
             return f"""
 【量表进行中 - {scale_name}】
@@ -570,15 +631,16 @@ class ConversationPipeline:
 {q_text}
 
 用户本轮输入是对这道题的回答。
-请先根据用户回答评分，必须输出：
-[SCALE:{scale_name}:Q{q_num}:S分数]
 
-然后继续自然询问第 {next_q_num}/{total} 题：
-{next_q_text}
+评分规则：
+- 如果用户回答足够判断频率/程度，必须输出 [SCALE:{scale_name}:Q{q_num}:S分数]，然后继续询问第 {next_q_num}/{total} 题：{next_q_text}
+- 如果用户回答模糊（如"还好""差不多"），禁止猜测分数，不要输出 SCALE 标签。请围绕当前题追问一个澄清问题，例如"是偶尔几天，还是一半以上时间都这样？"
 
 评分标准：{options_text}
 
 禁止改问"发生了什么事""为什么这样"这类泛化问题。
+
+【优先级】如果本轮同时存在知识库提示，必须以量表任务为主。知识库内容只能作为一句简短支持或过渡，不能替代量表追问。
 """
         # Last question — score and wrap up
         return f"""
@@ -587,11 +649,14 @@ class ConversationPipeline:
 {q_text}
 
 用户本轮输入是对这道题的回答。
-请根据用户回答评分，必须输出：
-[SCALE:{scale_name}:Q{q_num}:S分数]
 
-评分后用一句自然的话收束量表，不要继续问新题。
+评分规则：
+- 如果用户回答足够判断，必须输出 [SCALE:{scale_name}:Q{q_num}:S分数]，然后用一句自然的话收束量表。
+- 如果用户回答模糊，禁止猜测分数。请追问一个澄清问题。
+
 评分标准：{options_text}
+
+【优先级】如果本轮同时存在知识库提示，必须以量表任务为主。知识库内容只能作为一句简短支持或过渡，不能替代量表追问。
 """
 
     def _build_system_suffix(self, text: str) -> str:
