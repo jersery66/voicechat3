@@ -17,17 +17,20 @@ class ChatInput(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText("输入消息，按 Enter 发送...")
-        self.setFixedHeight(60)
+        self.setFixedHeight(48)
         self.setStyleSheet("""
             QTextEdit {
-                background: rgba(255,255,255,0.85);
-                border: 1px solid #c4a96a;
-                border-radius: 8px;
-                padding: 6px 10px;
-                font-size: 12px;
-                color: #2c3e50;
+                background: rgba(255,255,255,0.92);
+                border: 1px solid rgba(120, 140, 120, 0.28);
+                border-radius: 14px;
+                padding: 8px 12px;
+                font-size: 13px;
+                color: #2F3A2F;
             }
-            QTextEdit:focus { border: 1px solid #8b7355; }
+            QTextEdit:focus {
+                border: 1px solid #7FA37C;
+                background: rgba(255,255,255,0.98);
+            }
         """)
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -46,10 +49,10 @@ class ChatPanel(FrostedPanel):
     text_submitted = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__(alpha=0.60, radius=16, parent=None)
+        super().__init__(alpha=0.82, radius=22, parent=None)
         self.setObjectName("chatPanel")
-        self.setFixedWidth(380)
-        self.setMaximumHeight(600)
+        self.setFixedWidth(420)
+        self.setMaximumHeight(680)
         self._messages = []
         self._current_streaming_bubble = None
         self._setup_ui()
@@ -146,14 +149,15 @@ class ChatPanel(FrostedPanel):
         input_layout.addWidget(self.text_input)
 
         self.btn_send = QPushButton("发送")
-        self.btn_send.setFixedSize(50, 60)
+        self.btn_send.setFixedSize(54, 48)
         self.btn_send.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50; color: white;
-                border: 1px solid #388E3C; border-radius: 8px;
-                font-size: 12px; font-weight: bold;
+                background-color: #5BA36A; color: white;
+                border: none; border-radius: 14px;
+                font-size: 13px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #388E3C; }
+            QPushButton:hover { background-color: #4B8F58; }
+            QPushButton:pressed { background-color: #3F7C4B; }
         """)
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self._on_send)
@@ -184,11 +188,13 @@ class ChatPanel(FrostedPanel):
         self.btn_end_session = QPushButton("结束会话")
         self.btn_end_session.setStyleSheet("""
             QPushButton {
-                background-color: #FF9800; color: white;
-                border: 1px solid #E65100; border-radius: 6px;
-                padding: 5px 10px; font-size: 11px; font-weight: bold;
+                background: rgba(255, 152, 0, 0.12);
+                color: #B45F00;
+                border: 1px solid rgba(255, 152, 0, 0.35);
+                border-radius: 10px;
+                padding: 6px 12px; font-size: 12px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #E65100; }
+            QPushButton:hover { background: rgba(255, 152, 0, 0.20); }
         """)
         self.btn_end_session.setCursor(Qt.PointingHandCursor)
         self.btn_end_session.clicked.connect(self.end_session_clicked.emit)
@@ -197,11 +203,13 @@ class ChatPanel(FrostedPanel):
         self.btn_exit = QPushButton("退出程序")
         self.btn_exit.setStyleSheet("""
             QPushButton {
-                background-color: #EF5350; color: white;
-                border: 1px solid #C62828; border-radius: 6px;
-                padding: 5px 10px; font-size: 11px; font-weight: bold;
+                background: rgba(239, 83, 80, 0.10);
+                color: #B23B38;
+                border: 1px solid rgba(239, 83, 80, 0.35);
+                border-radius: 10px;
+                padding: 6px 12px; font-size: 12px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #C62828; }
+            QPushButton:hover { background: rgba(239, 83, 80, 0.18); }
         """)
         self.btn_exit.setCursor(Qt.PointingHandCursor)
         self.btn_exit.clicked.connect(self.exit_clicked.emit)

@@ -131,6 +131,47 @@ class ScaleManager:
     # Round by which every participant must have been offered at least one scale
     FORCE_SCALE_ROUND = 2
 
+    # --- Keyword lists (shared by should_administer + recommend_scale_candidates) ---
+    DEPRESSION_KW = [
+        "难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭",
+        "抑郁", "失眠", "睡不着", "疲倦", "没活力", "心情不好",
+        "不开心", "难受", "痛苦", "消沉", "颓废", "沮丧", "郁闷",
+        "活着没意思", "不想活", "累", "没劲", "无聊", "空虚",
+        "感觉不好", "感觉很差", "状态不好", "情绪不好",
+    ]
+    ANXIETY_KW = [
+        "焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌",
+        "烦躁", "烦躁不安", "压力", "慌", "坐立不安", "心烦",
+        "睡不好", "做噩梦", "心跳快", "喘不过气",
+    ]
+    TRAUMA_KW = ["噩梦", "创伤", "应激", "闪回", "惊吓", "被打", "被欺负", "事故"]
+
+    def recommend_scale_candidates(self, user_text: str,
+                                    administered: set = None) -> List[str]:
+        """Return ALL matching scale names (not just one). Caller queues them."""
+        if not user_text:
+            return []
+        if administered is None:
+            administered = set()
+
+        text_lower = user_text.lower()
+        candidates = []
+
+        for kw in self.DEPRESSION_KW:
+            if kw in text_lower and "PHQ-9" not in administered:
+                candidates.append("PHQ-9")
+                break
+        for kw in self.ANXIETY_KW:
+            if kw in text_lower and "GAD-7" not in administered:
+                candidates.append("GAD-7")
+                break
+        for kw in self.TRAUMA_KW:
+            if kw in text_lower and "PCL-5" not in administered:
+                candidates.append("PCL-5")
+                break
+
+        return candidates
+
     def should_administer(self, emotion_tracker=None,
                           report_service=None,
                           user_text=None,
@@ -141,8 +182,7 @@ class ScaleManager:
         Determine if a scale should be administered based on session context.
         Returns scale name (e.g. "PHQ-9") or None.
 
-        Uses 3B agent model for intelligent judgment when available,
-        falls back to keyword matching.
+        Priority: keywords > agent model > emotion tracker > force fallback.
         """
         import logging
         _log = logging.getLogger(__name__)
@@ -160,48 +200,29 @@ class ScaleManager:
         _log.info(f"Scale check: rounds={rounds}, user_text={user_text!r}, "
                   f"agent={'yes' if agent_service else 'no'}, administered={administered}")
 
-        # Force a scale by round N if none administered yet
-        if rounds >= self.FORCE_SCALE_ROUND and not administered:
-            _log.info(f"Force PHQ-9: round {rounds} with no scales given")
-            return "PHQ-9"
-
         # Debug trigger
         if user_text and "量表测试" in user_text:
             _log.warning("DEBUG scale trigger: 量表测试 -> PHQ-9")
             return "PHQ-9"
 
-        # Keyword matching first (fast, reliable for obvious signals)
+        # 1. Keyword matching first (fast, reliable for obvious signals)
         if user_text:
             text_lower = user_text.lower()
-            depression_kw = [
-                "难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭",
-                "抑郁", "失眠", "睡不着", "疲倦", "没活力", "心情不好",
-                "不开心", "难受", "痛苦", "消沉", "颓废", "沮丧", "郁闷",
-                "活着没意思", "不想活", "累", "没劲", "无聊", "空虚",
-                "感觉不好", "感觉很差", "状态不好", "情绪不好",
-            ]
-            anxiety_kw = [
-                "焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌",
-                "烦躁", "烦躁不安", "压力", "慌", "坐立不安", "心烦",
-                "睡不好", "做噩梦", "心跳快", "喘不过气",
-            ]
-            trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓", "被打", "被欺负", "事故"]
-
-            for kw in depression_kw:
+            for kw in self.DEPRESSION_KW:
                 if kw in text_lower:
                     _log.info(f"Keyword match (depression): '{kw}' -> PHQ-9")
                     return "PHQ-9"
-            for kw in anxiety_kw:
+            for kw in self.ANXIETY_KW:
                 if kw in text_lower:
                     _log.info(f"Keyword match (anxiety): '{kw}' -> GAD-7")
                     return "GAD-7"
-            for kw in trauma_kw:
+            for kw in self.TRAUMA_KW:
                 if kw in text_lower:
                     _log.info(f"Keyword match (trauma): '{kw}' -> PCL-5")
                     return "PCL-5"
             _log.info(f"No keyword match for: {user_text!r}")
 
-        # Agent model for nuanced cases (keywords didn't match)
+        # 2. Agent model for nuanced cases (keywords didn't match)
         if user_text and agent_service and agent_service.is_available():
             _log.info("No keyword match, trying agent model...")
             agent_result = agent_service.recommend_scale(
@@ -211,6 +232,7 @@ class ScaleManager:
                 return agent_result
             _log.info("Agent also returned no recommendation")
 
+        # 3. Emotion tracker
         if emotion_tracker:
             data = emotion_tracker.get_emotion_data()
             dominant = data.get("dominant", "").lower()
@@ -224,12 +246,16 @@ class ScaleManager:
 
             trend = emotion_tracker.get_trend()
             if trend in ("worsening", "volatile"):
-                # Use dominant emotion to pick the right scale instead of always PHQ-9
                 if dominant in ("anxious", "stressed", "nervous"):
                     return "GAD-7"
                 if dominant in ("fearful", "traumatized"):
                     return "PCL-5"
                 return "PHQ-9"
+
+        # 4. Force PHQ-9 fallback — only if no keywords/agent/emotion matched
+        if rounds >= self.FORCE_SCALE_ROUND and not administered:
+            _log.info(f"Force PHQ-9: round {rounds} with no scales given")
+            return "PHQ-9"
 
         return None
 

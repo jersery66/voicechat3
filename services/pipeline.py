@@ -323,23 +323,16 @@ class ConversationPipeline:
                 self._active_scale_waiting_answer = True
 
             # Still detect other scales to queue them (don't discard)
-            scale_context = ""
-            if self.llm and hasattr(self.llm, 'conversation_history'):
-                recent_user = [
-                    m["content"] for m in self.llm.conversation_history[-6:]
-                    if m.get("role") == "user"
-                ]
-                if recent_user:
-                    scale_context = "\n".join(recent_user[-3:])
-            other_scale = scale_mgr.should_administer(
-                self.emotion_tracker, self.report,
-                user_text=result.user_text, administered=self._administered_scales,
-                agent_service=self.agent,
-                conversation_context=scale_context,
+            candidates = scale_mgr.recommend_scale_candidates(
+                result.user_text, administered=self._administered_scales
             )
-            if other_scale and other_scale != self._active_scale and other_scale not in self._scale_queue:
-                self._scale_queue.append(other_scale)
-                logger.warning(f"[ScaleDebug] queued {other_scale} (active: {self._active_scale})")
+            for c in candidates:
+                if c != self._active_scale and c not in self._scale_queue:
+                    self._scale_queue.append(c)
+                    logger.warning(f"[ScaleDebug] queued {c} (active: {self._active_scale})")
+            if candidates:
+                logger.warning(f"[ScaleDebug] candidates={candidates}, "
+                               f"active={self._active_scale}, queue={self._scale_queue}")
         else:
             # No active scale — check queue first, then detect new
             if self._scale_queue:
@@ -353,31 +346,47 @@ class ConversationPipeline:
                     system_suffix += "\n" + active_prompt
                     logger.warning(f"[ScaleDebug] started queued {next_scale}, asking Q1")
             else:
-                scale_context = ""
-                if self.llm and hasattr(self.llm, 'conversation_history'):
-                    recent_user = [
-                        m["content"] for m in self.llm.conversation_history[-6:]
-                        if m.get("role") == "user"
-                    ]
-                    if recent_user:
-                        scale_context = "\n".join(recent_user[-3:])
-                suggested_scale = scale_mgr.should_administer(
-                    self.emotion_tracker, self.report,
-                    user_text=result.user_text, administered=self._administered_scales,
-                    agent_service=self.agent,
-                    conversation_context=scale_context,
+                # Use candidates for multi-scale detection
+                candidates = scale_mgr.recommend_scale_candidates(
+                    result.user_text, administered=self._administered_scales
                 )
-                logger.warning(f"[ScaleDebug] text={result.user_text!r}, context={scale_context!r}, "
-                               f"result={suggested_scale}, administered={self._administered_scales}")
-                if suggested_scale:
-                    self._administered_scales.add(suggested_scale)
-                    self._active_scale = suggested_scale
+                # Also check should_administer for agent/emotion fallback
+                if not candidates:
+                    scale_context = ""
+                    if self.llm and hasattr(self.llm, 'conversation_history'):
+                        recent_user = [
+                            m["content"] for m in self.llm.conversation_history[-6:]
+                            if m.get("role") == "user"
+                        ]
+                        if recent_user:
+                            scale_context = "\n".join(recent_user[-3:])
+                    single = scale_mgr.should_administer(
+                        self.emotion_tracker, self.report,
+                        user_text=result.user_text, administered=self._administered_scales,
+                        agent_service=self.agent,
+                        conversation_context=scale_context,
+                    )
+                    if single:
+                        candidates = [single]
+
+                logger.warning(f"[ScaleDebug] text={result.user_text!r}, "
+                               f"candidates={candidates}, administered={self._administered_scales}")
+                if candidates:
+                    first = candidates[0]
+                    self._administered_scales.add(first)
+                    self._active_scale = first
                     self._active_scale_q = 1
                     self._active_scale_waiting_answer = False
-                    active_prompt = self._build_active_scale_prompt(suggested_scale, 1, False)
+                    # Queue the rest
+                    for c in candidates[1:]:
+                        if c not in self._administered_scales:
+                            self._administered_scales.add(c)
+                            self._scale_queue.append(c)
+                    active_prompt = self._build_active_scale_prompt(first, 1, False)
                     if active_prompt:
                         system_suffix += "\n" + active_prompt
-                        logger.warning(f"[ScaleDebug] started {suggested_scale}, asking Q1")
+                        logger.warning(f"[ScaleDebug] started {first}, "
+                                       f"queued={self._scale_queue}")
 
         if self.emotion_tracker:
             hint = self.emotion_tracker.get_intervention_hint()

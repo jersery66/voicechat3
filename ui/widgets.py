@@ -304,7 +304,7 @@ class MessageBubble(QFrame):
         self.text_label = QLabel(self._full_text)
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.text_label.setFont(QFont("Microsoft YaHei", 11))
+        self.text_label.setFont(QFont("Microsoft YaHei", 10))
 
         dark = self._dark_mode
         if self._is_system:
@@ -318,8 +318,8 @@ class MessageBubble(QFrame):
             layout.setAlignment(Qt.AlignCenter)
         elif self._is_user:
             self.setStyleSheet(f"""
-                background-color: {'#2d5a27' if dark else '#DCF8C6'};
-                border-radius: 12px 12px 4px 12px;
+                background-color: {'#2d5a27' if dark else '#E7F2E6'};
+                border-radius: 16px 16px 6px 16px;
             """)
             self.text_label.setAlignment(Qt.AlignRight)
             self.text_label.setStyleSheet(f"""
@@ -329,9 +329,9 @@ class MessageBubble(QFrame):
             """)
         else:
             self.setStyleSheet(f"""
-                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.95)'};
-                border: 1px solid {'#3a3a5c' if dark else '#e0e0e0'};
-                border-radius: 12px 12px 12px 4px;
+                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.92)'};
+                border: 1px solid {'#3a3a5c' if dark else 'rgba(120, 120, 120, 0.12)'};
+                border-radius: 16px 16px 16px 6px;
             """)
             self.text_label.setAlignment(Qt.AlignLeft)
             self.text_label.setStyleSheet(f"""
