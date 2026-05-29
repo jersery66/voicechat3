@@ -73,10 +73,10 @@ SCALES: Dict[str, Dict[str, Any]] = {
             {"label": "极度严重", "score": 4},
         ],
         "questions": [
-            "反复、不自主地回忆 stressful 的事件",
-            "反复做与 stressful 事件有关的噩梦",
-            "尽量避免回忆或谈论 stressful 的事件",
-            "尽量避免与 stressful 事件有关的外部提示（人、地点、活动等）",
+            "反复、不自主地回忆那件压力很大的事",
+            "反复做与那件事有关的噩梦",
+            "尽量避免回忆或谈论那件事",
+            "尽量避免与那件事有关的外部提示（人、地点、活动等）",
             '对自己、他人或世界有强烈的负面信念（如“我很坏”、“世界很危险”）',
             "持续地责备自己或他人",
             "过度警觉或易受惊吓",
@@ -129,64 +129,23 @@ class ScaleManager:
         }
 
     # Round by which every participant must have been offered at least one scale
-    FORCE_SCALE_ROUND = 2
-
-    # --- Keyword lists (shared by should_administer + recommend_scale_candidates) ---
-    DEPRESSION_KW = [
-        "难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭",
-        "抑郁", "失眠", "睡不着", "疲倦", "没活力", "心情不好",
-        "不开心", "难受", "痛苦", "消沉", "颓废", "沮丧", "郁闷",
-        "活着没意思", "不想活", "累", "没劲", "无聊", "空虚",
-        "感觉不好", "感觉很差", "状态不好", "情绪不好",
-    ]
-    ANXIETY_KW = [
-        "焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌",
-        "烦躁", "烦躁不安", "压力", "慌", "坐立不安", "心烦",
-        "睡不好", "做噩梦", "心跳快", "喘不过气",
-    ]
-    TRAUMA_KW = ["噩梦", "创伤", "应激", "闪回", "惊吓", "被打", "被欺负", "事故"]
-
-    def recommend_scale_candidates(self, user_text: str,
-                                    administered: set = None) -> List[str]:
-        """Return ALL matching scale names (not just one). Caller queues them."""
-        if not user_text:
-            return []
-        if administered is None:
-            administered = set()
-
-        text_lower = user_text.lower()
-        candidates = []
-
-        for kw in self.DEPRESSION_KW:
-            if kw in text_lower and "PHQ-9" not in administered:
-                candidates.append("PHQ-9")
-                break
-        for kw in self.ANXIETY_KW:
-            if kw in text_lower and "GAD-7" not in administered:
-                candidates.append("GAD-7")
-                break
-        for kw in self.TRAUMA_KW:
-            if kw in text_lower and "PCL-5" not in administered:
-                candidates.append("PCL-5")
-                break
-
-        return candidates
+    FORCE_SCALE_ROUND = 5
 
     def should_administer(self, emotion_tracker=None,
                           report_service=None,
                           user_text=None,
-                          administered: set = None,
-                          agent_service=None,
-                          conversation_context: str = "") -> Optional[str]:
+                          administered: set = None) -> Optional[str]:
         """
         Determine if a scale should be administered based on session context.
         Returns scale name (e.g. "PHQ-9") or None.
 
-        Priority: keywords > agent model > emotion tracker > force fallback.
+        Trigger conditions (relaxed):
+        - After 1 round of conversation
+        - User text contains negative emotion keywords
+        - Emotion tracker detects negative dominant emotion
+        - Emotion trend worsening/volatile
+        - Force PHQ-9 by round 5 if no scale has been given yet
         """
-        import logging
-        _log = logging.getLogger(__name__)
-
         if administered is None:
             administered = set()
 
@@ -194,45 +153,27 @@ class ScaleManager:
         if report_service:
             rounds = report_service.get_round_count()
             if rounds < 1:
-                _log.debug(f"Scale check skipped: rounds={rounds} < 1")
                 return None
 
-        _log.info(f"Scale check: rounds={rounds}, user_text={user_text!r}, "
-                  f"agent={'yes' if agent_service else 'no'}, administered={administered}")
-
-        # Debug trigger
-        if user_text and "量表测试" in user_text:
-            _log.warning("DEBUG scale trigger: 量表测试 -> PHQ-9")
+        # Force a scale by round 5 if none administered yet
+        if rounds >= self.FORCE_SCALE_ROUND and not administered:
             return "PHQ-9"
 
-        # 1. Keyword matching first (fast, reliable for obvious signals)
         if user_text:
-            text_lower = user_text.lower()
-            for kw in self.DEPRESSION_KW:
-                if kw in text_lower:
-                    _log.info(f"Keyword match (depression): '{kw}' -> PHQ-9")
+            depression_kw = ["难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭", "抑郁", "失眠", "睡不着", "疲倦", "没活力"]
+            anxiety_kw = ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁", "烦躁不安", "压力"]
+            trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓"]
+
+            for kw in depression_kw:
+                if kw in user_text.lower():
                     return "PHQ-9"
-            for kw in self.ANXIETY_KW:
-                if kw in text_lower:
-                    _log.info(f"Keyword match (anxiety): '{kw}' -> GAD-7")
+            for kw in anxiety_kw:
+                if kw in user_text.lower():
                     return "GAD-7"
-            for kw in self.TRAUMA_KW:
-                if kw in text_lower:
-                    _log.info(f"Keyword match (trauma): '{kw}' -> PCL-5")
+            for kw in trauma_kw:
+                if kw in user_text.lower():
                     return "PCL-5"
-            _log.info(f"No keyword match for: {user_text!r}")
 
-        # 2. Agent model for nuanced cases (keywords didn't match)
-        if user_text and agent_service and agent_service.is_available():
-            _log.info("No keyword match, trying agent model...")
-            agent_result = agent_service.recommend_scale(
-                user_text, context=conversation_context)
-            if agent_result:
-                _log.info(f"Agent recommended: {agent_result}")
-                return agent_result
-            _log.info("Agent also returned no recommendation")
-
-        # 3. Emotion tracker
         if emotion_tracker:
             data = emotion_tracker.get_emotion_data()
             dominant = data.get("dominant", "").lower()
@@ -246,21 +187,17 @@ class ScaleManager:
 
             trend = emotion_tracker.get_trend()
             if trend in ("worsening", "volatile"):
+                # Use dominant emotion to pick the right scale instead of always PHQ-9
                 if dominant in ("anxious", "stressed", "nervous"):
                     return "GAD-7"
                 if dominant in ("fearful", "traumatized"):
                     return "PCL-5"
                 return "PHQ-9"
 
-        # 4. Force PHQ-9 fallback — only if no keywords/agent/emotion matched
-        if rounds >= self.FORCE_SCALE_ROUND and not administered:
-            _log.info(f"Force PHQ-9: round {rounds} with no scales given")
-            return "PHQ-9"
-
         return None
 
     def get_scale_guidance_for_prompt(self, scale_name: str) -> str:
-        """Generate a forceful prompt that makes the LLM administer a scale THIS turn."""
+        """Generate a natural-language prompt for the LLM to administer a scale."""
         scale = SCALES.get(scale_name)
         if not scale:
             return ""
@@ -273,26 +210,17 @@ class ScaleManager:
         )
 
         return f"""【量表评估 - {scale['name']}】
-
-【本轮强制任务】
-你已经决定启动该量表。当前这一轮必须执行量表追问，不能只做普通共情或开放式追问。
-回复结构：先简短反映用户情绪一句（不超过15字），然后立刻询问量表第1题。
-禁止继续泛泛询问"发生了什么事""具体什么事情""为什么不开心"。
-
-【提问要求】
-每次只问1题，优先从Q1开始。问题必须自然口语化，但语义必须对应量表原题。
+请在接下来的对话中自然地询问以下问题。不要一次性抛出所有题目，每次只问1-2题，像平常聊天一样穿插在对话中。
 评分标准：{options_text}
 题目：
 {questions_text}
 
-【记录规则】
-用户回答了某题后，将答案映射为0-{len(scale['options'])-1}的分数。
-必须以 [SCALE:{scale_name}:Q题号:S分数] 格式嵌入回复末尾。
-本轮只是提问、用户尚未回答，则不要输出SCALE标签。
+询问方式示例：
+- "最近两周，你有没有觉得做什么事都提不起劲？是完全没有，还是有那么几天？"
+- "睡眠方面怎么样？入睡困难吗？"
 
-【示例】
-用户说"我不开心好久了"：
-|||这阵子一直不开心，确实挺耗人。[breath]我先问一个简单的，最近两周，你做事还有没有兴趣？"""
+记录规则：将用户的回答映射为0-{len(scale['options'])-1}的分数，以 [SCALE:{scale_name}:Q题号:S分数] 格式嵌入口语回复的末尾。
+例如：用户回答了第1题的答案为"好几天"，则在你的回复末尾加上 [SCALE:PHQ-9:Q1:S1]"""
 
 
 # Singleton
