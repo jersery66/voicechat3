@@ -352,6 +352,35 @@ class ContinueOrEndDialog(BaseDialog):
         layout.addLayout(btn_layout)
 
 
+class WarningDialog(BaseDialog):
+    """Simple warning/info dialog."""
+
+    def __init__(self, parent=None, title="提示", message=""):
+        super().__init__(parent, title)
+        self.setMinimumSize(350, 150)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        msg = QLabel(message)
+        msg.setWordWrap(True)
+        msg.setStyleSheet("color: #2c3e50; font-size: 12px;")
+        layout.addWidget(msg)
+
+        layout.addStretch()
+
+        btn = QPushButton("确定")
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50; color: white;
+                border: 1px solid #388E3C; font-weight: bold;
+                padding: 6px 20px;
+            }
+            QPushButton:hover { background-color: #388E3C; }
+        """)
+        btn.clicked.connect(self.accept)
+        layout.addWidget(btn, alignment=Qt.AlignCenter)
+
+
 class EndSessionDecisionDialog(BaseDialog):
     """End-session dialog that adapts options based on scale/relaxation completion."""
 
@@ -374,7 +403,6 @@ class EndSessionDecisionDialog(BaseDialog):
 
         scale_inc = self._state.get("scale_incomplete", False)
         relax_done = self._state.get("relax_done", False)
-        incomplete = self._state.get("incomplete_scales", [])
 
         # Title & description based on state (no clinical jargon exposed to participant)
         if scale_inc and not relax_done:
@@ -436,8 +464,7 @@ class EndSessionDecisionDialog(BaseDialog):
             btn_relax.clicked.connect(self._on_relax)
             btn_layout.addWidget(btn_relax)
 
-        end_label = "结束会话"
-        btn_end = QPushButton(end_label)
+        btn_end = QPushButton("结束会话")
         btn_end.setStyleSheet("""
             QPushButton {
                 background-color: #FF9800; color: white;
@@ -477,34 +504,5 @@ class EndSessionDecisionDialog(BaseDialog):
 
     def _on_cancel(self):
         self.cancel_chosen.emit()
-        self.reject()
-
-
-class WarningDialog(BaseDialog):
-    """Simple warning/info dialog."""
-
-    def __init__(self, parent=None, title="提示", message=""):
-        super().__init__(parent, title)
-        self.setMinimumSize(350, 150)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        msg = QLabel(message)
-        msg.setWordWrap(True)
-        msg.setStyleSheet("color: #2c3e50; font-size: 12px;")
-        layout.addWidget(msg)
-
-        layout.addStretch()
-
-        btn = QPushButton("确定")
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50; color: white;
-                border: 1px solid #388E3C; font-weight: bold;
-                padding: 6px 20px;
-            }
-            QPushButton:hover { background-color: #388E3C; }
-        """)
-        btn.clicked.connect(self.accept)
-        layout.addWidget(btn, alignment=Qt.AlignCenter)
+        self.accept()
 
