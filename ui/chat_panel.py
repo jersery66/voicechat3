@@ -17,20 +17,17 @@ class ChatInput(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText("输入消息，按 Enter 发送...")
-        self.setFixedHeight(48)
+        self.setFixedHeight(60)
         self.setStyleSheet("""
             QTextEdit {
-                background: rgba(255,255,255,0.92);
-                border: 1px solid rgba(120, 140, 120, 0.28);
-                border-radius: 14px;
-                padding: 8px 12px;
-                font-size: 13px;
-                color: #2F3A2F;
+                background: rgba(255,255,255,0.85);
+                border: 1px solid #c4a96a;
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-size: 12px;
+                color: #2c3e50;
             }
-            QTextEdit:focus {
-                border: 1px solid #7FA37C;
-                background: rgba(255,255,255,0.98);
-            }
+            QTextEdit:focus { border: 1px solid #8b7355; }
         """)
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -49,10 +46,10 @@ class ChatPanel(FrostedPanel):
     text_submitted = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__(alpha=0.82, radius=22, parent=None)
+        super().__init__(alpha=0.60, radius=16, parent=None)
         self.setObjectName("chatPanel")
-        self.setFixedWidth(420)
-        self.setMaximumHeight(680)
+        self.setFixedWidth(380)
+        self.setMaximumHeight(600)
         self._messages = []
         self._current_streaming_bubble = None
         self._setup_ui()
@@ -149,15 +146,14 @@ class ChatPanel(FrostedPanel):
         input_layout.addWidget(self.text_input)
 
         self.btn_send = QPushButton("发送")
-        self.btn_send.setFixedSize(54, 48)
+        self.btn_send.setFixedSize(50, 60)
         self.btn_send.setStyleSheet("""
             QPushButton {
-                background-color: #5BA36A; color: white;
-                border: none; border-radius: 14px;
-                font-size: 13px; font-weight: 600;
+                background-color: #4CAF50; color: white;
+                border: 1px solid #388E3C; border-radius: 8px;
+                font-size: 12px; font-weight: bold;
             }
-            QPushButton:hover { background-color: #4B8F58; }
-            QPushButton:pressed { background-color: #3F7C4B; }
+            QPushButton:hover { background-color: #388E3C; }
         """)
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self._on_send)
@@ -188,28 +184,24 @@ class ChatPanel(FrostedPanel):
         self.btn_end_session = QPushButton("结束会话")
         self.btn_end_session.setStyleSheet("""
             QPushButton {
-                background: rgba(255, 152, 0, 0.12);
-                color: #B45F00;
-                border: 1px solid rgba(255, 152, 0, 0.35);
-                border-radius: 10px;
-                padding: 6px 12px; font-size: 12px; font-weight: 600;
+                background-color: #FF9800; color: white;
+                border: 1px solid #F57C00; border-radius: 6px;
+                padding: 5px 10px; font-size: 11px; font-weight: bold;
             }
-            QPushButton:hover { background: rgba(255, 152, 0, 0.20); }
+            QPushButton:hover { background-color: #F57C00; }
         """)
         self.btn_end_session.setCursor(Qt.PointingHandCursor)
         self.btn_end_session.clicked.connect(self.end_session_clicked.emit)
         btn_layout.addWidget(self.btn_end_session)
 
-        self.btn_exit = QPushButton("退出程序")
+        self.btn_exit = QPushButton("退出")
         self.btn_exit.setStyleSheet("""
             QPushButton {
-                background: rgba(239, 83, 80, 0.10);
-                color: #B23B38;
-                border: 1px solid rgba(239, 83, 80, 0.35);
-                border-radius: 10px;
-                padding: 6px 12px; font-size: 12px; font-weight: 600;
+                background-color: #EF5350; color: white;
+                border: 1px solid #C62828; border-radius: 6px;
+                padding: 5px 10px; font-size: 11px; font-weight: bold;
             }
-            QPushButton:hover { background: rgba(239, 83, 80, 0.18); }
+            QPushButton:hover { background-color: #C62828; }
         """)
         self.btn_exit.setCursor(Qt.PointingHandCursor)
         self.btn_exit.clicked.connect(self.exit_clicked.emit)
@@ -264,30 +256,9 @@ class ChatPanel(FrostedPanel):
         self.status_indicator.set_state(status)
 
     def _add_bubble(self, bubble):
-        """Insert bubble before the stretch, with alignment and adaptive width."""
-        # Max width = 78% of chat panel width
-        max_w = int(self.width() * 0.78) if self.width() > 300 else 310
-        bubble.setMaximumWidth(max_w)
-        # Let bubble expand to fill available space (up to max_w)
-        bubble.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Minimum)
-
+        """Insert bubble before the stretch."""
         count = self._msg_layout.count()
-        # Wrap in an HBoxLayout for alignment (user right, AI left)
-        wrapper = QHBoxLayout()
-        wrapper.setContentsMargins(0, 0, 0, 0)
-        if bubble._is_user:
-            wrapper.addStretch()
-            wrapper.addWidget(bubble, 1)  # stretch factor lets bubble grow
-        else:
-            wrapper.addWidget(bubble, 1)
-            wrapper.addStretch()
-
-        wrapper_widget = QWidget()
-        wrapper_widget.setStyleSheet("background: transparent;")
-        wrapper_widget.setLayout(wrapper)
-        # Store wrapper reference on bubble for cleanup in clear_chat
-        bubble._wrapper_widget = wrapper_widget
-        self._msg_layout.insertWidget(count - 1, wrapper_widget)
+        self._msg_layout.insertWidget(count - 1, bubble)
         self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
@@ -310,13 +281,10 @@ class ChatPanel(FrostedPanel):
         self.clear_clicked.emit()
 
     def clear_chat(self):
-        """Remove all message bubbles and their wrappers."""
+        """Remove all message bubbles."""
         for msg in self._messages:
             bubble = msg.get("bubble")
             if bubble:
-                wrapper = getattr(bubble, "_wrapper_widget", None)
-                if wrapper:
-                    wrapper.deleteLater()
                 bubble.deleteLater()
         self._messages.clear()
         self._current_streaming_bubble = None
