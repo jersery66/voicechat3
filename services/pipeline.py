@@ -58,6 +58,39 @@ def parse_scale_tags(text: str) -> Dict[str, Dict[int, int]]:
     return results
 
 
+def infer_scale_score_from_text(text: str, scale_name: str) -> Optional[int]:
+    """Fallback: infer a scale score from the user's plain-text answer.
+
+    Used when the LLM fails to output a [SCALE:...] tag.  Returns None if
+    the text doesn't match any known option pattern.
+    """
+    t = text.strip()
+
+    if scale_name in ("PHQ-9", "GAD-7"):
+        if any(x in t for x in ["完全不会", "没有", "不会"]):
+            return 0
+        if any(x in t for x in ["好几天", "几天", "偶尔"]):
+            return 1
+        if any(x in t for x in ["一半以上", "大多数", "超过一半"]):
+            return 2
+        if any(x in t for x in ["几乎每天", "每天", "天天"]):
+            return 3
+
+    if scale_name == "PCL-5":
+        if any(x in t for x in ["完全没有", "没有"]):
+            return 0
+        if "有一点" in t:
+            return 1
+        if any(x in t for x in ["中等程度", "中等"]):
+            return 2
+        if "相当严重" in t:
+            return 3
+        if any(x in t for x in ["极度严重", "非常严重"]):
+            return 4
+
+    return None
+
+
 def detect_tag(text: str, patterns: dict) -> Optional[str]:
     """Find the first matching tag in text. Returns string name or None.
 
@@ -231,6 +264,61 @@ class ConversationPipeline:
                     "remaining_nums": remaining_nums,
                 })
         return incomplete
+
+    def get_scale_results(self) -> Dict[str, Any]:
+        """Return structured scale scores for report and persistence.
+
+        Each scale entry contains:
+          scale_name, completed, answered, total_items, total_score,
+          max_score, severity, items[{q_num, question, score, label, answered}]
+        """
+        from services.scales import SCALES, get_scale_manager
+        mgr = get_scale_manager()
+        results: Dict[str, Any] = {}
+
+        for scale_name in self._administered_scales:
+            scale_def = SCALES.get(scale_name)
+            if not scale_def:
+                continue
+
+            answers = self._scale_answers.get(scale_name, {})
+            total_items = len(scale_def["questions"])
+            completed = len(answers) == total_items
+
+            ordered_scores = [
+                answers[i] for i in range(1, total_items + 1) if i in answers
+            ]
+            score_summary = mgr.score_scale(scale_name, ordered_scores)
+
+            items = []
+            for i, question in enumerate(scale_def["questions"], start=1):
+                score = answers.get(i)
+                label = None
+                if score is not None:
+                    for opt in scale_def["options"]:
+                        if opt["score"] == score:
+                            label = opt["label"]
+                            break
+                items.append({
+                    "q_num": i,
+                    "question": question,
+                    "score": score,
+                    "label": label,
+                    "answered": score is not None,
+                })
+
+            results[scale_name] = {
+                "scale_name": scale_def["name"],
+                "completed": completed,
+                "answered": len(answers),
+                "total_items": total_items,
+                "total_score": score_summary["total"],
+                "max_score": score_summary["max_score"],
+                "severity": score_summary["severity"],
+                "items": items,
+            }
+
+        return results
 
     def get_remaining_scale_prompt(self) -> Optional[str]:
         """Generate a prompt for the LLM to ask remaining scale questions."""
@@ -527,6 +615,20 @@ class ConversationPipeline:
             if scale_name not in self._scale_answers:
                 self._scale_answers[scale_name] = {}
             self._scale_answers[scale_name].update(answers)
+
+        # Fallback: if LLM didn't output a [SCALE:...] tag for the current
+        # question, try to infer the score from the user's plain text answer.
+        # This handles cases where the LLM forgets the tag or formats it wrong.
+        if self._active_scale and self._active_scale_waiting_answer:
+            answered = self._scale_answers.get(self._active_scale, {})
+            if self._active_scale_q not in answered:
+                inferred = infer_scale_score_from_text(result.user_text, self._active_scale)
+                if inferred is not None:
+                    self._scale_answers.setdefault(self._active_scale, {})[self._active_scale_q] = inferred
+                    logger.warning(
+                        f"[ScaleDebug] inferred score {self._active_scale} "
+                        f"Q{self._active_scale_q} = {inferred} from user_text: {result.user_text!r}"
+                    )
 
         # Advance active scale after scoring
         if self._active_scale:

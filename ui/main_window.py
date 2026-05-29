@@ -380,7 +380,11 @@ class MainWindow(QMainWindow):
                 config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data, extra_system_suffix=extra)
 
             result = self.pipeline.execute(config, lambda mt, ct: self.processing_queue.put((mt, ct)))
-            self._scale_tags = result.scale_tags
+            # Cumulate scale tags — don't overwrite previous rounds' scores
+            if result.scale_tags:
+                for scale_name, answers in result.scale_tags.items():
+                    self._scale_tags.setdefault(scale_name, {})
+                    self._scale_tags[scale_name].update(answers)
             self._post_pipeline_routing(result)
 
         except Exception as e:
@@ -1579,6 +1583,14 @@ class MainWindow(QMainWindow):
 
                 self.processing_queue.put(("status", "正在生成报告..."))
 
+                # Gather structured scale results for the report
+                scale_results = {}
+                if self.pipeline and hasattr(self.pipeline, "get_scale_results"):
+                    try:
+                        scale_results = self.pipeline.get_scale_results()
+                    except Exception as e:
+                        logger.warning(f"Failed to get scale results: {e}")
+
                 # Generate report with timeout
                 researcher_report = None
                 report_ok = False
@@ -1590,7 +1602,7 @@ class MainWindow(QMainWindow):
                             self.report_service.generate_researcher_report,
                             conversation_history, user_id, end_type,
                             current_user_info, relaxation_rec or relax_str,
-                            self.session_emotions
+                            self.session_emotions, scale_results
                         )
                         researcher_report = future.result(timeout=60)
                     finally:
@@ -1602,6 +1614,8 @@ class MainWindow(QMainWindow):
                         researcher_report["relaxation_type"] = relax_str if relaxation_done else "未进行"
                         if self.emotion_tracker:
                             researcher_report["emotion_tracker_data"] = self.emotion_tracker.get_session_emotion_data()
+                        if scale_results:
+                            researcher_report["scale_results"] = scale_results
                     if isinstance(researcher_report, dict) and hasattr(self.report_service, 'activity_log'):
                         researcher_report["activity_log"] = self.report_service.activity_log
                     # Attach completion_status if user ended with incomplete scales/relaxation

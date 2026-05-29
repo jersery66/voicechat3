@@ -217,10 +217,11 @@ class ReportService:
                                    end_type: EndType,
                                    user_info: Optional[Dict[str, Any]] = None,
                                    relaxation_info: str = "未进行",
-                                   session_emotions: Optional[List[Dict]] = None) -> Dict[str, Any]:
+                                   session_emotions: Optional[List[Dict]] = None,
+                                   scale_results: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Generate researcher report (JSON format).
-        
+
         Args:
             conversation_history: List of message dicts with 'role' and 'content'
             subject_id: Subject/participant ID
@@ -228,6 +229,7 @@ class ReportService:
             user_info: Optional dictionary containing user demographics
             relaxation_info: Description of completed relaxation training
             session_emotions: Accumulated emotion detection results from 3B agent
+            scale_results: Structured scale scores from pipeline.get_scale_results()
 
         Returns:
             Structured report dict
@@ -253,6 +255,15 @@ class ReportService:
             relaxation_info=relaxation_info if relaxation_info != "未进行" else (self.completed_relaxation or "未进行"),
             emotion_summary=emotion_summary
         )
+
+        # Inject structured scale results so the LLM can reference exact scores
+        if scale_results:
+            import json as _json
+            scale_section = _json.dumps(scale_results, ensure_ascii=False, indent=2)
+            prompt += (
+                f"\n\n【结构化量表结果（来自系统评分，必须原样保留，不得重新猜测）】\n{scale_section}"
+                "\n\n报告中必须保留每个量表的：每题题号、题目、分数、选项标签、总分、严重程度、是否完成。"
+            )
         
         # Get analysis from LLM (use separate context to not pollute main conversation)
         try:
