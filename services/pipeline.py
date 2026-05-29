@@ -446,6 +446,13 @@ class ConversationPipeline:
                 if self.data:
                     self.data.save_assistant_message(None, full_response, sample_rate=48000)
 
+                # Keep LLM conversation history consistent
+                if self.llm and hasattr(self.llm, "conversation_history"):
+                    self.llm.conversation_history.append({
+                        "role": "assistant",
+                        "content": full_response
+                    })
+
                 # TTS
                 if config.use_tts and self.tts and result.tts_text:
                     emit("status", "正在播放...")
