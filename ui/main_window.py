@@ -66,6 +66,8 @@ class MainWindow(QMainWindow):
         self._asking_scales = False
         self._user_explicit_end = False
         self._exit_wait_dialog = None
+        self._current_report_generated = False
+        self._current_report_generating = False
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -504,6 +506,9 @@ class MainWindow(QMainWindow):
                     else:
                         self.control_panel.set_buttons_enabled(False)
 
+                elif msg_type == "session_finished":
+                    self._on_session_finished()
+
                 elif msg_type == "quit":
                     self._close_exit_dialog_and_quit()
                     return  # stop processing further queue items
@@ -705,6 +710,8 @@ class MainWindow(QMainWindow):
         self._asking_scales = False
         self._user_explicit_end = False
         self._pending_scale_prompt = None
+        self._current_report_generated = False
+        self._current_report_generating = False
         self.session_end_controller.reset()
         self.orchestrator.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
@@ -1100,24 +1107,61 @@ class MainWindow(QMainWindow):
         self._play_opening_greeting()
 
     def _on_exit_program(self):
-        """退出程序按钮 — immediate quit, no farewell/report."""
+        """退出整个程序。如果当前被试报告未生成，先生成报告再退出。"""
         if self._session_ending:
-            self._force_quit_now()
+            # Session end flow already running — just mark for quit after it finishes
+            self._pending_quit = True
+            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...")
             return
+
+        has_active_session = (
+            self.models_loaded
+            and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE)
+        )
+
+        if has_active_session and not self._current_report_generated:
+            # Need to generate report before quitting
+            self._pending_quit = True
+            self._user_explicit_end = True
+            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...")
+            self._handle_session_end(EndType.QUIT)
+            return
+
         self._force_quit_now()
 
     def _on_end_session(self):
-        """结束会话按钮 — full farewell → TTS → report → quit."""
+        """结束当前被试会话：告别语 → TTS → 报告 → 准备下一位被试，不退出程序。"""
         if self._session_ending:
-            self._show_exit_waiting_dialog()
             return
-        if not self.models_loaded or self.orchestrator.state in (SessionState.SESSION_ENDED, SessionState.IDLE):
-            self._force_quit_now()
+
+        if not self.models_loaded or self.orchestrator.state in (
+            SessionState.SESSION_ENDED, SessionState.IDLE
+        ):
+            # No active session — just reset for next subject
+            self._start_new_session()
+            self.chat_panel.add_system_message("当前没有进行中的会话。请填写下一位被试信息。")
             return
-        self._pending_quit = True
+
+        self._pending_quit = False
         self._user_explicit_end = True
-        self._show_exit_waiting_dialog()
-        self._handle_session_end(EndType.QUIT)
+        self._show_exit_waiting_dialog("正在结束当前会话并生成报告，请稍候...")
+        self._handle_session_end(EndType.GOAL_ACHIEVED)
+
+    def _on_session_finished(self):
+        """Session ended (not quitting program) — close dialog, prepare for next subject."""
+        if self._exit_wait_dialog:
+            self._exit_wait_dialog.close()
+            self._exit_wait_dialog = None
+        self._session_ending = False
+        self.session_end_controller.reset()
+        self._start_new_session()
+        self.control_panel.set_buttons_enabled(True)
+        self.info_confirmed = False
+        self.control_panel.btn_confirm.setEnabled(True)
+        self.control_panel.record_button.setEnabled(False)
+        self.chat_panel.add_system_message(
+            '当前会话已结束，报告已保存。请填写下一位被试信息，然后点击"确认信息并开始"。'
+        )
 
     def _force_quit_now(self):
         """Immediate quit — stop all services and exit, no farewell/report."""
@@ -1150,8 +1194,8 @@ class MainWindow(QMainWindow):
             pass
         QApplication.quit()
 
-    def _show_exit_waiting_dialog(self):
-        """Show a non-modal 'processing' dialog until quit happens.
+    def _show_exit_waiting_dialog(self, message="正在处理，请稍候..."):
+        """Show a non-modal 'processing' dialog until quit/session-end finishes.
 
         Must be non-modal — a modal dialog would block the main event loop,
         preventing the background report thread from draining processing_queue,
@@ -1164,13 +1208,13 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QFont
         import os as _os
         dlg = QDialog(self)
-        dlg.setWindowTitle("正在退出")
+        dlg.setWindowTitle("请稍候")
         dlg.setModal(False)  # non-modal: event loop keeps running
         dlg.setMinimumSize(320, 140)
         dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowCloseButtonHint)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(30, 25, 30, 25)
-        label = QLabel("正在处理，请稍候...")
+        label = QLabel(message)
         label.setFont(QFont("Microsoft YaHei", 13))
         label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
@@ -1363,6 +1407,7 @@ class MainWindow(QMainWindow):
                 # Report generation is slow (LLM call). Run it after TTS finishes
                 # so it doesn't block audio playback or UI exit.
                 def _save_report():
+                    self._current_report_generating = True
                     try:
                         researcher_report = self.report_service.generate_researcher_report(
                             conversation_history, user_id, end_type,
@@ -1390,8 +1435,12 @@ class MainWindow(QMainWindow):
 
                         if self.data_manager:
                             self.data_manager.save_session_summary(summary=full_feedback[:500])
+
+                        self._current_report_generated = True
                     except Exception as e:
                         logger.warning(f"Background report generation failed: {e}")
+                    finally:
+                        self._current_report_generating = False
 
                 threading.Thread(target=_save_report, daemon=True).start()
 
@@ -1403,6 +1452,7 @@ class MainWindow(QMainWindow):
 
             finally:
                 if self._pending_quit:
+                    # Exit program path — quit after report
                     self._pending_quit = False
                     if self.tts_service:
                         try:
@@ -1411,5 +1461,8 @@ class MainWindow(QMainWindow):
                             pass
                     # Use processing_queue — the main thread's QTimer drains it.
                     self.processing_queue.put(("quit", None))
+                else:
+                    # End session path — prepare for next subject, don't quit
+                    self.processing_queue.put(("session_finished", None))
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()
