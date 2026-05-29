@@ -701,7 +701,6 @@ class ConversationPipeline:
                         else:
                             # All triggered scales are now complete
                             result.all_scales_completed = True
-                            emit("all_scales_completed", completed_name)
                             logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
                     else:
                         self._active_scale_q = next_q

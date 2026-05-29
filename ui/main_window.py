@@ -821,7 +821,7 @@ class MainWindow(QMainWindow):
 
         rec_text = (
             f"刚才我们把最近这段时间的状态大致捋清楚了。[breath]"
-            f"接下来可以做个短的{tag_cn}放松，让身体也缓一缓。"
+            f"现在可以做个短的{tag_cn}放松，让身体也缓一缓。"
         )
         self.chat_panel.add_system_message(rec_text, as_ai=True)
         self._play_tts_async(rec_text)
