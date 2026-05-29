@@ -264,10 +264,12 @@ class ChatPanel(FrostedPanel):
         self.status_indicator.set_state(status)
 
     def _add_bubble(self, bubble):
-        """Insert bubble before the stretch, with alignment and max width."""
+        """Insert bubble before the stretch, with alignment and adaptive width."""
         # Max width = 78% of chat panel width
         max_w = int(self.width() * 0.78) if self.width() > 300 else 310
         bubble.setMaximumWidth(max_w)
+        # Let bubble expand to fill available space (up to max_w)
+        bubble.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Minimum)
 
         count = self._msg_layout.count()
         # Wrap in an HBoxLayout for alignment (user right, AI left)
@@ -275,9 +277,9 @@ class ChatPanel(FrostedPanel):
         wrapper.setContentsMargins(0, 0, 0, 0)
         if bubble._is_user:
             wrapper.addStretch()
-            wrapper.addWidget(bubble)
+            wrapper.addWidget(bubble, 1)  # stretch factor lets bubble grow
         else:
-            wrapper.addWidget(bubble)
+            wrapper.addWidget(bubble, 1)
             wrapper.addStretch()
 
         wrapper_widget = QWidget()

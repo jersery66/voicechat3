@@ -294,7 +294,7 @@ class MessageBubble(QFrame):
         self._is_user = is_user
         self._is_system = is_system
         if not is_system:
-            self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self._setup_ui()
 
     def _setup_ui(self):

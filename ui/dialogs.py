@@ -352,54 +352,98 @@ class ContinueOrEndDialog(BaseDialog):
         layout.addLayout(btn_layout)
 
 
-class RelaxBeforeEndDialog(BaseDialog):
-    """Dialog asking user whether to do relaxation training before ending."""
+class EndSessionDecisionDialog(BaseDialog):
+    """End-session dialog that adapts options based on scale/relaxation completion."""
 
+    continue_chosen = Signal()
     relax_chosen = Signal()
     end_chosen = Signal()
     cancel_chosen = Signal()
 
-    def __init__(self, parent=None, recommended_tag=None):
+    def __init__(self, parent=None, state=None, recommended_tag=None):
         super().__init__(parent, "结束会话")
-        self.setMinimumSize(400, 220)
-        self._recommended_tag = recommended_tag or "呼吸"
+        self.setMinimumSize(420, 260)
+        self._state = state or {}
+        self._recommended_tag = recommended_tag or "breathing"
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
         layout.setContentsMargins(24, 24, 24, 24)
 
-        title = QLabel("结束前是否先做一个短放松训练？")
+        scale_inc = self._state.get("scale_incomplete", False)
+        relax_done = self._state.get("relax_done", False)
+        incomplete = self._state.get("incomplete_scales", [])
+
+        # Title & description based on state
+        if scale_inc and not relax_done:
+            title_text = "还有任务未完成"
+            desc_lines = []
+            if incomplete:
+                names = [s["scale_name"] for s in incomplete]
+                desc_lines.append(f"量表未完成：{', '.join(names)}")
+            desc_lines.append("放松训练未进行")
+            desc_text = "当前" + "，".join(desc_lines) + "。\n你想怎么结束？"
+        elif scale_inc and relax_done:
+            title_text = "量表尚未完成"
+            names = [s["scale_name"] for s in incomplete] if incomplete else []
+            desc_text = f"放松训练已完成，但量表 {', '.join(names)} 还有题目没问完。\n你想怎么结束？"
+        elif not scale_inc and not relax_done:
+            title_text = "放松训练未完成"
+            desc_text = "量表问题已完成，但还没有做放松训练。\n结束前要做一个短放松吗？"
+        else:
+            title_text = "可以结束会话"
+            desc_text = "量表和放松训练都已完成，可以结束并生成报告。"
+
+        title = QLabel(title_text)
         title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #2d5a27;")
         layout.addWidget(title)
 
+        desc = QLabel(desc_text)
+        desc.setAlignment(Qt.AlignCenter)
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #555; font-size: 12px; padding: 4px 0;")
+        layout.addWidget(desc)
+
+        # Buttons based on state
+        btn_layout = QVBoxLayout()
+        btn_layout.setSpacing(8)
+
         tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(
             self._recommended_tag, self._recommended_tag
         )
-        msg = QLabel(f"推荐：{tag_cn}放松训练（约3-5分钟）")
-        msg.setAlignment(Qt.AlignCenter)
-        msg.setStyleSheet("color: #7f8c8d; font-size: 12px;")
-        layout.addWidget(msg)
 
-        btn_layout = QVBoxLayout()
-        btn_layout.setSpacing(10)
+        if scale_inc:
+            btn_continue = QPushButton("继续聊聊并补问问题")
+            btn_continue.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CAF50; color: white;
+                    border: 1px solid #388E3C; border-radius: 8px;
+                    padding: 10px; font-size: 13px; font-weight: bold;
+                }
+                QPushButton:hover { background-color: #388E3C; }
+            """)
+            btn_continue.clicked.connect(self._on_continue)
+            btn_layout.addWidget(btn_continue)
 
-        btn_relax = QPushButton(f"做{tag_cn}放松训练")
-        btn_relax.setStyleSheet("""
-            QPushButton {
-                background-color: #64B5F6; color: white;
-                border: none; border-radius: 8px;
-                padding: 10px; font-size: 13px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #42A5F5; }
-        """)
-        btn_relax.clicked.connect(self._on_relax)
-        btn_layout.addWidget(btn_relax)
+        if not relax_done:
+            btn_relax = QPushButton(f"做{tag_cn}放松训练")
+            btn_relax.setStyleSheet("""
+                QPushButton {
+                    background-color: #64B5F6; color: white;
+                    border: none; border-radius: 8px;
+                    padding: 10px; font-size: 13px; font-weight: bold;
+                }
+                QPushButton:hover { background-color: #42A5F5; }
+            """)
+            btn_relax.clicked.connect(self._on_relax)
+            btn_layout.addWidget(btn_relax)
 
-        btn_end = QPushButton("直接结束并生成报告")
+        end_label = "结束并生成报告" if (not scale_inc and relax_done) else "直接结束并生成报告"
+        btn_end = QPushButton(end_label)
         btn_end.setStyleSheet("""
             QPushButton {
                 background-color: #FF9800; color: white;
@@ -424,6 +468,10 @@ class RelaxBeforeEndDialog(BaseDialog):
         btn_layout.addWidget(btn_cancel)
 
         layout.addLayout(btn_layout)
+
+    def _on_continue(self):
+        self.continue_chosen.emit()
+        self.accept()
 
     def _on_relax(self):
         self.relax_chosen.emit()

@@ -36,7 +36,7 @@ from .chat_panel import ChatPanel
 from .loading_screen import LoadingScreen
 from .dialogs import (
     SessionEndDialog, CrisisDialog, ContinueOrEndDialog,
-    WarningDialog, RelaxBeforeEndDialog
+    WarningDialog, EndSessionDecisionDialog
 )
 from .styles import get_style
 from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineConfig
@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self._current_report_generated = False
         self._current_report_generating = False
         self._pipeline_busy = False
+        self._completion_status = None
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -724,6 +725,7 @@ class MainWindow(QMainWindow):
         self._current_report_generated = False
         self._current_report_generating = False
         self._pipeline_busy = False
+        self._completion_status = None
         self.session_end_controller.reset()
         self.orchestrator.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
@@ -1142,7 +1144,7 @@ class MainWindow(QMainWindow):
         self._force_quit_now()
 
     def _on_end_session(self):
-        """结束当前被试会话：先弹窗询问是否放松，再按用户选择执行。"""
+        """结束当前被试会话：先检查完成度，再弹窗让用户选择。"""
         if self._session_ending:
             return
 
@@ -1153,16 +1155,64 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message("当前没有进行中的会话。请填写下一位被试信息。")
             return
 
-        self._show_relax_before_end_dialog()
+        state = self._get_end_readiness_state()
+        self._show_end_decision_dialog(state)
 
-    def _show_relax_before_end_dialog(self):
-        """Show dialog asking user whether to relax before ending."""
+    def _get_end_readiness_state(self):
+        """Return completion state before ending current subject session."""
+        incomplete_scales = []
+        if self.pipeline and hasattr(self.pipeline, "get_incomplete_scales"):
+            try:
+                incomplete_scales = self.pipeline.get_incomplete_scales()
+            except Exception:
+                incomplete_scales = []
+
+        scale_incomplete = bool(incomplete_scales)
+        relax_done = self._get_relaxation_info_str() not in ("未进行",)
+
+        return {
+            "scale_incomplete": scale_incomplete,
+            "incomplete_scales": incomplete_scales,
+            "relax_done": relax_done,
+            "relax_type": self._get_relaxation_info_str(),
+        }
+
+    def _show_end_decision_dialog(self, state):
+        """Show end-session decision dialog based on completion state."""
+        from .dialogs import EndSessionDecisionDialog
         recommended = self._get_end_relaxation_tag()
-        dialog = RelaxBeforeEndDialog(self, recommended_tag=recommended)
+        dialog = EndSessionDecisionDialog(self, state=state, recommended_tag=recommended)
+        dialog.continue_chosen.connect(self._end_session_continue_chat)
         dialog.relax_chosen.connect(self._end_session_with_relaxation)
-        dialog.end_chosen.connect(self._end_session_directly)
-        dialog.cancel_chosen.connect(lambda: None)  # no-op, dialog closes
+        dialog.end_chosen.connect(lambda: self._end_session_directly(state))
+        dialog.cancel_chosen.connect(lambda: None)
         dialog.exec()
+
+    def _end_session_continue_chat(self):
+        """User chose to continue chatting — resume, set pending scale prompt."""
+        incomplete = []
+        if self.pipeline and hasattr(self.pipeline, "get_incomplete_scales"):
+            try:
+                incomplete = self.pipeline.get_incomplete_scales()
+            except Exception:
+                pass
+        if incomplete:
+            prompt = self.pipeline.get_remaining_scale_prompt()
+            if prompt:
+                self._pending_scale_prompt = prompt
+            first = incomplete[0]
+            scale_name = first["scale_name"]
+            remaining = first.get("remaining_nums", [])
+            if remaining:
+                self.chat_panel.add_system_message(
+                    f"好，那我们再聊一会儿，把刚才没问完的问题慢慢补上。"
+                )
+            else:
+                self.chat_panel.add_system_message("好，咱们继续聊。")
+        else:
+            self.chat_panel.add_system_message("好，咱们继续聊。")
+        self._play_tts_async("好，那咱们继续。")
+        self.orchestrator.transition_to(SessionState.CHATTING)
 
     def _get_end_relaxation_tag(self):
         """Get the recommended relaxation tag for end-session dialog."""
@@ -1179,10 +1229,21 @@ class MainWindow(QMainWindow):
                 pass
         return "breathing"
 
-    def _end_session_directly(self):
+    def _end_session_directly(self, state=None):
         """User chose 'end directly' — skip relaxation, generate report."""
         self._pending_quit = False
         self._user_explicit_end = True
+        # Store completion_status for report
+        if state:
+            self._completion_status = {
+                "scale_completed": not state["scale_incomplete"],
+                "incomplete_scales": state["incomplete_scales"],
+                "relaxation_completed": state["relax_done"],
+                "relaxation_type": state["relax_type"],
+                "ended_by_user": True,
+            }
+        else:
+            self._completion_status = {"ended_by_user": True}
         self._show_exit_waiting_dialog("正在保存会话数据并生成报告，请稍候...")
         self._handle_session_end(EndType.GOAL_ACHIEVED, allow_force_relaxation=False)
 
@@ -1392,7 +1453,11 @@ class MainWindow(QMainWindow):
                     logger.warning(f"智能推荐失败: {e}")
                     relaxation_tag = "呼吸"
 
-        action, data = self.orchestrator.evaluate_session_end(end_type, relaxation_tag)
+        if allow_force_relaxation:
+            action, data = self.orchestrator.evaluate_session_end(end_type, relaxation_tag)
+        else:
+            self.orchestrator.transition_to(SessionState.SESSION_ENDING)
+            action, data = "generate_reports", {}
 
         if action == "force_relaxation":
             # Close waiting dialog so user can see/click relaxation buttons
@@ -1499,6 +1564,9 @@ class MainWindow(QMainWindow):
                             researcher_report["emotion_tracker_data"] = self.emotion_tracker.get_session_emotion_data()
                     if isinstance(researcher_report, dict) and hasattr(self.report_service, 'activity_log'):
                         researcher_report["activity_log"] = self.report_service.activity_log
+                    # Attach completion_status if user ended with incomplete scales/relaxation
+                    if isinstance(researcher_report, dict) and self._completion_status:
+                        researcher_report["completion_status"] = self._completion_status
 
                     save_result = None
                     if self.data_manager and researcher_report:
