@@ -8,6 +8,7 @@ import threading
 import traceback
 import re
 import random
+from datetime import datetime
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
