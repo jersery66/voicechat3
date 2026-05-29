@@ -31,12 +31,12 @@ REC_TAGS = {
     r'\[REC_GAME\]': 'game',
 }
 
-SCALE_PATTERN = re.compile(r'\[SCALE:(\w+-\d+):Q(\d+):S(\d+)\]')
+SCALE_PATTERN = re.compile(r'\[SCALE:(\w+-\d+):Q(\d+):S(\d+)\]', re.IGNORECASE)
 
 # Pre-compiled regexes for hot-path tag stripping (avoids re-compiling per chunk)
 _RE_REC_TAG = re.compile(r'\[REC_[A-Z_]+\]')
 _RE_END_TAG = re.compile(r'\[END_[A-Z_]+\]')
-_RE_SCALE_TAG = re.compile(r'\[SCALE:[^\]]+\]')
+_RE_SCALE_TAG = re.compile(r'\[SCALE:[^\]]+\]', re.IGNORECASE)
 _RE_BRACKETS_CN = re.compile(r'【.*?】')
 _RE_PIPE_TAG = re.compile(r'<\|[^|]+\|>')
 _RE_BREATH_LAUGH = re.compile(r'\[(?:breath|laughter)\]')
