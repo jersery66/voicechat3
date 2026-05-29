@@ -203,7 +203,8 @@ class MainWindow(QMainWindow):
 
         # Chat panel signals
         self.chat_panel.clear_clicked.connect(self._clear_history)
-        self.chat_panel.exit_clicked.connect(self._exit_app)
+        self.chat_panel.exit_clicked.connect(self._on_exit_program)
+        self.chat_panel.end_session_clicked.connect(self._on_end_session)
         self.chat_panel.text_submitted.connect(self._on_text_submitted)
 
     # ==================== User Info ====================
@@ -1097,132 +1098,25 @@ class MainWindow(QMainWindow):
         self._start_new_session()
         self._play_opening_greeting()
 
-    def _exit_app(self):
+    def _on_exit_program(self):
+        """退出程序按钮 — immediate quit, no farewell/report."""
+        if self._session_ending:
+            self._force_quit_now()
+            return
+        self._force_quit_now()
+
+    def _on_end_session(self):
+        """结束会话按钮 — full farewell → TTS → report → quit."""
         if self._session_ending:
             self._show_exit_waiting_dialog()
             return
-
-        if self.models_loaded and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE):
-            # Determine what's incomplete
-            incomplete = []
-            if hasattr(self, 'pipeline') and self.pipeline:
-                incomplete = self.pipeline.get_incomplete_scales()
-            has_relaxed = bool(self.orchestrator.ctx.current_relaxation_type)
-
-            if incomplete or not has_relaxed:
-                from PySide6.QtWidgets import QMessageBox, QPushButton
-                box = QMessageBox(self)
-                box.setWindowTitle("")
-                buttons = {}
-                if incomplete and not has_relaxed:
-                    box.setText("在结束之前，你想再聊几个问题，还是试试放松训练？")
-                    buttons["questions"] = box.addButton("再问几个问题", QMessageBox.AcceptRole)
-                    buttons["relax"] = box.addButton("试试放松训练", QMessageBox.AcceptRole)
-                    buttons["exit"] = box.addButton("直接退出", QMessageBox.RejectRole)
-                elif incomplete:
-                    box.setText("我还有几个问题想问你，你想继续聊聊天吗？")
-                    buttons["questions"] = box.addButton("继续聊天", QMessageBox.AcceptRole)
-                    buttons["exit"] = box.addButton("直接退出", QMessageBox.RejectRole)
-                else:
-                    box.setText("要不要试试放松训练？只需几分钟，效果很好的。")
-                    buttons["relax"] = box.addButton("试试放松训练", QMessageBox.AcceptRole)
-                    buttons["exit"] = box.addButton("直接退出", QMessageBox.RejectRole)
-                box.exec()
-                clicked = box.clickedButton()
-                if clicked == buttons.get("questions"):
-                    self._ask_remaining_scales()
-                    return
-                if clicked == buttons.get("relax"):
-                    self._exit_with_relaxation()
-                    return
-                # "直接退出" — fast quit, no farewell/TTS/report
-                self._force_quit_now()
-                return
-
-            # No incomplete items — offer "结束会话" (full) or "直接退出" (fast)
-            from PySide6.QtWidgets import QMessageBox, QPushButton
-            box = QMessageBox(self)
-            box.setWindowTitle("退出确认")
-            box.setText("确定要退出吗？")
-            btn_end = box.addButton("结束会话并退出", QMessageBox.AcceptRole)
-            btn_quit = box.addButton("直接退出", QMessageBox.RejectRole)
-            box.exec()
-            if box.clickedButton() == btn_end:
-                self._pending_quit = True
-                self._user_explicit_end = True
-                self._show_exit_waiting_dialog()
-                self._handle_session_end(EndType.QUIT)
-            elif box.clickedButton() == btn_quit:
-                self._force_quit_now()
-        else:
+        if not self.models_loaded or self.orchestrator.state in (SessionState.SESSION_ENDED, SessionState.IDLE):
             self._force_quit_now()
-
-    def _exit_with_relaxation(self):
-        """Start relaxation training, then exit after it completes."""
+            return
         self._pending_quit = True
-        tag = "呼吸"
-        if self.relaxation_tool:
-            try:
-                tag = self.relaxation_tool.execute(
-                    conversation_history=self.llm_service.conversation_history
-                )
-            except Exception:
-                pass
-        tag_cn_map = {"breathing": "呼吸", "muscle": "肌肉放松", "meditation": "冥想", "呼吸": "呼吸", "肌肉": "肌肉放松", "冥想": "冥想"}
-        tag_cn = tag_cn_map.get(tag, tag)
-        rec_text = f"好的，我们先做个{tag_cn}放松训练，做完再走。"
-        self.chat_panel.add_system_message(rec_text)
-        self._play_tts_async(rec_text)
-        self.orchestrator.ctx.current_relaxation_type = tag
-        QTimer.singleShot(1500, lambda: self._play_relaxation_video(tag))
-
-    def _ask_remaining_scales(self):
-        """Ask remaining scale questions in conversation via LLM."""
-        if not hasattr(self, 'pipeline') or not self.pipeline:
-            return
-        remaining_prompt = self.pipeline.get_remaining_scale_prompt()
-        if not remaining_prompt:
-            return
-        # Store for next pipeline run
-        self._pending_scale_prompt = remaining_prompt
-        self._asking_scales = True
-        self.chat_panel.add_system_message("我再问你几个小问题，很快就好。")
-        # Send a trigger message with scale questions as system context
-        threading.Thread(
-            target=self._run_pipeline_with_scale_context,
-            daemon=True
-        ).start()
-
-    def _run_pipeline_with_scale_context(self):
-        """Run pipeline with remaining scale questions as system context."""
-        try:
-            extra_suffix = getattr(self, '_pending_scale_prompt', '')
-            self._pending_scale_prompt = None
-            config = PipelineConfig(
-                use_stt=False, use_tts=True,
-                user_text="好的",
-                extra_system_suffix=extra_suffix,
-            )
-            result = self.pipeline.execute(
-                config, lambda mt, ct: self.processing_queue.put((mt, ct))
-            )
-            self._scale_tags = result.scale_tags
-            self._post_pipeline_routing(result)
-            # Check if more scale questions remain; if not, clear flag
-            if self.pipeline.get_incomplete_scales():
-                # Still have unanswered questions — keep _asking_scales True
-                # and prepare next round of questions
-                remaining = self.pipeline.get_remaining_scale_prompt()
-                if remaining:
-                    self._pending_scale_prompt = remaining
-                    self._asking_scales = True
-                    return
-            # All done or no more questions
-            self._asking_scales = False
-        except Exception as e:
-            logger.exception("Exception occurred")
-            self._asking_scales = False
-            self.processing_queue.put(("error", f"处理出错: {str(e)}"))
+        self._user_explicit_end = True
+        self._show_exit_waiting_dialog()
+        self._handle_session_end(EndType.QUIT)
 
     def _force_quit_now(self):
         """Immediate quit — stop all services and exit, no farewell/report."""

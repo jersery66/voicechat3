@@ -42,6 +42,7 @@ class ChatPanel(FrostedPanel):
 
     clear_clicked = Signal()
     exit_clicked = Signal()
+    end_session_clicked = Signal()
     text_submitted = Signal(str)
 
     def __init__(self, parent=None):
@@ -180,7 +181,20 @@ class ChatPanel(FrostedPanel):
         self.btn_clear.clicked.connect(self.clear_clicked.emit)
         btn_layout.addWidget(self.btn_clear)
 
-        self.btn_exit = QPushButton("退出")
+        self.btn_end_session = QPushButton("结束会话")
+        self.btn_end_session.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800; color: white;
+                border: 1px solid #E65100; border-radius: 6px;
+                padding: 5px 10px; font-size: 11px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #E65100; }
+        """)
+        self.btn_end_session.setCursor(Qt.PointingHandCursor)
+        self.btn_end_session.clicked.connect(self.end_session_clicked.emit)
+        btn_layout.addWidget(self.btn_end_session)
+
+        self.btn_exit = QPushButton("退出程序")
         self.btn_exit.setStyleSheet("""
             QPushButton {
                 background-color: #EF5350; color: white;
