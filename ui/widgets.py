@@ -294,7 +294,7 @@ class MessageBubble(QFrame):
         self._is_user = is_user
         self._is_system = is_system
         if not is_system:
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -324,7 +324,7 @@ class MessageBubble(QFrame):
             self.text_label.setAlignment(Qt.AlignRight)
             self.text_label.setStyleSheet(f"""
                 color: {'#e0e0e0' if dark else '#2c3e50'};
-                padding: 10px 14px;
+                padding: 8px 12px;
                 background: transparent;
             """)
         else:
@@ -336,7 +336,7 @@ class MessageBubble(QFrame):
             self.text_label.setAlignment(Qt.AlignLeft)
             self.text_label.setStyleSheet(f"""
                 color: {'#e0e0e0' if dark else '#2c3e50'};
-                padding: 10px 14px;
+                padding: 8px 12px;
                 background: transparent;
             """)
 

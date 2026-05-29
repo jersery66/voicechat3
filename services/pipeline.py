@@ -395,6 +395,72 @@ class ConversationPipeline:
 
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
+        # --- Programmatic first scale question (bypass LLM) ---
+        # If we just started a new scale or moved to a new question and are NOT
+        # waiting for an answer, generate the question directly from a template
+        # instead of relying on the LLM (which may ignore the scale prompt in
+        # favor of relaxation training recommendations from SYSTEM_PROMPT).
+        _programmatic_scale = False
+        if self._active_scale and not self._active_scale_waiting_answer:
+            from services.scales import SCALES
+            scale_def = SCALES.get(self._active_scale)
+            if scale_def:
+                q_num = self._active_scale_q
+                total = len(scale_def["questions"])
+                q_text = scale_def["questions"][q_num - 1]
+                options_text = " / ".join(
+                    f"{opt['score']}-{opt['label']}" for opt in scale_def["options"]
+                )
+                # Build a natural spoken question
+                if q_num == 1:
+                    spoken_text = f"我先简单了解一下。[breath]最近两周，你有没有{q_text}？"
+                else:
+                    spoken_text = f"[breath]{q_text}"
+
+                analysis_text = (
+                    f"【情绪识别】待评估【状态评估】配合中"
+                    f"【变革话语】无【策略选择】量表评估 - {self._active_scale} Q{q_num}/{total}"
+                )
+                full_response = f"{analysis_text}|||{spoken_text}"
+
+                # Emit UI updates
+                emit("start_ai_message", None)
+                emit("stream_text", clean_for_display(spoken_text))
+                emit("finish_streaming", None)
+
+                result.full_response = full_response
+                result.analysis_text = analysis_text
+                result.spoken_text = spoken_text
+                result.clean_spoken = clean_for_display(spoken_text)
+                result.tts_text = clean_for_tts(spoken_text)
+                result.intent = "counseling"
+
+                # Mark as waiting for answer
+                self._active_scale_waiting_answer = True
+
+                logger.warning(
+                    f"[ScaleDebug] Programmatic Q{q_num} for {self._active_scale}: {q_text}"
+                )
+
+                # Save assistant message
+                if self.data:
+                    self.data.save_assistant_message(None, full_response, sample_rate=48000)
+
+                # TTS
+                if config.use_tts and self.tts and result.tts_text:
+                    emit("status", "正在播放...")
+                    try:
+                        with get_metrics().timer("tts.play"):
+                            self.tts.generate_and_play(result.tts_text)
+                    except Exception as e:
+                        logger.warning(f"TTS error: {e}")
+
+                metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
+                _programmatic_scale = True
+
+        if _programmatic_scale:
+            return result
+
         # Append extra system context (e.g. remaining scale questions at exit)
         if config.extra_system_suffix:
             if final_suffix:

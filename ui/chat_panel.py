@@ -264,9 +264,28 @@ class ChatPanel(FrostedPanel):
         self.status_indicator.set_state(status)
 
     def _add_bubble(self, bubble):
-        """Insert bubble before the stretch."""
+        """Insert bubble before the stretch, with alignment and max width."""
+        # Max width = 78% of chat panel width
+        max_w = int(self.width() * 0.78) if self.width() > 300 else 310
+        bubble.setMaximumWidth(max_w)
+
         count = self._msg_layout.count()
-        self._msg_layout.insertWidget(count - 1, bubble)
+        # Wrap in an HBoxLayout for alignment (user right, AI left)
+        wrapper = QHBoxLayout()
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        if bubble._is_user:
+            wrapper.addStretch()
+            wrapper.addWidget(bubble)
+        else:
+            wrapper.addWidget(bubble)
+            wrapper.addStretch()
+
+        wrapper_widget = QWidget()
+        wrapper_widget.setStyleSheet("background: transparent;")
+        wrapper_widget.setLayout(wrapper)
+        # Store wrapper reference on bubble for cleanup in clear_chat
+        bubble._wrapper_widget = wrapper_widget
+        self._msg_layout.insertWidget(count - 1, wrapper_widget)
         self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
@@ -289,10 +308,13 @@ class ChatPanel(FrostedPanel):
         self.clear_clicked.emit()
 
     def clear_chat(self):
-        """Remove all message bubbles."""
+        """Remove all message bubbles and their wrappers."""
         for msg in self._messages:
             bubble = msg.get("bubble")
             if bubble:
+                wrapper = getattr(bubble, "_wrapper_widget", None)
+                if wrapper:
+                    wrapper.deleteLater()
                 bubble.deleteLater()
         self._messages.clear()
         self._current_streaming_bubble = None
