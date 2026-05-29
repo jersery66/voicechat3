@@ -116,7 +116,6 @@ class LLMService:
         first_token_recorded = False
         stream_options = {
             "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "薇薇老师:", "薇薇老师："],
-            "think": False,  # Qwen3: disable thinking mode for real-time voice chat
         }
 
         try:
@@ -125,6 +124,7 @@ class LLMService:
                 messages=messages,
                 stream=True,
                 options=stream_options,
+                think=False,  # Qwen3: disable thinking mode for real-time voice chat
             )
 
             for chunk in stream:

@@ -40,6 +40,7 @@ _RE_SCALE_TAG = re.compile(r'\[SCALE:[^\]]+\]')
 _RE_BRACKETS_CN = re.compile(r'【.*?】')
 _RE_PIPE_TAG = re.compile(r'<\|[^|]+\|>')
 _RE_BREATH_LAUGH = re.compile(r'\[(?:breath|laughter)\]')
+_RE_THINK = re.compile(r'<think>[\s\S]*?</think>')
 
 # Compile END_PATTERNS / REC_TAGS once for fast detection
 _COMPILED_END_PATTERNS = [(re.compile(p), name) for p, name in END_PATTERNS.items()]
@@ -92,6 +93,7 @@ def get_end_type_enum(string_name: str):
 
 def clean_for_display(text: str) -> str:
     """Remove all control tags for UI display. Strips [breath]/[laughter] too."""
+    text = _RE_THINK.sub('', text)
     text = _RE_REC_TAG.sub('', text)
     text = _RE_END_TAG.sub('', text)
     text = _RE_SCALE_TAG.sub('', text)
@@ -103,6 +105,7 @@ def clean_for_display(text: str) -> str:
 
 def clean_for_tts(text: str) -> str:
     """Keep [breath]/[laughter] for CosyVoice, strip control tags."""
+    text = _RE_THINK.sub('', text)
     text = _RE_REC_TAG.sub('', text)
     text = _RE_END_TAG.sub('', text)
     text = _RE_SCALE_TAG.sub('', text)
@@ -796,7 +799,8 @@ class ConversationPipeline:
                     analysis_text = parts[0].strip()
                     spoken_buffer = parts[1]
                     found_separator = True
-                    cleaned = _RE_PIPE_TAG.sub('', spoken_buffer)
+                    cleaned = _RE_THINK.sub('', spoken_buffer)
+                    cleaned = _RE_PIPE_TAG.sub('', cleaned)
                     cleaned = _RE_REC_TAG.sub('', cleaned)
                     cleaned = _RE_END_TAG.sub('', cleaned)
                     cleaned = _RE_SCALE_TAG.sub('', cleaned)
@@ -806,7 +810,8 @@ class ConversationPipeline:
                         emit("stream_text", cleaned.strip())
                 continue
 
-            cleaned = _RE_PIPE_TAG.sub('', chunk)
+            cleaned = _RE_THINK.sub('', chunk)
+            cleaned = _RE_PIPE_TAG.sub('', cleaned)
             cleaned = _RE_REC_TAG.sub('', cleaned)
             cleaned = _RE_END_TAG.sub('', cleaned)
             cleaned = _RE_SCALE_TAG.sub('', cleaned)
@@ -822,7 +827,8 @@ class ConversationPipeline:
         else:
             spoken_text = full_response.strip()
             if not found_separator:
-                cleaned = _RE_PIPE_TAG.sub('', spoken_text)
+                cleaned = _RE_THINK.sub('', spoken_text)
+                cleaned = _RE_PIPE_TAG.sub('', cleaned)
                 cleaned = _RE_REC_TAG.sub('', cleaned)
                 cleaned = _RE_END_TAG.sub('', cleaned)
                 cleaned = _RE_SCALE_TAG.sub('', cleaned)
@@ -832,7 +838,8 @@ class ConversationPipeline:
                     emit("stream_text", cleaned.strip())
                 else:
                     logger.warning(f"Spoken text empty after cleaning, using raw response as fallback")
-                    fallback = _RE_REC_TAG.sub('', spoken_text)
+                    fallback = _RE_THINK.sub('', spoken_text)
+                    fallback = _RE_REC_TAG.sub('', fallback)
                     fallback = _RE_END_TAG.sub('', fallback)
                     fallback = _RE_SCALE_TAG.sub('', fallback)
                     fallback = _RE_BREATH_LAUGH.sub('', fallback)
