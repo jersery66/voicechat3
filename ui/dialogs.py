@@ -352,6 +352,92 @@ class ContinueOrEndDialog(BaseDialog):
         layout.addLayout(btn_layout)
 
 
+class RelaxBeforeEndDialog(BaseDialog):
+    """Dialog asking user whether to do relaxation training before ending."""
+
+    relax_chosen = Signal()
+    end_chosen = Signal()
+    cancel_chosen = Signal()
+
+    def __init__(self, parent=None, recommended_tag=None):
+        super().__init__(parent, "结束会话")
+        self.setMinimumSize(400, 220)
+        self._recommended_tag = recommended_tag or "呼吸"
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        title = QLabel("结束前是否先做一个短放松训练？")
+        title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("color: #2d5a27;")
+        layout.addWidget(title)
+
+        tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(
+            self._recommended_tag, self._recommended_tag
+        )
+        msg = QLabel(f"推荐：{tag_cn}放松训练（约3-5分钟）")
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+        layout.addWidget(msg)
+
+        btn_layout = QVBoxLayout()
+        btn_layout.setSpacing(10)
+
+        btn_relax = QPushButton(f"做{tag_cn}放松训练")
+        btn_relax.setStyleSheet("""
+            QPushButton {
+                background-color: #64B5F6; color: white;
+                border: none; border-radius: 8px;
+                padding: 10px; font-size: 13px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #42A5F5; }
+        """)
+        btn_relax.clicked.connect(self._on_relax)
+        btn_layout.addWidget(btn_relax)
+
+        btn_end = QPushButton("直接结束并生成报告")
+        btn_end.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800; color: white;
+                border: 1px solid #F57C00; border-radius: 8px;
+                padding: 10px; font-size: 13px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #F57C00; }
+        """)
+        btn_end.clicked.connect(self._on_end)
+        btn_layout.addWidget(btn_end)
+
+        btn_cancel = QPushButton("取消，继续对话")
+        btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0; color: #2c3e50;
+                border: 1px solid #d0d0d0; border-radius: 8px;
+                padding: 8px; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #e0e0e0; }
+        """)
+        btn_cancel.clicked.connect(self._on_cancel)
+        btn_layout.addWidget(btn_cancel)
+
+        layout.addLayout(btn_layout)
+
+    def _on_relax(self):
+        self.relax_chosen.emit()
+        self.accept()
+
+    def _on_end(self):
+        self.end_chosen.emit()
+        self.accept()
+
+    def _on_cancel(self):
+        self.cancel_chosen.emit()
+        self.reject()
+
+
 class WarningDialog(BaseDialog):
     """Simple warning/info dialog."""
 

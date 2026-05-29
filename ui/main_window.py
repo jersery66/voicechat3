@@ -36,7 +36,7 @@ from .chat_panel import ChatPanel
 from .loading_screen import LoadingScreen
 from .dialogs import (
     SessionEndDialog, CrisisDialog, ContinueOrEndDialog,
-    WarningDialog
+    WarningDialog, RelaxBeforeEndDialog
 )
 from .styles import get_style
 from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineConfig
@@ -1142,22 +1142,64 @@ class MainWindow(QMainWindow):
         self._force_quit_now()
 
     def _on_end_session(self):
-        """结束当前被试会话：告别语 → TTS → 报告 → 准备下一位被试，不退出程序。"""
+        """结束当前被试会话：先弹窗询问是否放松，再按用户选择执行。"""
         if self._session_ending:
             return
 
         if not self.models_loaded or self.orchestrator.state in (
             SessionState.SESSION_ENDED, SessionState.IDLE
         ):
-            # No active session — just reset for next subject
             self._start_new_session()
             self.chat_panel.add_system_message("当前没有进行中的会话。请填写下一位被试信息。")
             return
 
+        self._show_relax_before_end_dialog()
+
+    def _show_relax_before_end_dialog(self):
+        """Show dialog asking user whether to relax before ending."""
+        recommended = self._get_end_relaxation_tag()
+        dialog = RelaxBeforeEndDialog(self, recommended_tag=recommended)
+        dialog.relax_chosen.connect(self._end_session_with_relaxation)
+        dialog.end_chosen.connect(self._end_session_directly)
+        dialog.cancel_chosen.connect(lambda: None)  # no-op, dialog closes
+        dialog.exec()
+
+    def _get_end_relaxation_tag(self):
+        """Get the recommended relaxation tag for end-session dialog."""
+        if self.orchestrator.ctx.current_relaxation_type:
+            type_map = {"huxi": "breathing", "jirou": "muscle", "mingxiang": "meditation"}
+            return type_map.get(self.orchestrator.ctx.current_relaxation_type, "breathing")
+        if self.relaxation_tool:
+            try:
+                conversation_history = self.llm_service.conversation_history
+                tag = self.relaxation_tool.execute(conversation_history=conversation_history)
+                tag_map = {"呼吸": "breathing", "肌肉": "muscle", "冥想": "meditation"}
+                return tag_map.get(tag, "breathing")
+            except Exception:
+                pass
+        return "breathing"
+
+    def _end_session_directly(self):
+        """User chose 'end directly' — skip relaxation, generate report."""
         self._pending_quit = False
         self._user_explicit_end = True
-        self._show_exit_waiting_dialog("正在结束当前会话并生成报告，请稍候...")
-        self._handle_session_end(EndType.GOAL_ACHIEVED)
+        self._show_exit_waiting_dialog("正在保存会话数据并生成报告，请稍候...")
+        self._handle_session_end(EndType.GOAL_ACHIEVED, allow_force_relaxation=False)
+
+    def _end_session_with_relaxation(self):
+        """User chose 'do relaxation first' — recommend training, no report yet."""
+        self._pending_quit = False
+        self._user_explicit_end = False
+
+        tag = self._get_end_relaxation_tag()
+        tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
+        rec_text = f"行，结束前咱们先做个短放松。[breath]你可以点左边的{tag_cn}放松训练。"
+        self.chat_panel.add_system_message(rec_text, as_ai=True)
+        self._play_tts_async(rec_text)
+
+        self.orchestrator.transition_to(SessionState.RELAXATION_RECOMMENDED)
+        QTimer.singleShot(1000, lambda: self.control_panel.highlight_relax_button(tag))
+        self.control_panel.set_status("请先完成放松训练")
 
     def _on_session_finished(self):
         """Session ended (not quitting program) — close dialog, prepare for next subject."""
@@ -1325,19 +1367,19 @@ class MainWindow(QMainWindow):
             logger.exception("Exception occurred")
         return None
 
-    def _handle_session_end(self, end_type, relaxation_tag=None):
+    def _handle_session_end(self, end_type, relaxation_tag=None, allow_force_relaxation=True):
         """Handle session end using orchestrator decision logic."""
         if not self.session_end_controller.begin().accepted:
             return
         self._session_ending = True
 
-        # If user explicitly chose to end (from time-limit dialog or exit button),
+        # If user explicitly chose to end or force relaxation is disabled,
         # skip forced relaxation — respect their choice.
         user_explicit = self._user_explicit_end
         self._user_explicit_end = False  # consume the flag
 
         # Use orchestrator to decide: force relaxation or generate reports
-        if not user_explicit and not relaxation_tag and not self.orchestrator.ctx.current_relaxation_type:
+        if allow_force_relaxation and not user_explicit and not relaxation_tag and not self.orchestrator.ctx.current_relaxation_type:
             if self.relaxation_tool is None:
                 relaxation_tag = "呼吸"
             else:
@@ -1353,6 +1395,10 @@ class MainWindow(QMainWindow):
         action, data = self.orchestrator.evaluate_session_end(end_type, relaxation_tag)
 
         if action == "force_relaxation":
+            # Close waiting dialog so user can see/click relaxation buttons
+            if self._exit_wait_dialog:
+                self._exit_wait_dialog.close()
+                self._exit_wait_dialog = None
             tag = data["relaxation_tag"]
             tag_cn_map = {"breathing": "呼吸", "muscle": "肌肉放松", "meditation": "冥想", "呼吸": "呼吸", "肌肉": "肌肉放松", "冥想": "冥想"}
             tag_cn = tag_cn_map.get(tag, tag)
@@ -1416,16 +1462,35 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         logger.warning(f"Farewell TTS failed: {e}")
 
-                # --- Phase 3: Generate report + PDF (synchronous) ---
-                # This runs inside generate_farewell_and_reports which is already
-                # a background thread. Must complete before session_finished/quit.
+                # --- Phase 3: Save raw snapshot → Generate report + PDF ---
+                # Save raw data first so nothing is lost if report/PDF fails.
                 self._current_report_generating = True
+                self.processing_queue.put(("status", "正在保存会话数据..."))
+                raw_snapshot_saved = False
                 try:
-                    researcher_report = self.report_service.generate_researcher_report(
-                        conversation_history, user_id, end_type,
-                        user_info=current_user_info, relaxation_info=relaxation_rec or relax_str,
-                        session_emotions=self.session_emotions
-                    )
+                    if self.data_manager:
+                        self.data_manager.save_session_summary(summary=full_feedback[:500])
+                        raw_snapshot_saved = True
+                        logger.info("Raw session snapshot saved before report generation")
+                except Exception as e:
+                    logger.warning(f"Raw snapshot save failed: {e}")
+
+                self.processing_queue.put(("status", "正在生成报告..."))
+
+                # Generate report with timeout
+                researcher_report = None
+                report_ok = False
+                try:
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+                    with ThreadPoolExecutor(max_workers=1) as report_pool:
+                        future = report_pool.submit(
+                            self.report_service.generate_researcher_report,
+                            conversation_history, user_id, end_type,
+                            current_user_info, relaxation_rec or relax_str,
+                            self.session_emotions
+                        )
+                        researcher_report = future.result(timeout=60)
+
                     if isinstance(researcher_report, dict):
                         relaxation_done = relax_str not in ("未进行", "", None, "未知")
                         researcher_report["relaxation_completed"] = relaxation_done
@@ -1444,16 +1509,30 @@ class MainWindow(QMainWindow):
                         except Exception as e:
                             logger.warning(f"Report save failed: {e}")
 
-                    self._generate_and_save_pdf(researcher_report, user_id, end_type, save_result)
+                    # PDF with timeout
+                    try:
+                        from concurrent.futures import ThreadPoolExecutor as Pool2
+                        with Pool2(max_workers=1) as pdf_pool:
+                            pdf_future = pdf_pool.submit(
+                                self._generate_and_save_pdf,
+                                researcher_report, user_id, end_type, save_result
+                            )
+                            pdf_future.result(timeout=30)
+                    except Exception as e:
+                        logger.warning(f"PDF generation timed out or failed: {e}")
 
-                    if self.data_manager:
-                        self.data_manager.save_session_summary(summary=full_feedback[:500])
-
+                    report_ok = True
                     self._current_report_generated = True
+                except FuturesTimeout:
+                    logger.warning("Report generation timed out (60s)")
                 except Exception as e:
                     logger.warning(f"Report generation failed: {e}")
                 finally:
                     self._current_report_generating = False
+
+                if not report_ok:
+                    msg = "原始数据已保存" if raw_snapshot_saved else "数据保存可能不完整"
+                    self.processing_queue.put(("status", f"{msg}，完整报告生成失败/超时，可开始下一位被试"))
 
             except Exception as e:
                 logger.exception("Exception occurred")
