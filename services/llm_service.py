@@ -46,11 +46,17 @@ class LLMService:
             if OLLAMA_MODEL in available:
                 self.model = OLLAMA_MODEL
             elif available:
+                logger.warning(
+                    f"Configured model '{OLLAMA_MODEL}' not found in Ollama. "
+                    f"Available: {available}. Falling back to '{available[0]}'."
+                )
                 self.model = available[0]
             else:
                 self.model = OLLAMA_MODEL
+                logger.warning(f"No models found in Ollama. Using configured '{OLLAMA_MODEL}'.")
         else:
             self.model = model
+        logger.info(f"[LLM] Using model: {self.model}")
         
     def reset_conversation(self):
         """Clear conversation history."""
@@ -109,7 +115,8 @@ class LLMService:
         request_started = time.perf_counter()
         first_token_recorded = False
         stream_options = {
-            "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "薇薇老师:", "薇薇老师："]
+            "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "薇薇老师:", "薇薇老师："],
+            "think": False,  # Qwen3: disable thinking mode for real-time voice chat
         }
 
         try:

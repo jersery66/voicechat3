@@ -182,9 +182,9 @@ def _detect_voice_prompt_text():
 def _detect_ollama_model():
     """Try to get the best available Ollama model for conversation.
 
-    Prefers the 72B model for high-quality chat; falls back to smaller
-    models if 72B is unavailable.  Compatible with both legacy dict
-    format and newer ollama SDK objects (``.model`` attribute).
+    Prefers qwen3.6/35b for real-time voice chat (lower latency, no thinking).
+    Falls back to qwen2.5:72b if qwen3 is unavailable.
+    Compatible with both legacy dict format and newer ollama SDK objects.
     """
     try:
         import ollama
@@ -201,7 +201,12 @@ def _detect_ollama_model():
                 names.append(name)
         if not names:
             return None
-        for pref in ["72b", "32b", "14b", "8b"]:
+        # Priority: qwen3.6 > qwen3 > 35b/32b > 72b > 14b > 8b
+        for exact in ["qwen3.6:35b", "qwen3.6", "qwen3:32b", "qwen3:14b"]:
+            for n in names:
+                if exact.lower() in n.lower():
+                    return n
+        for pref in ["35b", "32b", "72b", "14b", "8b"]:
             for n in names:
                 if pref in n.lower():
                     return n
@@ -247,7 +252,7 @@ DATA_ROOT = os.environ.get(
 )
 
 # ============== Ollama ==============
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL") or _OLLAMA_DETECTED or "qwen2.5:72b"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL") or _OLLAMA_DETECTED or "qwen3.6:35b"
 
 
 def print_model_status():
