@@ -132,6 +132,9 @@ class PipelineResult:
     crisis_risk: int = 0
     crisis_indicators: list = field(default_factory=list)
     scale_tags: dict = field(default_factory=dict)
+    scale_completed: bool = False
+    all_scales_completed: bool = False
+    completed_scale_name: Optional[str] = None
 
 
 @dataclass
@@ -310,6 +313,11 @@ class ConversationPipeline:
 
         from services.scales import get_scale_manager
         scale_mgr = get_scale_manager()
+
+        # Round gate: don't start new scales in early rapport-building rounds.
+        # Active scales (already in progress) are不受此限制.
+        current_rounds = self.report.get_round_count() if self.report else 0
+        allow_new_scale = current_rounds >= config.MIN_ROUNDS_BEFORE_SCALE
 
         # Active scale takes priority — keep asking until completed
         if self._active_scale:
@@ -576,8 +584,14 @@ class ConversationPipeline:
 
         # --- TTS + Agent post-processing (concurrent) ---
         # TTS doesn't need agent results. Run both in parallel to save 1-3s.
+        # Skip normal response TTS when END tag is detected — the session-end
+        # flow will generate and play its own farewell TTS. Playing both causes
+        # overlapping audio and stuttering.
         tts_future = None
-        if config.use_tts and self.tts and result.tts_text:
+        skip_normal_tts = bool(result.end_type)
+        if skip_normal_tts:
+            logger.info("[TTS] Skipping normal response TTS — END tag detected, session-end TTS will handle farewell.")
+        if config.use_tts and self.tts and result.tts_text and not skip_normal_tts:
             emit("status", "正在播放...")
             tts_future = self._executor.submit(self._play_tts, result.tts_text)
 
