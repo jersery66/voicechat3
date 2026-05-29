@@ -391,9 +391,46 @@ class PDFReportGenerator:
             story.append(assess_table)
             
             story.append(Spacer(1, 15))
-            
+
+            # Scale Results Section
+            scale_results = report_data.get("scale_results", {})
+            if scale_results:
+                story.append(Paragraph("三、量表评估结果", styles["heading"]))
+                for scale_key, scale in scale_results.items():
+                    title = (
+                        f"{scale_key}：总分 {scale.get('total_score', 0)} / "
+                        f"{scale.get('max_score', 0)}，"
+                        f"严重程度：{scale.get('severity', '未分类')}，"
+                        f"完成状态：{'已完成' if scale.get('completed') else '未完成'}"
+                    )
+                    story.append(Paragraph(title, styles["body"]))
+                    story.append(Spacer(1, 4))
+
+                    rows = [["题号", "题目", "分数", "选项"]]
+                    for item in scale.get("items", []):
+                        rows.append([
+                            str(item.get("q_num", "")),
+                            Paragraph(str(item.get("question", "")), styles["body"]),
+                            "" if item.get("score") is None else str(item.get("score")),
+                            str(item.get("label") or "未作答"),
+                        ])
+
+                    table = Table(rows, colWidths=[1.2*cm, 9*cm, 1.5*cm, 3*cm])
+                    table.setStyle(TableStyle([
+                        ('FONTNAME', (0, 0), (-1, -1), self.font_name if self.font_registered else 'Helvetica'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 9),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('GRID', (0, 0), (-1, -1), 0.3, colors.Color(0.85, 0.85, 0.85)),
+                        ('PADDING', (0, 0), (-1, -1), 5),
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.92, 0.92, 0.92)),
+                    ]))
+                    story.append(table)
+                    story.append(Spacer(1, 8))
+
+                story.append(Spacer(1, 15))
+
             # Conversation Summary Section
-            story.append(Paragraph("三、会话摘要", styles["heading"]))
+            story.append(Paragraph("四、会话摘要", styles["heading"]))
             
             # Try multiple possible field names for summary
             summary = (report_data.get("summary") or 
@@ -410,7 +447,7 @@ class PDFReportGenerator:
             
             # Recommendations Section
             if recommendations:
-                story.append(Paragraph("四、具体建议", styles["heading"]))
+                story.append(Paragraph("五、具体建议", styles["heading"]))
                 
                 if isinstance(recommendations, list):
                     for i, rec in enumerate(recommendations, 1):

@@ -406,6 +406,9 @@ class MainWindow(QMainWindow):
             if et == EndType.SAFETY and result.crisis_risk < 7:
                 self.processing_queue.put(("show_crisis", None))
             self._handle_session_end(et, result.relaxation_rec)
+        elif result.all_scales_completed:
+            # All triggered scales done — recommend a short relaxation
+            self.processing_queue.put(("all_scales_completed", None))
         elif result.relaxation_rec and not self._asking_scales:
             self.processing_queue.put(("highlight_relax", result.relaxation_rec))
             self.processing_queue.put(("status", "准备就绪"))
@@ -484,6 +487,9 @@ class MainWindow(QMainWindow):
                     }
                     relax_key = relax_map.get(content, content)
                     self.control_panel.highlight_relax_button(relax_key)
+
+                elif msg_type == "all_scales_completed":
+                    self._recommend_relaxation_after_scales()
 
                 elif msg_type == "session_warning":
                     if content == "TIME_LIMIT_ASK":
@@ -801,6 +807,28 @@ class MainWindow(QMainWindow):
         indicators = risk_data.get("indicators", []) if risk_data else []
         dialog = CrisisDialog(self, CRISIS_HOTLINES, risk_level, indicators)
         dialog.exec()
+
+    def _recommend_relaxation_after_scales(self):
+        """After all scales are done, recommend a short relaxation training."""
+        # Don't recommend if already done or currently in relaxation
+        if self.orchestrator.ctx.current_relaxation_type:
+            return
+        if self.orchestrator.state == SessionState.RELAXATION_RECOMMENDED:
+            return
+
+        tag = self._get_end_relaxation_tag()
+        tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
+
+        rec_text = (
+            f"刚才我们把最近这段时间的状态大致捋清楚了。[breath]"
+            f"接下来可以做个短的{tag_cn}放松，让身体也缓一缓。"
+        )
+        self.chat_panel.add_system_message(rec_text, as_ai=True)
+        self._play_tts_async(rec_text)
+
+        self.orchestrator.transition_to(SessionState.RELAXATION_RECOMMENDED)
+        QTimer.singleShot(1000, lambda: self.control_panel.highlight_relax_button(tag))
+        self.control_panel.set_status("建议完成放松训练")
 
     def _start_post_relaxation_timeout(self):
         """启动放松后超时定时器（60秒无操作自动结束）"""

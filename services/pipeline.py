@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.logger import get_logger
 from services.metrics import get_metrics
+from config import MIN_ROUNDS_BEFORE_SCALE
 
 logger = get_logger(__name__)
 
@@ -89,6 +90,37 @@ def infer_scale_score_from_text(text: str, scale_name: str) -> Optional[int]:
             return 4
 
     return None
+
+
+# Natural-language versions of scale questions for conversational delivery.
+# Keys are (scale_name, question_number).  Used by the programmatic question
+# branch so the TTS reads like a casual follow-up rather than a questionnaire.
+NATURAL_SCALE_QUESTIONS = {
+    ("PHQ-9", 1): "这阵子做事情的时候，兴趣和劲头怎么样？",
+    ("PHQ-9", 2): "心情这块儿呢，会不会经常低落、沮丧，或者觉得没希望？",
+    ("PHQ-9", 3): "睡眠怎么样，入睡、睡踏实，或者睡太多这几种情况有没有？",
+    ("PHQ-9", 4): "白天精力怎么样，会不会总觉得累、没力气？",
+    ("PHQ-9", 5): "吃饭这块儿有没有变化，比如吃不下，或者吃得比平时多？",
+    ("PHQ-9", 6): "有没有常觉得自己不够好，或者让家里人失望了？",
+    ("PHQ-9", 7): "注意力怎么样，看东西或者做点事的时候，会不会很难集中？",
+    ("PHQ-9", 8): "最近动作、说话有没有明显变慢，或者反过来坐不住、烦躁得厉害？",
+    ("PHQ-9", 9): "有没有出现过不想活，或者伤害自己的念头？",
+    ("GAD-7", 1): "这阵子紧张、焦虑、心里发急的情况多不多？",
+    ("GAD-7", 2): "担心一起来的时候，能不能停下来？",
+    ("GAD-7", 3): "会不会很多事都忍不住担心？",
+    ("GAD-7", 4): "身体和心里放松下来难不难？",
+    ("GAD-7", 5): "有没有不安到坐不住的时候？",
+    ("GAD-7", 6): "最近会不会比平时更容易烦、容易急？",
+    ("GAD-7", 7): "有没有总觉得要出什么不好的事？",
+    ("PCL-5", 1): "那件 stressful 的事，会不会不由自主地反复想起来？",
+    ("PCL-5", 2): "有没有做过跟那件事有关的噩梦？",
+    ("PCL-5", 3): "会不会尽量不去想、不去提那件事？",
+    ("PCL-5", 4): "跟那件事相关的人、地方、活动，会不会尽量避开？",
+    ("PCL-5", 5): "对自己、对别人、对这个世界，有没有一些很强烈的负面想法？",
+    ("PCL-5", 6): "会不会一直在责怪自己，或者责怪别人？",
+    ("PCL-5", 7): "最近是不是特别容易紧张、受惊？",
+    ("PCL-5", 8): "集中注意力有没有变得困难？",
+}
 
 
 def detect_tag(text: str, patterns: dict) -> Optional[str]:
@@ -405,7 +437,7 @@ class ConversationPipeline:
         # Round gate: don't start new scales in early rapport-building rounds.
         # Active scales (already in progress) are不受此限制.
         current_rounds = self.report.get_round_count() if self.report else 0
-        allow_new_scale = current_rounds >= config.MIN_ROUNDS_BEFORE_SCALE
+        allow_new_scale = current_rounds >= MIN_ROUNDS_BEFORE_SCALE
 
         # Active scale takes priority — keep asking until completed
         if self._active_scale:
@@ -444,6 +476,11 @@ class ConversationPipeline:
                 if active_prompt:
                     system_suffix += "\n" + active_prompt
                     logger.warning(f"[ScaleDebug] started queued {next_scale}, asking Q1")
+            elif not allow_new_scale:
+                # Still in rapport-building rounds — don't start new scales yet
+                logger.warning(
+                    f"[ScaleDebug] skip new scale: round {current_rounds} < {MIN_ROUNDS_BEFORE_SCALE}"
+                )
             else:
                 # Use candidates for multi-scale detection
                 candidates = scale_mgr.recommend_scale_candidates(
@@ -507,14 +544,12 @@ class ConversationPipeline:
                 q_num = self._active_scale_q
                 total = len(scale_def["questions"])
                 q_text = scale_def["questions"][q_num - 1]
-                options_text = " / ".join(
-                    f"{opt['score']}-{opt['label']}" for opt in scale_def["options"]
-                )
-                # Build a natural spoken question
+                # Use natural question phrasing if available
+                natural = NATURAL_SCALE_QUESTIONS.get((self._active_scale, q_num))
                 if q_num == 1:
-                    spoken_text = f"我先简单了解一下。[breath]最近两周，你有没有{q_text}？"
+                    spoken_text = f"我先顺着你刚才说的了解一下。[breath]{natural or q_text}"
                 else:
-                    spoken_text = f"[breath]{q_text}"
+                    spoken_text = f"[breath]{natural or q_text}"
 
                 analysis_text = (
                     f"【情绪识别】待评估【状态评估】配合中"
@@ -648,7 +683,10 @@ class ConversationPipeline:
                             break
                     if next_q is None:
                         # Scale complete
-                        logger.warning(f"[ScaleDebug] completed scale {self._active_scale}: {answered}")
+                        completed_name = self._active_scale
+                        logger.warning(f"[ScaleDebug] completed scale {completed_name}: {answered}")
+                        result.scale_completed = True
+                        result.completed_scale_name = completed_name
                         self._active_scale = None
                         self._active_scale_q = 1
                         self._active_scale_waiting_answer = False
@@ -660,6 +698,11 @@ class ConversationPipeline:
                             self._active_scale_q = 1
                             self._active_scale_waiting_answer = False
                             logger.warning(f"[ScaleDebug] starting queued {next_scale}")
+                        else:
+                            # All triggered scales are now complete
+                            result.all_scales_completed = True
+                            emit("all_scales_completed", completed_name)
+                            logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
                     else:
                         self._active_scale_q = next_q
                         self._active_scale_waiting_answer = False  # need to ask next_q
@@ -792,7 +835,11 @@ class ConversationPipeline:
 
     def _build_active_scale_prompt(self, scale_name: str, q_num: int,
                                     waiting_answer: bool) -> str:
-        """Build a prompt that tells the LLM exactly which scale question to ask/score."""
+        """Build a prompt that tells the LLM which symptom dimension to explore.
+
+        The prompt is for the LLM's internal reasoning only.  The hard rule
+        at the top ensures clinical jargon never leaks into spoken output.
+        """
         from services.scales import SCALES
         scale = SCALES.get(scale_name)
         if not scale:
@@ -800,64 +847,86 @@ class ConversationPipeline:
 
         total = len(scale["questions"])
         q_text = scale["questions"][q_num - 1]
+        natural_q = NATURAL_SCALE_QUESTIONS.get((scale_name, q_num), q_text)
         options_text = " / ".join(
             f"{opt['score']}-{opt['label']}" for opt in scale["options"]
         )
 
         next_q_num = q_num + 1
         next_q_text = scale["questions"][next_q_num - 1] if next_q_num <= total else None
+        next_natural = NATURAL_SCALE_QUESTIONS.get((scale_name, next_q_num), next_q_text) if next_q_text else None
+
+        # Common preamble — invisible-assessment expression rules
+        rule_block = f"""
+【无感量表表达规则】
+你正在做的是后台症状评估，但口语回复必须像自然聊天。
+口语回复中严禁出现以下词语：
+"量表""问卷""题""这一题""上一题""下一题""第几题""评分""分数"
+"{scale_name}""PHQ-9""GAD-7""PCL-5""接下来"
+
+禁止说：
+- "接下来这一题是关于……"
+- "下一题想问……"
+- "上一题你的回答……"
+- "这个量表……"
+
+允许说：
+- "我也想顺着了解一下……"
+- "那睡眠这块呢……"
+- "这种状态挺频繁的，吃饭/睡觉有没有也受影响？"
+- "我再轻轻问一句……"
+- "这块我想多了解一点……"
+"""
 
         # Not yet asked — ask current question, no scoring
         if not waiting_answer:
-            return f"""
-【量表进行中 - {scale_name}】
-当前任务：询问第 {q_num}/{total} 题。
-本轮必须问这个问题，不能泛泛追问原因。
+            return f"""{rule_block}
+【后台任务】询问第 {q_num}/{total} 个症状维度。
+维度描述：{q_text}
+口语化表述：{natural_q}
 
-题目：{q_text}
-评分标准：{options_text}
+本轮用户还没有回答，不要输出 SCALE 标签。
+先简短共情一句（不超过15字），然后用口语化表述自然询问。
+不要泛泛追问原因，要围绕该维度具体问。
 
-回复要求：
-先简短共情一句（不超过15字），然后自然询问该题。
-本轮用户还没有回答该题，所以不要输出 SCALE 标签。
-
-【优先级】如果本轮同时存在知识库提示，必须以量表任务为主。知识库内容只能作为一句简短支持或过渡，不能替代量表追问。
+【优先级】如果本轮同时存在知识库提示，必须以症状探索为主。知识库内容只能作为一句简短支持或过渡。
 """
 
         # Waiting for answer — score this turn
         if next_q_text:
-            return f"""
-【量表进行中 - {scale_name}】
-上一轮你正在询问第 {q_num}/{total} 题：
-{q_text}
+            return f"""{rule_block}
+【后台任务】评分第 {q_num}/{total} 个维度并自然过渡到下一个维度。
+当前维度：{q_text}
+下一维度口语化表述：{next_natural}
 
-用户本轮输入是对这道题的回答。
+用户本轮输入是对当前维度的回答。
 
 评分规则：
-- 如果用户回答足够判断频率/程度，必须输出 [SCALE:{scale_name}:Q{q_num}:S分数]，然后继续询问第 {next_q_num}/{total} 题：{next_q_text}
-- 如果用户回答模糊（如"还好""差不多"），禁止猜测分数，不要输出 SCALE 标签。请围绕当前题追问一个澄清问题，例如"是偶尔几天，还是一半以上时间都这样？"
+- 如果用户回答足够判断频率/程度，在回复末尾输出 [SCALE:{scale_name}:Q{q_num}:S分数]
+- 然后把下一维度自然融入口语追问，不要说"下一题/接下来"
+- 如果用户回答模糊（如"还好""差不多"），禁止猜测分数，不要输出 SCALE 标签。请围绕当前维度追问一个澄清问题，例如"是偶尔几天，还是一半以上时间都这样？"
 
 评分标准：{options_text}
 
 禁止改问"发生了什么事""为什么这样"这类泛化问题。
 
-【优先级】如果本轮同时存在知识库提示，必须以量表任务为主。知识库内容只能作为一句简短支持或过渡，不能替代量表追问。
+【优先级】如果本轮同时存在知识库提示，必须以症状探索为主。
 """
         # Last question — score and wrap up
-        return f"""
-【量表进行中 - {scale_name}】
-上一轮你正在询问最后一题第 {q_num}/{total} 题：
-{q_text}
+        return f"""{rule_block}
+【后台任务】评分最后一个维度（第 {q_num}/{total}）。
+当前维度：{q_text}
 
-用户本轮输入是对这道题的回答。
+用户本轮输入是对该维度的回答。
 
 评分规则：
-- 如果用户回答足够判断，必须输出 [SCALE:{scale_name}:Q{q_num}:S分数]，然后用一句自然的话收束量表。
+- 如果用户回答足够判断，在回复末尾输出 [SCALE:{scale_name}:Q{q_num}:S分数]
+- 然后用一句自然、温暖的话收束，不要暴露"最后一题/量表结束"等信息
 - 如果用户回答模糊，禁止猜测分数。请追问一个澄清问题。
 
 评分标准：{options_text}
 
-【优先级】如果本轮同时存在知识库提示，必须以量表任务为主。知识库内容只能作为一句简短支持或过渡，不能替代量表追问。
+【优先级】如果本轮同时存在知识库提示，必须以症状探索为主。
 """
 
     def _build_system_suffix(self, text: str) -> str:

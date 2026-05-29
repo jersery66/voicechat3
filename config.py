@@ -498,6 +498,10 @@ SUGGESTIONS_PROMPT = """你是温和专业的心理咨询师。来访者目前�
 # Minimum rounds before recommending relaxation training
 MIN_ROUNDS_FOR_RELAXATION = 8
 
+# Minimum conversation rounds before starting scale assessment.
+# First N rounds are for natural rapport-building and problem exploration.
+MIN_ROUNDS_BEFORE_SCALE = 5
+
 # Post-relaxation continue chat timeout (seconds)
 POST_RELAXATION_TIMEOUT = 60
 
