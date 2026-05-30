@@ -96,6 +96,24 @@ SCALES: Dict[str, Dict[str, Any]] = {
 class ScaleManager:
     """Manages standard psychological assessment scales."""
 
+    # Unified keyword lists — single source of truth for both
+    # recommend_scale_candidates() and should_administer().
+    DEPRESSION_KW = [
+        "难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭",
+        "抑郁", "失眠", "睡不着", "疲倦", "没活力", "心情不好",
+        "不开心", "难受", "痛苦", "心里很累",
+    ]
+    ANXIETY_KW = [
+        "焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌",
+        "烦躁", "烦躁不安", "压力",
+    ]
+    TRAUMA_KW = [
+        "噩梦", "创伤", "应激", "闪回", "惊吓",
+    ]
+
+    # Round by which every participant must have been offered at least one scale
+    FORCE_SCALE_ROUND = 5
+
     def get_scale(self, scale_name: str) -> Optional[Dict[str, Any]]:
         """Return a copy of the scale definition (questions + options + metadata)."""
         return SCALES.get(scale_name)
@@ -128,9 +146,6 @@ class ScaleManager:
             "max_score": scale["max_score"],
         }
 
-    # Round by which every participant must have been offered at least one scale
-    FORCE_SCALE_ROUND = 5
-
     def recommend_scale_candidates(self, user_text: str,
                                    administered: set = None) -> List[str]:
         """Recommend one or more scales based on keyword analysis of user text.
@@ -149,42 +164,40 @@ class ScaleManager:
 
         text_lower = user_text.lower()
 
-        depression_kw = ["难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭", "抑郁", "失眠", "睡不着", "疲倦", "没活力"]
-        anxiety_kw = ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁", "烦躁不安", "压力"]
-        trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓"]
-
         if "PHQ-9" not in administered:
-            for kw in depression_kw:
+            for kw in self.DEPRESSION_KW:
                 if kw in text_lower:
                     candidates.append("PHQ-9")
                     break
         if "GAD-7" not in administered:
-            for kw in anxiety_kw:
+            for kw in self.ANXIETY_KW:
                 if kw in text_lower:
                     candidates.append("GAD-7")
                     break
         if "PCL-5" not in administered:
-            for kw in trauma_kw:
+            for kw in self.TRAUMA_KW:
                 if kw in text_lower:
                     candidates.append("PCL-5")
                     break
 
         return candidates
 
-    def should_administer(self, emotion_tracker=None,
+    def should_administer(self,
+                          emotion_tracker=None,
                           report_service=None,
                           user_text=None,
-                          administered: set = None) -> Optional[str]:
+                          administered: set = None,
+                          agent_service=None,
+                          conversation_context: str = "") -> Optional[str]:
         """
         Determine if a scale should be administered based on session context.
         Returns scale name (e.g. "PHQ-9") or None.
 
-        Trigger conditions (relaxed):
-        - After 1 round of conversation
-        - User text contains negative emotion keywords
-        - Emotion tracker detects negative dominant emotion
-        - Emotion trend worsening/volatile
-        - Force PHQ-9 by round 5 if no scale has been given yet
+        Priority:
+        1. Keyword matching (user_text + conversation_context)
+        2. Agent model recommendation (if available)
+        3. Emotion tracker dominant emotion / trend
+        4. Forced PHQ-9 fallback after FORCE_SCALE_ROUND
         """
         if administered is None:
             administered = set()
@@ -195,44 +208,59 @@ class ScaleManager:
             if rounds < 1:
                 return None
 
-        # Force a scale by round 5 if none administered yet
-        if rounds >= self.FORCE_SCALE_ROUND and not administered:
-            return "PHQ-9"
+        # Combine current text and conversation context for keyword detection
+        detect_text = user_text or ""
+        if conversation_context:
+            detect_text = conversation_context + "\n" + detect_text
 
-        if user_text:
-            depression_kw = ["难过", "伤心", "悲伤", "低落", "没意思", "绝望", "想哭", "抑郁", "失眠", "睡不着", "疲倦", "没活力"]
-            anxiety_kw = ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁", "烦躁不安", "压力"]
-            trauma_kw = ["噩梦", "创伤", "应激", "闪回", "惊吓"]
+        if detect_text:
+            text_lower = detect_text.lower()
 
-            for kw in depression_kw:
-                if kw in user_text.lower():
+            for kw in self.DEPRESSION_KW:
+                if kw in text_lower and "PHQ-9" not in administered:
                     return "PHQ-9"
-            for kw in anxiety_kw:
-                if kw in user_text.lower():
+            for kw in self.ANXIETY_KW:
+                if kw in text_lower and "GAD-7" not in administered:
                     return "GAD-7"
-            for kw in trauma_kw:
-                if kw in user_text.lower():
+            for kw in self.TRAUMA_KW:
+                if kw in text_lower and "PCL-5" not in administered:
                     return "PCL-5"
+
+        # Agent fallback for subtle cases keywords can't catch
+        if user_text and agent_service and hasattr(agent_service, "is_available"):
+            try:
+                if agent_service.is_available():
+                    agent_result = agent_service.recommend_scale(
+                        user_text, context=conversation_context
+                    )
+                    if agent_result and agent_result not in administered:
+                        return agent_result
+            except Exception:
+                pass
 
         if emotion_tracker:
             data = emotion_tracker.get_emotion_data()
             dominant = data.get("dominant", "").lower()
 
-            if dominant in ("depressed", "sad", "hopeless", "lonely"):
+            if dominant in ("depressed", "sad", "hopeless", "lonely") and "PHQ-9" not in administered:
                 return "PHQ-9"
-            if dominant in ("traumatized", "fearful"):
+            if dominant in ("traumatized", "fearful") and "PCL-5" not in administered:
                 return "PCL-5"
-            if dominant in ("anxious", "stressed", "nervous", "confused", "angry"):
+            if dominant in ("anxious", "stressed", "nervous", "confused", "angry") and "GAD-7" not in administered:
                 return "GAD-7"
 
             trend = emotion_tracker.get_trend()
             if trend in ("worsening", "volatile"):
-                # Use dominant emotion to pick the right scale instead of always PHQ-9
-                if dominant in ("anxious", "stressed", "nervous"):
+                if dominant in ("anxious", "stressed", "nervous") and "GAD-7" not in administered:
                     return "GAD-7"
-                if dominant in ("fearful", "traumatized"):
+                if dominant in ("fearful", "traumatized") and "PCL-5" not in administered:
                     return "PCL-5"
-                return "PHQ-9"
+                if "PHQ-9" not in administered:
+                    return "PHQ-9"
+
+        # Force a scale by FORCE_SCALE_ROUND if none administered yet
+        if rounds >= self.FORCE_SCALE_ROUND and not administered:
+            return "PHQ-9"
 
         return None
 

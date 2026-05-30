@@ -428,6 +428,39 @@ class ConversationPipeline:
             else:
                 self.data.save_user_message(None, result.user_text)
 
+        # --- Fast path: skip LLM for simple greetings in early rounds ---
+        _GREETING_INPUTS = {"你好", "你好呀", "嗨", "哈喽", "在吗", "老师好", "喂"}
+        current_rounds = self.report.get_round_count() if self.report else 0
+        if current_rounds <= 2 and result.user_text.strip("。！？!?,， ").strip() in _GREETING_INPUTS:
+            import random
+            _GREETING_REPLIES = [
+                "你好呀。[breath]今天感觉咋样？",
+                "嗨，来了呀。[breath]最近怎么样？",
+                "你好。[breath]在这儿呢，有啥想说的？",
+            ]
+            spoken = random.choice(_GREETING_REPLIES)
+            analysis = "【情绪】平静【状态】开放【策略】破冰回应"
+            full = f"{analysis}|||{spoken}"
+            result.full_response = full
+            result.analysis_text = analysis
+            result.spoken_text = spoken
+            result.clean_spoken = clean_for_display(spoken)
+            result.tts_text = clean_for_tts(spoken)
+            result.intent = "counseling"
+            emit("start_ai_message", None)
+            emit("stream_text", result.clean_spoken)
+            emit("finish_streaming", None)
+            if self.data:
+                self.data.save_assistant_message(None, full, sample_rate=48000)
+            if self.llm and hasattr(self.llm, "conversation_history"):
+                self.llm.conversation_history.append({"role": "user", "content": result.user_text})
+                self.llm.conversation_history.append({"role": "assistant", "content": full})
+            if config.use_tts and self.tts and result.tts_text:
+                emit("status", "正在播放...")
+                self._executor.submit(self._play_tts, result.tts_text)
+            metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
+            return result
+
         # --- System suffix: RAG + round warning + scale (no agent dependency) ---
         with metrics.timer("rag.system_suffix"):
             system_suffix = self._build_system_suffix(result.user_text)
@@ -483,20 +516,27 @@ class ConversationPipeline:
                     f"[ScaleDebug] skip new scale: round {current_rounds} < {MIN_ROUNDS_BEFORE_SCALE}"
                 )
             else:
-                # Use candidates for multi-scale detection
+                # Build conversation context for keyword detection across turns
+                scale_context = ""
+                if self.llm and hasattr(self.llm, 'conversation_history'):
+                    recent_user = [
+                        m["content"] for m in self.llm.conversation_history[-6:]
+                        if m.get("role") == "user"
+                    ]
+                    if recent_user:
+                        scale_context = "\n".join(recent_user[-3:])
+
+                # Combine context + current text for keyword matching
+                detect_text = result.user_text
+                if scale_context:
+                    detect_text = scale_context + "\n" + result.user_text
+
+                # Use candidates for multi-scale detection (keyword-based)
                 candidates = scale_mgr.recommend_scale_candidates(
-                    result.user_text, administered=self._administered_scales
+                    detect_text, administered=self._administered_scales
                 )
                 # Also check should_administer for agent/emotion fallback
                 if not candidates:
-                    scale_context = ""
-                    if self.llm and hasattr(self.llm, 'conversation_history'):
-                        recent_user = [
-                            m["content"] for m in self.llm.conversation_history[-6:]
-                            if m.get("role") == "user"
-                        ]
-                        if recent_user:
-                            scale_context = "\n".join(recent_user[-3:])
                     single = scale_mgr.should_administer(
                         self.emotion_tracker, self.report,
                         user_text=result.user_text, administered=self._administered_scales,
