@@ -765,7 +765,14 @@ class ConversationPipeline:
         if self.agent and crisis_result.get("risk_level", 0) < 7:
             emotion = result.emotion_result.get("emotion", "neutral")
             intensity = result.emotion_result.get("intensity", 0.0)
-            if emotion != "neutral" or intensity >= 0.5:
+            # Only trigger LLM crisis reassessment for negative/risk emotions
+            # or very high intensity. Positive emotions like "happy" should NOT
+            # trigger an extra LLM call.
+            _risk_emotions = {
+                "sad", "depressed", "hopeless", "angry", "fearful",
+                "anxious", "stressed", "traumatized", "desperate",
+            }
+            if emotion in _risk_emotions or intensity >= 0.85:
                 with metrics.timer("agent.crisis"):
                     crisis_result = self.agent.assess_crisis_risk(
                         result.user_text, use_llm=True)
@@ -779,12 +786,12 @@ class ConversationPipeline:
             f"| Crisis risk: {result.crisis_risk}"
         )
 
-        # Wait for TTS to finish playing (if still running)
+        # Don't block pipeline waiting for TTS — let it play in background.
+        # Use a callback to log errors without holding up the UI.
         if tts_future is not None:
-            try:
-                tts_future.result(timeout=30)
-            except Exception as e:
-                logger.warning(f"TTS error: {e}")
+            tts_future.add_done_callback(
+                lambda f: logger.warning(f"TTS error: {f.exception()}") if f.exception() else None
+            )
 
         result.scale_active = bool(self._active_scale)
         metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
