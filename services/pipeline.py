@@ -179,6 +179,27 @@ def clean_for_tts(text: str) -> str:
     return text.strip()
 
 
+def make_safe_fallback_reply(user_text: str) -> str:
+    """Return a safe spoken fallback when the LLM outputs only analysis or empty text."""
+    text = (user_text or "").strip("。！？!?,， ")
+
+    if not text:
+        return "嗯，我在听。[breath]你可以慢慢说。"
+
+    if text in {"你好", "你好呀", "嗨", "哈喽", "在吗", "老师好", "喂"} or (
+        "你好" in text and len(text) <= 10
+    ):
+        return "你好呀。[breath]今天感觉咋样？"
+
+    if any(x in text for x in ["不知道", "说不出来", "不晓得"]):
+        return "没事。[breath]不用一下子说清楚，先从最难受的那一点说也行。"
+
+    if any(x in text for x in ["不开心", "心情不好", "心里很累", "难受", "低落"]):
+        return "听起来心里挺累的。[breath]不用急，我们慢慢捋。"
+
+    return "嗯，我在听。[breath]你可以慢慢说。"
+
+
 # ==================== Pipeline Result ====================
 
 @dataclass
@@ -431,7 +452,13 @@ class ConversationPipeline:
         # --- Fast path: skip LLM for simple greetings in early rounds ---
         _GREETING_INPUTS = {"你好", "你好呀", "嗨", "哈喽", "在吗", "老师好", "喂"}
         current_rounds = self.report.get_round_count() if self.report else 0
-        if current_rounds <= 2 and result.user_text.strip("。！？!?,， ").strip() in _GREETING_INPUTS:
+        _normalized = result.user_text.strip("。！？!?,， ").strip()
+        _is_greeting = (
+            _normalized in _GREETING_INPUTS
+            or ("你好" in _normalized and len(_normalized) <= 10)
+            or (len(_normalized) <= 6 and _normalized.replace("呀", "").replace("啊", "").replace("哈", "") in {"你好", "嗨"})
+        )
+        if current_rounds <= 2 and _is_greeting:
             import random
             _GREETING_REPLIES = [
                 "你好呀。[breath]今天感觉咋样？",
@@ -1084,8 +1111,12 @@ class ConversationPipeline:
                     else:
                         spoken_text = spoken_text
 
-        if not spoken_text and full_response:
-            spoken_text = full_response.strip()
-            logger.warning(f"spoken_text was empty, falling back to full_response")
+        # Final safety: if spoken_text is still empty or only contains analysis
+        # tags that will be stripped by clean_for_display, use a safe fallback.
+        if not clean_for_display(spoken_text).strip():
+            logger.warning(
+                f"spoken_text empty after final cleaning. full_response_head={full_response[:300]!r}"
+            )
+            spoken_text = make_safe_fallback_reply(text)
 
         return full_response, analysis_text, spoken_text
