@@ -857,6 +857,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_post_relaxation_timer') and self._post_relaxation_timer.isActive():
             self._post_relaxation_timer.stop()
 
+    def _safe_play_farewell_tts(self, text):
+        """Play farewell TTS without blocking report generation."""
+        try:
+            if self.tts_service and text:
+                self.tts_service.generate_and_play(text)
+        except Exception as e:
+            logger.warning(f"Farewell TTS failed: {e}")
+
     def _on_continue_chosen(self):
         """用户选择继续聊天"""
         self._cancel_post_relaxation_timer()
@@ -1189,10 +1197,17 @@ class MainWindow(QMainWindow):
 
     def _on_exit_program(self):
         """退出整个程序。如果当前被试报告未生成，先生成报告再退出。"""
+        # Stop any playing TTS immediately on exit
+        if self.tts_service:
+            try:
+                self.tts_service.stop_playing()
+            except Exception:
+                pass
+
         if self._session_ending:
             # Session end flow already running — just mark for quit after it finishes
             self._pending_quit = True
-            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...", force_quit_timeout=120000)
+            self._show_exit_waiting_dialog("正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000)
             return
 
         # No current subject — just quit immediately, no report needed.
@@ -1214,7 +1229,7 @@ class MainWindow(QMainWindow):
             # Need to generate report before quitting
             self._pending_quit = True
             self._user_explicit_end = True
-            self._show_exit_waiting_dialog("正在生成报告，完成后将自动退出...", force_quit_timeout=120000)
+            self._show_exit_waiting_dialog("正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000)
             self._handle_session_end(EndType.QUIT)
             return
 
@@ -1557,7 +1572,11 @@ class MainWindow(QMainWindow):
             return
 
         # action == "generate_reports"
-        self.processing_queue.put(("status", "正在生成告别语..."))
+        is_exit = self._pending_quit
+        if is_exit:
+            self.processing_queue.put(("status", "正在保存本次会话..."))
+        else:
+            self.processing_queue.put(("status", "正在生成告别语..."))
 
         def generate_farewell_and_reports():
             try:
@@ -1571,44 +1590,50 @@ class MainWindow(QMainWindow):
                     tag_map = {"呼吸": "BREATHING", "肌肉": "MUSCLE", "冥想": "MEDITATION"}
                     relaxation_rec = tag_map.get(relaxation_tag)
 
-                # --- Phase 1: Generate farewell text via LLM streaming ---
-                self.processing_queue.put(("start_ai_message", None))
+                # --- Phase 1: Visitor feedback ---
+                # Exit path: skip long farewell, keep it short.
+                # End session: generate full farewell via LLM streaming.
                 full_feedback = ""
-                try:
-                    stream_gen = self.report_service.generate_visitor_feedback(
-                        conversation_history, end_type, relaxation_rec or relax_str,
-                        stream=True, session_emotions=self.session_emotions
-                    )
-                    for chunk in stream_gen:
-                        full_feedback += chunk
-                        clean = re.sub(r'<\|[^>]+\|>', '', chunk)
-                        clean = re.sub(r'\[REC_[A-Z_]+\]', '', clean)
-                        clean = re.sub(r'\[END_[A-Z_]+\]', '', clean)
-                        clean = re.sub(r'\[SCALE:[^]]+\]', '', clean)
-                        if clean.strip():
-                            self.processing_queue.put(("stream_text", clean.strip()))
-                except Exception as e:
-                    logger.warning(f"Visitor feedback generation failed: {e}")
-                    full_feedback = "今天的聊天到此结束，希望对你有所帮助。有事儿随时来找我唠。"
-
-                self.processing_queue.put(("finish_streaming", None))
+                if is_exit:
+                    full_feedback = "本次会话已结束，系统正在保存报告。"
+                    self.processing_queue.put(("append_chat", ("ai", full_feedback)))
+                else:
+                    self.processing_queue.put(("start_ai_message", None))
+                    try:
+                        stream_gen = self.report_service.generate_visitor_feedback(
+                            conversation_history, end_type, relaxation_rec or relax_str,
+                            stream=True, session_emotions=self.session_emotions
+                        )
+                        for chunk in stream_gen:
+                            full_feedback += chunk
+                            clean = re.sub(r'<\|[^>]+\|>', '', chunk)
+                            clean = re.sub(r'\[REC_[A-Z_]+\]', '', clean)
+                            clean = re.sub(r'\[END_[A-Z_]+\]', '', clean)
+                            clean = re.sub(r'\[SCALE:[^]]+\]', '', clean)
+                            if clean.strip():
+                                self.processing_queue.put(("stream_text", clean.strip()))
+                    except Exception as e:
+                        logger.warning(f"Visitor feedback generation failed: {e}")
+                        full_feedback = "今天的聊天到此结束，希望对你有所帮助。有事儿随时来找我唠。"
+                    self.processing_queue.put(("finish_streaming", None))
 
                 if end_type == EndType.SAFETY:
                     self.processing_queue.put(("show_crisis", None))
 
                 self.orchestrator.transition_to(SessionState.SESSION_ENDED)
-                self.processing_queue.put(("status", "会话已结束 - 可开始新会话"))
 
-                # --- Phase 2: Play farewell TTS synchronously ---
-                # Must finish before cleanup so audio isn't killed mid-playback.
-                if self.tts_service and full_feedback:
-                    try:
-                        self.tts_service.generate_and_play(full_feedback)
-                    except Exception as e:
-                        logger.warning(f"Farewell TTS failed: {e}")
+                # --- Phase 2: TTS in background, do NOT block report generation ---
+                # Exit path: don't play long farewell audio.
+                # End session: play farewell in background thread.
+                if self.tts_service and full_feedback and not is_exit:
+                    threading.Thread(
+                        target=self._safe_play_farewell_tts,
+                        args=(full_feedback,),
+                        daemon=True
+                    ).start()
 
                 # --- Phase 3: Save raw snapshot → Generate report + PDF ---
-                # Save raw data first so nothing is lost if report/PDF fails.
+                # Reports are the priority — generate immediately, don't wait for TTS.
                 self._current_report_generating = True
                 self.processing_queue.put(("status", "正在保存会话数据..."))
                 raw_snapshot_saved = False
@@ -1657,7 +1682,6 @@ class MainWindow(QMainWindow):
                             researcher_report["scale_results"] = scale_results
                     if isinstance(researcher_report, dict) and hasattr(self.report_service, 'activity_log'):
                         researcher_report["activity_log"] = self.report_service.activity_log
-                    # Attach completion_status if user ended with incomplete scales/relaxation
                     if isinstance(researcher_report, dict) and self._completion_status:
                         researcher_report["completion_status"] = self._completion_status
 
@@ -1704,14 +1728,10 @@ class MainWindow(QMainWindow):
                 logger.warning(f"Report generation failed: {e}")
 
             finally:
-                if self._pending_quit:
-                    # Exit program path — quit after report
-                    self._pending_quit = False
+                if is_exit:
                     logger.info("[ExitDebug] report done, queuing quit")
-                    # Use processing_queue — the main thread's QTimer drains it.
                     self.processing_queue.put(("quit", None))
                 else:
-                    # End session path — prepare for next subject, don't quit
                     logger.info("[ExitDebug] report done, queuing session_finished")
                     self.processing_queue.put(("session_finished", None))
 
