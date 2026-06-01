@@ -109,7 +109,7 @@ class LLMService:
         request_started = time.perf_counter()
         first_token_recorded = False
         stream_options = {
-            "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:", "Assistant:", "薇薇老师:", "薇薇老师："],
+            "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],
             "num_predict": 120,   # Cap output length for real-time voice chat
             "temperature": 0.5,   # Lower temperature for more consistent responses
         }
@@ -123,6 +123,9 @@ class LLMService:
             )
 
             for chunk in stream:
+                if chunk.get("done"):
+                    logger.info(f"[LLM] stream done: done_reason={chunk.get('done_reason')}, "
+                                f"eval_count={chunk.get('eval_count')}")
                 if "message" in chunk and "content" in chunk["message"]:
                     content = chunk["message"]["content"]
                     if not content:
@@ -140,17 +143,39 @@ class LLMService:
         except Exception as e:
             logger.error(f"LLM Generation Failed (chunks_yielded={chunks_yielded}): {e}")
             if chunks_yielded == 0:
-                # No chunk reached the UI: safe to drop the user turn entirely.
                 if self.conversation_history and self.conversation_history[-1]["role"] == "user":
                     self.conversation_history.pop()
             else:
-                # Partial output already streamed: persist it so history matches UI.
                 self.conversation_history.append({
                     "role": "assistant",
                     "content": full_response,
                     "partial_response_recovered": True,
                 })
             raise
+
+        # Retry once if stream returned empty (stop sequence may have killed it)
+        if chunks_yielded == 0 or not full_response.strip():
+            logger.warning(
+                f"[LLM] Empty stream response. Retrying without stop. "
+                f"model={self.model}, user_msg={user_message[:80]!r}"
+            )
+            try:
+                retry_resp = self.client.chat(
+                    model=self.model,
+                    messages=messages,
+                    stream=False,
+                    options={"num_predict": 120, "temperature": 0.5},
+                )
+                full_response = retry_resp.get("message", {}).get("content", "").strip()
+            except Exception as retry_err:
+                logger.warning(f"[LLM] Retry also failed: {retry_err}")
+
+            if not full_response.strip():
+                if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+                    self.conversation_history.pop()
+                raise RuntimeError(f"LLM returned empty response after retry. model={self.model}")
+
+            yield full_response
 
         # Add assistant response to history
         self.conversation_history.append({

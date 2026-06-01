@@ -1030,6 +1030,10 @@ class ConversationPipeline:
                 if recent:
                     rag_text = "\n".join(recent[-3:] + [text])
             rag_suffix = self.rag.get_system_suffix(rag_text)
+            # Truncate RAG suffix to keep prompt manageable for real-time voice
+            MAX_RAG_SUFFIX_CHARS = 1200
+            if rag_suffix and len(rag_suffix) > MAX_RAG_SUFFIX_CHARS:
+                rag_suffix = rag_suffix[:MAX_RAG_SUFFIX_CHARS] + "\n【知识库已截断，仅保留最相关内容】"
             logger.warning(f"[RagDebug] user_text={text!r} rag_text={rag_text!r} "
                           f"injected={bool(rag_suffix)} len={len(rag_suffix) if rag_suffix else 0}")
             if rag_suffix:
