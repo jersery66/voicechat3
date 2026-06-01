@@ -94,7 +94,8 @@ class LLMService:
         })
 
         # Build messages list with system prompt
-        current_system_prompt = self.system_prompt
+        # /no_think disables Qwen3 thinking mode at the prompt level
+        current_system_prompt = "/no_think\n" + self.system_prompt
         if self.history_context:
             current_system_prompt += self.history_context
         if system_suffix:
@@ -110,8 +111,9 @@ class LLMService:
         first_token_recorded = False
         stream_options = {
             "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],
-            "num_predict": 120,   # Cap output length for real-time voice chat
-            "temperature": 0.5,   # Lower temperature for more consistent responses
+            "num_predict": 256,   # Qwen3 may consume tokens for thinking/templates
+            "temperature": 0.4,
+            "top_p": 0.8,
         }
 
         try:
@@ -153,7 +155,7 @@ class LLMService:
                 })
             raise
 
-        # Retry once if stream returned empty (stop sequence may have killed it)
+        # Retry once if stream returned empty (thinking/templates may consume all tokens)
         if chunks_yielded == 0 or not full_response.strip():
             logger.warning(
                 f"[LLM] Empty stream response. Retrying without stop. "
@@ -164,20 +166,23 @@ class LLMService:
                     model=self.model,
                     messages=messages,
                     stream=False,
-                    options={"num_predict": 120, "temperature": 0.5},
+                    options={"num_predict": 256, "temperature": 0.4, "top_p": 0.8},
                 )
                 full_response = retry_resp.get("message", {}).get("content", "").strip()
             except Exception as retry_err:
                 logger.warning(f"[LLM] Retry also failed: {retry_err}")
 
             if not full_response.strip():
-                if self.conversation_history and self.conversation_history[-1]["role"] == "user":
-                    self.conversation_history.pop()
-                raise RuntimeError(f"LLM returned empty response after retry. model={self.model}")
+                # Graceful fallback — do NOT raise, keep session alive
+                fallback_spoken = self._fallback_reply(user_message)
+                full_response = f"【情绪】待确认【状态】可继续【策略】兜底回应|||{fallback_spoken}"
+                logger.warning(
+                    f"[LLM] Empty after retry, using fallback: {fallback_spoken}"
+                )
 
             yield full_response
 
-        # Add assistant response to history
+        # Add assistant response to history (including fallback)
         self.conversation_history.append({
             "role": "assistant",
             "content": full_response
@@ -185,7 +190,25 @@ class LLMService:
 
         # Compress history if too long
         self._maybe_summarize()
-        
+
+    def _fallback_reply(self, user_message: str) -> str:
+        """Safe spoken fallback when Ollama returns empty output."""
+        text = (user_message or "").strip("。！？!?,， ")
+
+        if not text:
+            return "嗯，我在听。[breath]你可以慢慢说。"
+
+        if "你好" in text and len(text) <= 10:
+            return "你好呀。[breath]今天感觉咋样？"
+
+        if any(x in text for x in ["不知道", "说不出来", "不晓得"]):
+            return "没事。[breath]不用一下子说清楚，先从最难受的那一点说也行。"
+
+        if any(x in text for x in ["不开心", "心情不好", "心情不是特别开心", "低落", "难受", "心里累"]):
+            return "听起来这会儿心情挺沉的。[breath]不用急，我们慢慢说。"
+
+        return "嗯，我在听。[breath]你可以接着说。"
+
     def _maybe_summarize(self):
         """Compress conversation history using the 3B agent when it grows too long."""
         if len(self.conversation_history) < self.MAX_HISTORY_TURNS * 2:

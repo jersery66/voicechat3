@@ -701,9 +701,16 @@ class ConversationPipeline:
             self._classify_intent_emotion_crisis, result.user_text
         )
 
-        with metrics.timer("llm.stream"):
-            result.full_response, result.analysis_text, result.spoken_text = \
-                self._stream_llm(result.user_text, final_suffix, emit)
+        try:
+            with metrics.timer("llm.stream"):
+                result.full_response, result.analysis_text, result.spoken_text = \
+                    self._stream_llm(result.user_text, final_suffix, emit)
+        except Exception as e:
+            logger.warning(f"[Pipeline] LLM failed, using fallback: {e}")
+            result.spoken_text = make_safe_fallback_reply(result.user_text)
+            result.analysis_text = "【情绪】待确认【状态】可继续【策略】兜底回应"
+            result.full_response = f"{result.analysis_text}|||{result.spoken_text}"
+            emit("stream_text", clean_for_display(result.spoken_text))
         emit("finish_streaming", None)
 
         # --- Prepare TTS text immediately ---
