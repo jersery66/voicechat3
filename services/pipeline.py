@@ -181,10 +181,14 @@ def clean_for_tts(text: str) -> str:
 
 def make_safe_fallback_reply(user_text: str) -> str:
     """Return a safe spoken fallback when the LLM outputs only analysis or empty text."""
+    import random
     text = (user_text or "").strip("。！？!?,， ")
 
     if not text:
-        return "嗯，我在听。[breath]你可以慢慢说。"
+        return random.choice([
+            "嗯，我在听呢。[breath]你可以慢慢说。",
+            "你说，我听着。[breath]不着急。",
+        ])
 
     if text in {"你好", "你好呀", "嗨", "哈喽", "在吗", "老师好", "喂"} or (
         "你好" in text and len(text) <= 10
@@ -192,12 +196,21 @@ def make_safe_fallback_reply(user_text: str) -> str:
         return "你好呀。[breath]今天感觉咋样？"
 
     if any(x in text for x in ["不知道", "说不出来", "不晓得"]):
-        return "没事。[breath]不用一下子说清楚，先从最难受的那一点说也行。"
+        return random.choice([
+            "你说'不知道'，感觉不是真的没想法，而是心里堵着不好表达。[breath]没关系，我们不急，你先说说现在最难受的是哪一块？",
+            "听起来你现在有点被卡住了。[breath]没关系，我们慢慢捋，你先说说最近最让你放不下的是什么？",
+        ])
 
-    if any(x in text for x in ["不开心", "心情不好", "心里很累", "难受", "低落"]):
-        return "听起来心里挺累的。[breath]不用急，我们慢慢捋。"
+    if any(x in text for x in ["不开心", "心情不好", "心里很累", "难受", "低落", "心情不是特别开心"]):
+        return random.choice([
+            "听起来这阵子心情一直压着，不太好受。[breath]这种不开心是最近才明显起来的，还是已经持续一段时间了？",
+            "你说不开心，我想多了解一下。[breath]是最近发生了什么事，还是这种感觉已经憋了挺久？",
+        ])
 
-    return "嗯，我在听。[breath]你可以慢慢说。"
+    return random.choice([
+        "嗯，我听着呢。[breath]你接着说。",
+        "你说的我都有在听。[breath]再往下说说？",
+    ])
 
 
 # ==================== Pipeline Result ====================

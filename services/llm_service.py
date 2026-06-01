@@ -193,21 +193,34 @@ class LLMService:
 
     def _fallback_reply(self, user_message: str) -> str:
         """Safe spoken fallback when Ollama returns empty output."""
+        import random
         text = (user_message or "").strip("。！？!?,， ")
 
         if not text:
-            return "嗯，我在听。[breath]你可以慢慢说。"
+            return random.choice([
+                "嗯，我在听呢。[breath]你可以慢慢说。",
+                "你说，我听着。[breath]不着急。",
+            ])
 
         if "你好" in text and len(text) <= 10:
             return "你好呀。[breath]今天感觉咋样？"
 
         if any(x in text for x in ["不知道", "说不出来", "不晓得"]):
-            return "没事。[breath]不用一下子说清楚，先从最难受的那一点说也行。"
+            return random.choice([
+                "你说'不知道'，感觉不是真的没想法，而是心里堵着不好表达。[breath]没关系，我们不急，你先说说现在最难受的是哪一块？",
+                "听起来你现在有点被卡住了。[breath]没关系，我们慢慢捋，你先说说最近最让你放不下的是什么？",
+            ])
 
         if any(x in text for x in ["不开心", "心情不好", "心情不是特别开心", "低落", "难受", "心里累"]):
-            return "听起来这会儿心情挺沉的。[breath]不用急，我们慢慢说。"
+            return random.choice([
+                "听起来这阵子心情一直压着，不太好受。[breath]这种不开心是最近才明显起来的，还是已经持续一段时间了？",
+                "你说不开心，我想多了解一下。[breath]是最近发生了什么事，还是这种感觉已经憋了挺久？",
+            ])
 
-        return "嗯，我在听。[breath]你可以接着说。"
+        return random.choice([
+            "嗯，我听着呢。[breath]你接着说。",
+            "你说的我都有在听。[breath]再往下说说？",
+        ])
 
     def _maybe_summarize(self):
         """Compress conversation history using the 3B agent when it grows too long."""
