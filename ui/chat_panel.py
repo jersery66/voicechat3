@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QSizePolicy, QTextEdit
+    QScrollArea, QFrame, QSizePolicy, QTextEdit, QApplication
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QKeyEvent
@@ -228,6 +228,7 @@ class ChatPanel(FrostedPanel):
             if msg["type"] == "ai":
                 msg["bubble"].set_text(text)
                 msg["text"] = text
+                self._scroll_to_bottom()
                 break
 
     def start_ai_message(self):
@@ -250,6 +251,7 @@ class ChatPanel(FrostedPanel):
         """Mark streaming as complete."""
         self._current_streaming_bubble = None
         self.status_indicator.set_state("idle")
+        self._scroll_to_bottom()
 
     def set_ai_status(self, status):
         """External control: 'idle', 'thinking', 'generating', 'speaking'."""
@@ -262,9 +264,18 @@ class ChatPanel(FrostedPanel):
         self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
-        QTimer.singleShot(30, lambda: self.scroll_area.verticalScrollBar().setValue(
-            self.scroll_area.verticalScrollBar().maximum()
-        ))
+        """Scroll to bottom after Qt has recalculated bubble/layout heights."""
+        def do_scroll():
+            self._msg_container.adjustSize()
+            self._msg_container.updateGeometry()
+            QApplication.processEvents()
+            bar = self.scroll_area.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+        # Multiple delayed scrolls to handle QLabel word-wrap and streaming height changes
+        QTimer.singleShot(0, do_scroll)
+        QTimer.singleShot(50, do_scroll)
+        QTimer.singleShot(150, do_scroll)
 
     def _on_send(self):
         text = self.text_input.toPlainText().strip()
