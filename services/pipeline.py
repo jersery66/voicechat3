@@ -223,6 +223,46 @@ def make_safe_fallback_reply(user_text: str) -> str:
     ])
 
 
+def limit_to_one_question(text: str) -> str:
+    """Prevent one reply from containing multiple questions."""
+    if not text:
+        return ""
+    marks = [m.start() for m in re.finditer(r"[？?]", text)]
+    if len(marks) <= 1:
+        return text.strip()
+    # Only keep up to the first question mark
+    return text[:marks[0] + 1].strip()
+
+
+def detect_phq_item_from_text(text: str) -> Optional[int]:
+    """Detect which PHQ-9 item the user's text naturally refers to.
+
+    Returns item number (1-9) or None if no clear match.
+    Used to score the symptom the user is actually talking about,
+    rather than forcing the current active question.
+    """
+    t = text or ""
+    if any(x in t for x in ["没兴趣", "没意思", "提不起劲", "不想做", "做什么都没劲"]):
+        return 1
+    if any(x in t for x in ["心情不好", "不开心", "低落", "沮丧", "没希望", "绝望"]):
+        return 2
+    if any(x in t for x in ["睡不着", "失眠", "睡不好", "早醒", "睡太多", "入睡困难"]):
+        return 3
+    if any(x in t for x in ["累", "没力气", "没劲", "疲惫", "没活力", "乏力"]):
+        return 4
+    if any(x in t for x in ["吃不下", "没胃口", "吃太多", "饭量"]):
+        return 5
+    if any(x in t for x in ["觉得自己很糟", "失败", "让.*失望", "自责", "不够好"]):
+        return 6
+    if any(x in t for x in ["注意力", "集中不了", "看不进去", "专注"]):
+        return 7
+    if any(x in t for x in ["动作变慢", "坐不住", "烦躁", "动来动去", "说话慢"]):
+        return 8
+    if any(x in t for x in ["不想活", "伤害自己", "死", "自杀", "自残"]):
+        return 9
+    return None
+
+
 # ==================== Pipeline Result ====================
 
 @dataclass
@@ -287,6 +327,7 @@ class ConversationPipeline:
         self._active_scale_q: int = 1              # current question number
         self._active_scale_waiting_answer: bool = False  # True = asked, waiting for user reply
         self._scale_queue: List[str] = []           # scales queued while one is active
+        self._scale_pause_turns: int = 0            # turns to pause before next scale item
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -309,6 +350,7 @@ class ConversationPipeline:
         self._active_scale_q = 1
         self._active_scale_waiting_answer = False
         self._scale_queue.clear()
+        self._scale_pause_turns = 0
 
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
@@ -550,8 +592,11 @@ class ConversationPipeline:
                 logger.warning(f"[ScaleDebug] candidates={candidates}, "
                                f"active={self._active_scale}, queue={self._scale_queue}")
         else:
-            # No active scale — check queue first, then detect new
-            if self._scale_queue:
+            # Pause: don't start new scale items for N turns after last sampling
+            if self._scale_pause_turns > 0:
+                self._scale_pause_turns -= 1
+                logger.warning(f"[ScaleDebug] scale paused, remaining={self._scale_pause_turns}")
+            elif self._scale_queue:
                 next_scale = self._scale_queue.pop(0)
                 self._administered_scales.add(next_scale)
                 self._active_scale = next_scale
@@ -751,6 +796,8 @@ class ConversationPipeline:
         emit("finish_streaming", None)
 
         # --- Prepare TTS text immediately ---
+        # Limit to one question per reply to prevent rapid-fire questioning
+        result.spoken_text = limit_to_one_question(result.spoken_text)
         result.clean_spoken = clean_for_display(result.spoken_text)
         emit("clean_last_ai", result.clean_spoken)
         result.tts_text = clean_for_tts(result.spoken_text)
@@ -767,17 +814,33 @@ class ConversationPipeline:
 
         # Fallback: if LLM didn't output a [SCALE:...] tag for the current
         # question, try to infer the score from the user's plain text answer.
-        # This handles cases where the LLM forgets the tag or formats it wrong.
+        # Also detect if user is naturally talking about a different symptom.
         if self._active_scale and self._active_scale_waiting_answer:
             answered = self._scale_answers.get(self._active_scale, {})
             if self._active_scale_q not in answered:
-                inferred = infer_scale_score_from_text(result.user_text, self._active_scale)
-                if inferred is not None:
-                    self._scale_answers.setdefault(self._active_scale, {})[self._active_scale_q] = inferred
-                    logger.warning(
-                        f"[ScaleDebug] inferred score {self._active_scale} "
-                        f"Q{self._active_scale_q} = {inferred} from user_text: {result.user_text!r}"
-                    )
+                # First check if user is talking about a different PHQ-9 item
+                detected_item = None
+                if self._active_scale == "PHQ-9":
+                    detected_item = detect_phq_item_from_text(result.user_text)
+                    if detected_item and detected_item != self._active_scale_q and detected_item not in answered:
+                        # User is talking about a different symptom — score that instead
+                        inferred = infer_scale_score_from_text(result.user_text, self._active_scale)
+                        if inferred is not None:
+                            self._scale_answers.setdefault(self._active_scale, {})[detected_item] = inferred
+                            logger.warning(
+                                f"[ScaleDebug] detected symptom Q{detected_item} (not Q{self._active_scale_q}), "
+                                f"scored {self._active_scale} Q{detected_item} = {inferred}"
+                            )
+
+                # Still try to score the current question
+                if self._active_scale_q not in self._scale_answers.get(self._active_scale, {}):
+                    inferred = infer_scale_score_from_text(result.user_text, self._active_scale)
+                    if inferred is not None:
+                        self._scale_answers.setdefault(self._active_scale, {})[self._active_scale_q] = inferred
+                        logger.warning(
+                            f"[ScaleDebug] inferred score {self._active_scale} "
+                            f"Q{self._active_scale_q} = {inferred} from user_text: {result.user_text!r}"
+                        )
 
         # Advance active scale after scoring
         if self._active_scale:
@@ -817,9 +880,16 @@ class ConversationPipeline:
                             result.all_scales_completed = True
                             logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
                     else:
-                        self._active_scale_q = next_q
-                        self._active_scale_waiting_answer = False  # need to ask next_q
-                        logger.warning(f"[ScaleDebug] active scale {self._active_scale}, next Q{self._active_scale_q}")
+                        # Sampled one point — exit active scale, return to conversation.
+                        # Don't chain Q2→Q3→Q4 in consecutive turns.
+                        logger.warning(
+                            f"[ScaleDebug] sampled {self._active_scale} Q{current_q}={answered.get(current_q)}; "
+                            f"returning to normal conversation (next would be Q{next_q})"
+                        )
+                        self._active_scale = None
+                        self._active_scale_q = 1
+                        self._active_scale_waiting_answer = False
+                        self._scale_pause_turns = 2  # at least 2 turns before next scale item
                 else:
                     # No score for current Q — LLM was clarifying or asking again
                     self._active_scale_waiting_answer = True
