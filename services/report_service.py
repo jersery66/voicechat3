@@ -60,6 +60,8 @@ class ReportService:
         self.session_start_time: Optional[datetime] = None
         self.round_count: int = 0
         self.time_warning_shown: bool = False
+        self.time_limit_prompt_shown: bool = False
+        self.continued_after_time_limit: bool = False
         self.completed_relaxation: Optional[str] = None # Track completed relaxation type
         
     def _get_llm_service(self):
@@ -147,6 +149,8 @@ class ReportService:
         self.session_start_time = datetime.now()
         self.round_count = 0
         self.time_warning_shown = False
+        self.time_limit_prompt_shown = False
+        self.continued_after_time_limit = False
         self.completed_relaxation = None
         self.game_results = None
         self.activity_log = []
@@ -185,29 +189,41 @@ class ReportService:
     def should_warn_time_limit(self) -> Tuple[bool, str]:
         """
         Check if time/round warning should be shown.
-        At TIME_WARNING_MINUTES: show warning.
-        At MAX_CONVERSATION_MINUTES: ask if user wants to continue.
-        
+        At TIME_WARNING_MINUTES: show one warning.
+        At MAX_CONVERSATION_MINUTES: ask continue/end only once.
+
         Returns:
             (should_warn, warning_message)
         """
         duration = self.get_session_duration_minutes()
-        
+
+        # User already chose to continue — no more prompts this session
+        if self.continued_after_time_limit:
+            return False, ""
+
+        # Reached max time: prompt only once
         if duration >= MAX_CONVERSATION_MINUTES:
-            self.time_warning_shown = False
-            return True, f"TIME_LIMIT_ASK"
-        
+            if not self.time_limit_prompt_shown:
+                self.time_limit_prompt_shown = True
+                return True, "TIME_LIMIT_ASK"
+            return False, ""
+
+        # Early warning: only once
         if duration >= TIME_WARNING_MINUTES and not self.time_warning_shown:
             self.time_warning_shown = True
             remaining = MAX_CONVERSATION_MINUTES - duration
             return True, f"我们的对话已进行约{int(duration)}分钟，还剩约{int(remaining)}分钟。"
-            
+
         return False, ""
-    
+
     def is_over_limit(self) -> bool:
-        """Check if session has exceeded time limit (for prompting, not forcing end)."""
+        """Check if session has exceeded time limit and still needs prompting."""
         duration = self.get_session_duration_minutes()
-        return duration >= MAX_CONVERSATION_MINUTES
+        return (
+            duration >= MAX_CONVERSATION_MINUTES
+            and not self.time_limit_prompt_shown
+            and not self.continued_after_time_limit
+        )
     
     # ==================== Report Generation ====================
     

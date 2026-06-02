@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self._current_report_generating = False
         self._pipeline_busy = False
         self._completion_status = None
+        self._timeout_dialog_open = False
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -997,20 +998,33 @@ class MainWindow(QMainWindow):
 
     def _ask_continue_or_end(self):
         """Ask user whether to continue or end when time limit is reached."""
-        from ui.dialogs import ContinueOrEndDialog
-        dialog = ContinueOrEndDialog(parent=self)
-        dialog.setWindowTitle("会话时间提醒")
-        dialog._setup_ui_for_timeout()
-        dialog.continue_chosen.connect(self._on_timeout_continue)
-        def _on_end():
-            self._user_explicit_end = True
-            self._handle_session_end(EndType.TIME_LIMIT)
-        dialog.end_chosen.connect(_on_end)
-        dialog.exec()
+        # Guard against duplicate dialogs from queue
+        if getattr(self, "_timeout_dialog_open", False):
+            return
+        if self.orchestrator.state in (SessionState.SESSION_ENDING, SessionState.SESSION_ENDED):
+            return
+
+        self._timeout_dialog_open = True
+        try:
+            from ui.dialogs import ContinueOrEndDialog
+            dialog = ContinueOrEndDialog(parent=self)
+            dialog.setWindowTitle("会话时间提醒")
+            dialog._setup_ui_for_timeout()
+            dialog.continue_chosen.connect(self._on_timeout_continue)
+            def _on_end():
+                self._user_explicit_end = True
+                self._handle_session_end(EndType.TIME_LIMIT)
+            dialog.end_chosen.connect(_on_end)
+            dialog.exec()
+        finally:
+            self._timeout_dialog_open = False
 
     def _on_timeout_continue(self):
         """User chose to continue after time limit."""
-        self.report_service.time_warning_shown = False
+        if self.report_service:
+            self.report_service.continued_after_time_limit = True
+            self.report_service.time_limit_prompt_shown = True
+            self.report_service.time_warning_shown = True
         self.chat_panel.add_system_message("好的，咱们继续聊。")
         self._play_tts_async("好的，咱们继续聊。")
         self.control_panel.set_status("继续对话中...")
