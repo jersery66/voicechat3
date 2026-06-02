@@ -94,7 +94,7 @@ class LLMService:
                 ``full_response`` as an assistant message so UI / history stay
                 consistent, then re-raise.
         """
-        # Add user message to history (clean, without /no_think)
+        # Add user message to history
         self.conversation_history.append({
             "role": "user",
             "content": user_message
@@ -108,25 +108,19 @@ class LLMService:
             current_system_prompt += "\n" + system_suffix
 
         messages = [{"role": "system", "content": current_system_prompt}]
-        messages.extend(self.conversation_history[:-1])
-        # Put /no_think in user message for Qwen3 (more reliable than system)
-        messages.append({
-            "role": "user",
-            "content": f"/no_think\n{user_message}"
-        })
+        messages.extend(self.conversation_history)
 
         # Stream response
         full_response = ""
+        reasoning_buffer = ""
         chunks_yielded = 0
         request_started = time.perf_counter()
         first_token_recorded = False
         stream_options = {
-            # "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],  # Disabled: may cut off generation
-            "num_predict": 768,
+            # "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],
+            "num_predict": 2048,
             "temperature": 0.35,
             "top_p": 0.8,
-            "think": False,
-            "enable_thinking": False,
         }
 
         try:
@@ -139,20 +133,30 @@ class LLMService:
 
             for chunk in stream:
                 if chunk.get("done"):
-                    logger.info(f"[LLM] stream done: done_reason={chunk.get('done_reason')}, "
-                                f"eval_count={chunk.get('eval_count')}")
+                    logger.info(
+                        f"[LLM] stream done: done_reason={chunk.get('done_reason')}, "
+                        f"eval_count={chunk.get('eval_count')}, "
+                        f"reasoning_len={len(reasoning_buffer)}, "
+                        f"content_len={len(full_response)}"
+                    )
                 if "message" in chunk:
                     msg = chunk["message"]
-                    # Debug: log first chunk keys to see what Ollama returns
                     if chunks_yielded == 0 and not first_token_recorded:
                         logger.warning(f"[LLMChunkDebug] keys={list(msg.keys())}, head={str(msg)[:400]}")
-                    content = (
-                        msg.get("content")
+
+                    # Thinking/reasoning: capture but don't yield to UI
+                    thinking = (
+                        msg.get("thinking")
                         or msg.get("reasoning")
-                        or msg.get("thinking")
                         or msg.get("reasoning_content")
                         or ""
                     )
+                    if thinking:
+                        reasoning_buffer += thinking
+                        continue
+
+                    # Actual content: yield to UI
+                    content = msg.get("content") or ""
                     if not content:
                         continue
                     if not first_token_recorded:
@@ -178,30 +182,42 @@ class LLMService:
                 })
             raise
 
-        # Retry once if stream returned empty (thinking/templates may consume all tokens)
+        # Retry once if stream returned empty (thinking may consume all tokens)
         if chunks_yielded == 0 or not full_response.strip():
-            logger.warning(
-                f"[LLM] Empty stream response. Retrying without stop. "
-                f"model={self.model}, user_msg={user_message[:80]!r}"
-            )
+            if reasoning_buffer.strip():
+                logger.warning(
+                    f"[LLM] Got thinking ({len(reasoning_buffer)} chars) but no final content. "
+                    f"model={self.model}, user_msg={user_message[:80]!r}"
+                )
+            else:
+                logger.warning(
+                    f"[LLM] Empty stream (no thinking, no content). Retrying. "
+                    f"model={self.model}, user_msg={user_message[:80]!r}"
+                )
             try:
                 retry_resp = self.client.chat(
                     model=self.model,
                     messages=messages,
                     stream=False,
-                    options={"num_predict": 768, "temperature": 0.35, "top_p": 0.8},
+                    options={"num_predict": 2048, "temperature": 0.35, "top_p": 0.8},
                 )
-                full_response = retry_resp.get("message", {}).get("content", "").strip()
+                retry_msg = retry_resp.get("message", {})
+                full_response = (retry_msg.get("content") or "").strip()
+                if not full_response:
+                    retry_thinking = (
+                        retry_msg.get("thinking")
+                        or retry_msg.get("reasoning")
+                        or retry_msg.get("reasoning_content")
+                        or ""
+                    ).strip()
+                    if retry_thinking:
+                        reasoning_buffer += retry_thinking
             except Exception as retry_err:
                 logger.warning(f"[LLM] Retry also failed: {retry_err}")
 
             if not full_response.strip():
-                # Graceful fallback — do NOT raise, keep session alive
-                fallback_spoken = self._fallback_reply(user_message)
-                full_response = f"【情绪】待确认【状态】可继续【策略】兜底回应|||{fallback_spoken}"
-                logger.warning(
-                    f"[LLM] Empty after retry, using fallback: {fallback_spoken}"
-                )
+                # Thinking-only, no final content → raise so pipeline shows "请再说一遍"
+                raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
             yield full_response
 
