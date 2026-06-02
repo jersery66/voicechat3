@@ -720,22 +720,21 @@ class ConversationPipeline:
                     self._stream_llm(result.user_text, final_suffix, emit)
         except RuntimeError as e:
             if "LLM_NO_FINAL_CONTENT" in str(e):
-                # Thinking-only, no content: don't fake a reply, ask user to retry
-                logger.warning(f"[Pipeline] LLM produced thinking but no content, asking retry")
+                logger.warning(f"[Pipeline] LLM thinking-only, no content, asking retry")
                 result.spoken_text = "不好意思，刚才没组织好语言。[breath]你能再说一遍吗？"
                 result.analysis_text = "【情绪】待确认【状态】需要重试【策略】请求重述"
                 result.full_response = f"{result.analysis_text}|||{result.spoken_text}"
                 emit("stream_text", clean_for_display(result.spoken_text))
             else:
-                logger.warning(f"[Pipeline] LLM failed, using fallback: {e}")
-                result.spoken_text = make_safe_fallback_reply(result.user_text)
-                result.analysis_text = "【情绪】待确认【状态】可继续【策略】兜底回应"
+                logger.exception(f"[Pipeline] LLM RuntimeError: {e}")
+                result.spoken_text = "系统出了点小问题。[breath]你能再说一遍吗？"
+                result.analysis_text = "【情绪】待确认【状态】需要重试【策略】系统错误"
                 result.full_response = f"{result.analysis_text}|||{result.spoken_text}"
                 emit("stream_text", clean_for_display(result.spoken_text))
         except Exception as e:
-            logger.warning(f"[Pipeline] LLM failed, using fallback: {e}")
-            result.spoken_text = make_safe_fallback_reply(result.user_text)
-            result.analysis_text = "【情绪】待确认【状态】可继续【策略】兜底回应"
+            logger.exception(f"[Pipeline] LLM failed: {e}")
+            result.spoken_text = "系统出了点小问题。[breath]你能再说一遍吗？"
+            result.analysis_text = "【情绪】待确认【状态】需要重试【策略】系统错误"
             result.full_response = f"{result.analysis_text}|||{result.spoken_text}"
             emit("stream_text", clean_for_display(result.spoken_text))
         emit("finish_streaming", None)

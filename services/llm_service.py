@@ -184,8 +184,8 @@ class LLMService:
                     )
                     first_token_recorded = True
                 full_response += content
-                    chunks_yielded += 1
-                    yield content
+                chunks_yielded += 1
+                yield content
 
         except Exception as e:
             logger.error(f"LLM Generation Failed (chunks_yielded={chunks_yielded}): {e}")
@@ -219,13 +219,13 @@ class LLMService:
                     stream=False,
                     options={"num_predict": 2048, "temperature": 0.35, "top_p": 0.8},
                 )
-                retry_msg = retry_resp.get("message", {})
-                full_response = (retry_msg.get("content") or "").strip()
+                retry_msg = _msg_get(retry_resp, "message", {})
+                full_response = (_msg_get(retry_msg, "content") or "").strip()
                 if not full_response:
                     retry_thinking = (
-                        retry_msg.get("thinking")
-                        or retry_msg.get("reasoning")
-                        or retry_msg.get("reasoning_content")
+                        _msg_get(retry_msg, "thinking")
+                        or _msg_get(retry_msg, "reasoning")
+                        or _msg_get(retry_msg, "reasoning_content")
                         or ""
                     ).strip()
                     if retry_thinking:
