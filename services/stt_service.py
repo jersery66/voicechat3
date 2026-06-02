@@ -182,34 +182,31 @@ class STTService:
             # Find the best input device
             devices = sd.query_devices()
             best_device_id = None
-
-            # Priority 1: Microphone ("Mic", "麦克风")
+            
+            # Priority 1: User requested Virtual Sound Card ("Cable", "Virtual", etc.)
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0:
                     name = dev['name'].lower()
-                    if "mic" in name or "麦克风" in name:
+                    if "cable" in name or "virtual" in name or "stereo mix" in name:
                         best_device_id = i
-                        logger.info(f"Selected Microphone: {dev['name']} (Index {i})")
+                        logger.info(f"Selected prioritized Virtual Device: {dev['name']} (Index {i})")
                         break
-
-            # Priority 2: Default input device
-            if best_device_id is None:
-                try:
-                    default_device = sd.query_devices(kind='input')
-                    best_device_id = default_device['index']
-                    logger.info(f"Selected Default Input: {default_device['name']} (Index {best_device_id})")
-                except Exception:
-                    pass
-
-            # Priority 3: Virtual/Cable (last resort — for lab setups with audio routing)
+            
+            # Priority 2: Explicit "Mic" or "麦克风" (Fallback)
             if best_device_id is None:
                 for i, dev in enumerate(devices):
                     if dev['max_input_channels'] > 0:
                         name = dev['name'].lower()
-                        if "cable" in name or "virtual" in name or "stereo mix" in name:
+                        if "mic" in name or "麦克风" in name:
                             best_device_id = i
-                            logger.info(f"Selected Virtual Device (fallback): {dev['name']} (Index {i})")
+                            logger.info(f"Selected Microphone (Fallback): {dev['name']} (Index {i})")
                             break
+            
+            # Priority 3: Fallback to default
+            if best_device_id is None:
+                try:
+                    default_device = sd.query_devices(kind='input')
+                    best_device_id = default_device['index']
                     logger.info(f"Using default input device: {default_device['name']}")
                 except Exception:
                     pass
