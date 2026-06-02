@@ -108,12 +108,7 @@ class LLMService:
             current_system_prompt += "\n" + system_suffix
 
         messages = [{"role": "system", "content": current_system_prompt}]
-        messages.extend(self.conversation_history[:-1])
-        # /no_think in user message to disable Qwen3 thinking mode
-        messages.append({
-            "role": "user",
-            "content": f"/no_think\n{user_message}"
-        })
+        messages.extend(self.conversation_history)
 
         # Stream response
         full_response = ""
