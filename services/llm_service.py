@@ -131,6 +131,18 @@ class LLMService:
                 options=stream_options,
             )
 
+            def _msg_get(msg, key, default=""):
+                """Get attribute from dict or Message object."""
+                if isinstance(msg, dict):
+                    return msg.get(key, default)
+                return getattr(msg, key, default) or default
+
+            def _msg_keys(msg):
+                """List keys from dict or Message object."""
+                if isinstance(msg, dict):
+                    return list(msg.keys())
+                return [k for k in ("content", "thinking", "reasoning", "reasoning_content") if hasattr(msg, k)]
+
             for chunk in stream:
                 if chunk.get("done"):
                     logger.info(
@@ -139,33 +151,39 @@ class LLMService:
                         f"reasoning_len={len(reasoning_buffer)}, "
                         f"content_len={len(full_response)}"
                     )
-                if "message" in chunk:
-                    msg = chunk["message"]
-                    if chunks_yielded == 0 and not first_token_recorded:
-                        logger.warning(f"[LLMChunkDebug] keys={list(msg.keys())}, head={str(msg)[:400]}")
+                msg = chunk.get("message") if isinstance(chunk, dict) else getattr(chunk, "message", None)
+                if msg is None:
+                    continue
 
-                    # Thinking/reasoning: capture but don't yield to UI
-                    thinking = (
-                        msg.get("thinking")
-                        or msg.get("reasoning")
-                        or msg.get("reasoning_content")
-                        or ""
+                if chunks_yielded == 0 and not reasoning_buffer:
+                    logger.warning(
+                        f"[LLMChunkDebug] type={type(msg).__name__} "
+                        f"keys={_msg_keys(msg)} "
+                        f"head={str(msg)[:400]}"
                     )
-                    if thinking:
-                        reasoning_buffer += thinking
-                        continue
 
-                    # Actual content: yield to UI
-                    content = msg.get("content") or ""
-                    if not content:
-                        continue
-                    if not first_token_recorded:
-                        get_metrics().record(
-                            "llm.first_token",
-                            (time.perf_counter() - request_started) * 1000.0,
-                        )
-                        first_token_recorded = True
-                    full_response += content
+                # Thinking/reasoning: capture but don't yield to UI
+                thinking = (
+                    _msg_get(msg, "thinking")
+                    or _msg_get(msg, "reasoning")
+                    or _msg_get(msg, "reasoning_content")
+                    or ""
+                )
+                if thinking:
+                    reasoning_buffer += thinking
+                    continue
+
+                # Actual content: yield to UI
+                content = _msg_get(msg, "content") or ""
+                if not content:
+                    continue
+                if not first_token_recorded:
+                    get_metrics().record(
+                        "llm.first_token",
+                        (time.perf_counter() - request_started) * 1000.0,
+                    )
+                    first_token_recorded = True
+                full_response += content
                     chunks_yielded += 1
                     yield content
 
