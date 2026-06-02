@@ -1,6 +1,7 @@
 # LLM Service - Ollama Integration
 
 import os
+import re
 import sys
 import time
 from typing import Generator, List, Dict, Any, Optional
@@ -231,14 +232,29 @@ class LLMService:
 
             yield full_response
 
-        # Add assistant response to history (including fallback)
+        # Add assistant response to history — only spoken text, no analysis
         self.conversation_history.append({
             "role": "assistant",
-            "content": full_response
+            "content": self._history_visible_text(full_response)
         })
 
         # Compress history if too long
         self._maybe_summarize()
+
+    @staticmethod
+    def _history_visible_text(text: str) -> str:
+        """Strip analysis, tags, and ||| separator — only keep spoken content for history."""
+        if not text:
+            return ""
+        if "|||" in text:
+            text = text.rsplit("|||", 1)[-1]
+        text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+        text = re.sub(r'\[SCALE:[^\]]+\]', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\[REC_[A-Z_]+\]', '', text)
+        text = re.sub(r'\[END_[A-Z_]+\]', '', text)
+        text = re.sub(r'【.*?】', '', text)
+        text = re.sub(r'\[(?:breath|laughter)\]', '', text)
+        return text.strip()
 
     def _fallback_reply(self, user_message: str) -> str:
         """Safe spoken fallback when Ollama returns empty output."""

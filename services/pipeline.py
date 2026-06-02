@@ -158,6 +158,11 @@ def get_end_type_enum(string_name: str):
 
 def clean_for_display(text: str) -> str:
     """Remove all control tags for UI display. Strips [breath]/[laughter] too."""
+    if not text:
+        return ""
+    # If analysis|||spoken got mixed, only keep the spoken part
+    if "|||" in text:
+        text = text.rsplit("|||", 1)[-1]
     text = _RE_THINK.sub('', text)
     text = _RE_REC_TAG.sub('', text)
     text = _RE_END_TAG.sub('', text)
@@ -169,7 +174,12 @@ def clean_for_display(text: str) -> str:
 
 
 def clean_for_tts(text: str) -> str:
-    """Keep [breath]/[laughter] for CosyVoice, strip control tags."""
+    """Keep [breath]/[laughter] for TTS, strip control tags."""
+    if not text:
+        return ""
+    # If analysis|||spoken got mixed, only keep the spoken part
+    if "|||" in text:
+        text = text.rsplit("|||", 1)[-1]
     text = _RE_THINK.sub('', text)
     text = _RE_REC_TAG.sub('', text)
     text = _RE_END_TAG.sub('', text)
@@ -494,7 +504,8 @@ class ConversationPipeline:
                 self.data.save_assistant_message(None, full, sample_rate=48000)
             if self.llm and hasattr(self.llm, "conversation_history"):
                 self.llm.conversation_history.append({"role": "user", "content": result.user_text})
-                self.llm.conversation_history.append({"role": "assistant", "content": full})
+                # Only store spoken text in history, not analysis|||spoken
+                self.llm.conversation_history.append({"role": "assistant", "content": clean_for_display(spoken_text)})
             if config.use_tts and self.tts and result.tts_text:
                 emit("status", "正在播放...")
                 self._executor.submit(self._play_tts, result.tts_text)
