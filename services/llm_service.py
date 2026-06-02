@@ -117,9 +117,9 @@ class LLMService:
         request_started = time.perf_counter()
         first_token_recorded = False
         stream_options = {
-            "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],
-            "num_predict": 256,   # Qwen3 may consume tokens for thinking/templates
-            "temperature": 0.4,
+            # "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],  # Disabled: may cut off generation
+            "num_predict": 768,
+            "temperature": 0.35,
             "top_p": 0.8,
         }
 
@@ -173,7 +173,7 @@ class LLMService:
                     model=self.model,
                     messages=messages,
                     stream=False,
-                    options={"num_predict": 256, "temperature": 0.4, "top_p": 0.8},
+                    options={"num_predict": 768, "temperature": 0.35, "top_p": 0.8},
                 )
                 full_response = retry_resp.get("message", {}).get("content", "").strip()
             except Exception as retry_err:
