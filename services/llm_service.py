@@ -52,9 +52,16 @@ class LLMService:
         else:
             self.model = model
         
-    def reset_conversation(self):
-        """Clear conversation history."""
+    def reset_conversation(self, clear_context: bool = False):
+        """Clear conversation history.
+
+        Args:
+            clear_context: If True, also clear history_context (user profile
+                and past summaries). Use when switching to a new subject.
+        """
         self.conversation_history = []
+        if clear_context:
+            self.history_context = ""
         
     def set_system_prompt(self, prompt: str):
         """Set the system prompt."""

@@ -185,7 +185,7 @@ class TTSService:
         lock = _threading.Lock()
         done_flag = _threading.Event()
         started = _threading.Event()
-        min_prebuffer = int(self.sample_rate * 0.3)
+        min_prebuffer = int(self.sample_rate * 0.8)
 
         def _callback(outdata, frames, time_info, status):
             nonlocal read_pos

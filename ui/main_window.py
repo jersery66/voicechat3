@@ -216,6 +216,10 @@ class MainWindow(QMainWindow):
     # ==================== User Info ====================
 
     def _on_confirm_user(self, info):
+        # If previous session ended, clean up before starting new one
+        if self.orchestrator.state in (SessionState.SESSION_ENDED, SessionState.IDLE):
+            self._prepare_next_subject()
+
         normalized = self._normalize_user_info(info)
         user_id = normalized.get("user_id", "default_user")
         user_changed = self.current_user_id is not None and user_id != self.current_user_id
@@ -1368,14 +1372,18 @@ class MainWindow(QMainWindow):
         self.control_panel.set_status("请先完成放松训练")
 
     def _on_session_finished(self):
-        """Session ended (not quitting program) — close dialog, prepare for next subject."""
+        """Session ended — keep chat visible until operator confirms next subject."""
         if self._exit_wait_dialog:
             self._exit_wait_dialog.close()
             self._exit_wait_dialog = None
-        self._prepare_next_subject()
-        self.control_panel.set_buttons_enabled(True)
+        self._session_ending = False
+        self._current_report_generating = False
+        self._current_report_generated = True
+        # Disable recording but keep chat and farewell visible
+        self.control_panel.set_buttons_enabled(False)
+        self.control_panel.set_status("会话已结束，报告已保存")
         self.chat_panel.add_system_message(
-            '会话已结束。请填写下一位参与者信息，然后点击"确认信息并开始"。'
+            '会话已结束，报告已保存。点击"确认信息并开始"进入下一位参与者。'
         )
 
     def _force_quit_now(self):
@@ -1639,12 +1647,14 @@ class MainWindow(QMainWindow):
                 # --- Phase 2: TTS in background, do NOT block report generation ---
                 # Exit path: don't play long farewell audio.
                 # End session: play farewell in background thread.
+                farewell_tts_thread = None
                 if self.tts_service and full_feedback and not is_exit:
-                    threading.Thread(
+                    farewell_tts_thread = threading.Thread(
                         target=self._safe_play_farewell_tts,
                         args=(full_feedback,),
                         daemon=True
-                    ).start()
+                    )
+                    farewell_tts_thread.start()
 
                 # --- Phase 3: Save raw snapshot → Generate report + PDF ---
                 # Reports are the priority — generate immediately, don't wait for TTS.
@@ -1742,6 +1752,11 @@ class MainWindow(QMainWindow):
                 logger.warning(f"Report generation failed: {e}")
 
             finally:
+                # Wait for farewell TTS to finish before clearing UI
+                if not is_exit and farewell_tts_thread is not None and farewell_tts_thread.is_alive():
+                    logger.info("[SessionEnd] waiting farewell TTS before clearing UI")
+                    farewell_tts_thread.join(timeout=90)
+
                 if is_exit:
                     logger.info("[ExitDebug] report done, queuing quit")
                     self.processing_queue.put(("quit", None))
