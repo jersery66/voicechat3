@@ -108,7 +108,12 @@ class LLMService:
             current_system_prompt += "\n" + system_suffix
 
         messages = [{"role": "system", "content": current_system_prompt}]
-        messages.extend(self.conversation_history)
+        messages.extend(self.conversation_history[:-1])
+        # /no_think in user message to disable Qwen3 thinking mode
+        messages.append({
+            "role": "user",
+            "content": f"/no_think\n{user_message}"
+        })
 
         # Stream response
         full_response = ""
@@ -118,7 +123,7 @@ class LLMService:
         first_token_recorded = False
         stream_options = {
             # "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],
-            "num_predict": 2048,
+            "num_predict": 1024,
             "temperature": 0.35,
             "top_p": 0.8,
         }
@@ -200,41 +205,33 @@ class LLMService:
                 })
             raise
 
-        # Retry once if stream returned empty (thinking may consume all tokens)
+        # Thinking-only: fail immediately, don't waste time retrying
+        if chunks_yielded == 0 and reasoning_buffer.strip():
+            logger.warning(
+                f"[LLM] Thinking-only: reasoning={len(reasoning_buffer)} chars, content=0. "
+                f"model={self.model}, user_msg={user_message[:80]!r}"
+            )
+            raise RuntimeError("LLM_NO_FINAL_CONTENT")
+
+        # Retry once if truly empty (no thinking, no content)
         if chunks_yielded == 0 or not full_response.strip():
-            if reasoning_buffer.strip():
-                logger.warning(
-                    f"[LLM] Got thinking ({len(reasoning_buffer)} chars) but no final content. "
-                    f"model={self.model}, user_msg={user_message[:80]!r}"
-                )
-            else:
-                logger.warning(
-                    f"[LLM] Empty stream (no thinking, no content). Retrying. "
-                    f"model={self.model}, user_msg={user_message[:80]!r}"
-                )
+            logger.warning(
+                f"[LLM] Empty stream (no thinking, no content). Retrying. "
+                f"model={self.model}, user_msg={user_message[:80]!r}"
+            )
             try:
                 retry_resp = self.client.chat(
                     model=self.model,
                     messages=messages,
                     stream=False,
-                    options={"num_predict": 2048, "temperature": 0.35, "top_p": 0.8},
+                    options={"num_predict": 1024, "temperature": 0.35, "top_p": 0.8},
                 )
                 retry_msg = _msg_get(retry_resp, "message", {})
                 full_response = (_msg_get(retry_msg, "content") or "").strip()
-                if not full_response:
-                    retry_thinking = (
-                        _msg_get(retry_msg, "thinking")
-                        or _msg_get(retry_msg, "reasoning")
-                        or _msg_get(retry_msg, "reasoning_content")
-                        or ""
-                    ).strip()
-                    if retry_thinking:
-                        reasoning_buffer += retry_thinking
             except Exception as retry_err:
                 logger.warning(f"[LLM] Retry also failed: {retry_err}")
 
             if not full_response.strip():
-                # Thinking-only, no final content → raise so pipeline shows "请再说一遍"
                 raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
             yield full_response
