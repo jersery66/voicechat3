@@ -828,6 +828,8 @@ class ConversationPipeline:
         if config.use_tts and self.tts and result.tts_text and not skip_normal_tts:
             emit("status", "正在播放...")
             tts_future = self._executor.submit(self._play_tts, result.tts_text)
+            latency_ms = (time.perf_counter() - pipeline_started) * 1000.0
+            logger.warning(f"[Latency] input→TTS: {latency_ms:.0f}ms | spoken_len={len(result.spoken_text)}")
 
         # Agent results + emotion tracking + crisis (parallel with TTS)
         try:
@@ -838,6 +840,22 @@ class ConversationPipeline:
             result.intent = "counseling"
             result.emotion_result = {"emotion": "neutral", "intensity": 0.0}
             crisis_keyword_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
+
+        # Emotion keyword override: if agent misclassifies negative text as happy
+        _emotion_text = result.user_text.lower()
+        _negative_emotion_kw = {
+            "不开心": "depressed", "难受": "depressed", "低落": "depressed",
+            "没意思": "depressed", "心情不好": "depressed", "心里累": "depressed",
+            "焦虑": "anxious", "紧张": "anxious", "烦躁": "anxious",
+            "害怕": "fearful", "恐惧": "fearful",
+            "愤怒": "angry", "生气": "angry",
+        }
+        detected_emotion = result.emotion_result.get("emotion", "neutral")
+        for kw, emo in _negative_emotion_kw.items():
+            if kw in _emotion_text and detected_emotion in ("happy", "neutral"):
+                logger.warning(f"[EmotionFix] keyword '{kw}' overrides {detected_emotion} → {emo}")
+                result.emotion_result = {"emotion": emo, "intensity": 0.7}
+                break
 
         logger.info(
             f"[Pipeline] Intent: {result.intent} "

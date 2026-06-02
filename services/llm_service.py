@@ -94,22 +94,26 @@ class LLMService:
                 ``full_response`` as an assistant message so UI / history stay
                 consistent, then re-raise.
         """
-        # Add user message to history
+        # Add user message to history (clean, without /no_think)
         self.conversation_history.append({
             "role": "user",
             "content": user_message
         })
 
         # Build messages list with system prompt
-        # /no_think disables Qwen3 thinking mode at the prompt level
-        current_system_prompt = "/no_think\n" + self.system_prompt
+        current_system_prompt = self.system_prompt
         if self.history_context:
             current_system_prompt += self.history_context
         if system_suffix:
             current_system_prompt += "\n" + system_suffix
 
         messages = [{"role": "system", "content": current_system_prompt}]
-        messages.extend(self.conversation_history)
+        messages.extend(self.conversation_history[:-1])
+        # Put /no_think in user message for Qwen3 (more reliable than system)
+        messages.append({
+            "role": "user",
+            "content": f"/no_think\n{user_message}"
+        })
 
         # Stream response
         full_response = ""
@@ -121,6 +125,8 @@ class LLMService:
             "num_predict": 768,
             "temperature": 0.35,
             "top_p": 0.8,
+            "think": False,
+            "enable_thinking": False,
         }
 
         try:
@@ -135,8 +141,18 @@ class LLMService:
                 if chunk.get("done"):
                     logger.info(f"[LLM] stream done: done_reason={chunk.get('done_reason')}, "
                                 f"eval_count={chunk.get('eval_count')}")
-                if "message" in chunk and "content" in chunk["message"]:
-                    content = chunk["message"]["content"]
+                if "message" in chunk:
+                    msg = chunk["message"]
+                    # Debug: log first chunk keys to see what Ollama returns
+                    if chunks_yielded == 0 and not first_token_recorded:
+                        logger.warning(f"[LLMChunkDebug] keys={list(msg.keys())}, head={str(msg)[:400]}")
+                    content = (
+                        msg.get("content")
+                        or msg.get("reasoning")
+                        or msg.get("thinking")
+                        or msg.get("reasoning_content")
+                        or ""
+                    )
                     if not content:
                         continue
                     if not first_token_recorded:
