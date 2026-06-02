@@ -505,7 +505,7 @@ class ConversationPipeline:
             if self.llm and hasattr(self.llm, "conversation_history"):
                 self.llm.conversation_history.append({"role": "user", "content": result.user_text})
                 # Only store spoken text in history, not analysis|||spoken
-                self.llm.conversation_history.append({"role": "assistant", "content": clean_for_display(spoken_text)})
+                self.llm.conversation_history.append({"role": "assistant", "content": clean_for_display(spoken)})
             if config.use_tts and self.tts and result.tts_text:
                 emit("status", "正在播放...")
                 self._executor.submit(self._play_tts, result.tts_text)
