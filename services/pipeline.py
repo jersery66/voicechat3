@@ -252,7 +252,7 @@ def detect_phq_item_from_text(text: str) -> Optional[int]:
         return 4
     if any(x in t for x in ["吃不下", "没胃口", "吃太多", "饭量"]):
         return 5
-    if any(x in t for x in ["觉得自己很糟", "失败", "让.*失望", "自责", "不够好"]):
+    if any(x in t for x in ["觉得自己很糟", "失败", "失望", "自责", "不够好"]):
         return 6
     if any(x in t for x in ["注意力", "集中不了", "看不进去", "专注"]):
         return 7
@@ -737,9 +737,6 @@ class ConversationPipeline:
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
         # --- Quick crisis keyword check (fast, before LLM) ---
-        # Must run BEFORE the programmatic scale branch so that crisis responses
-        # are never skipped by a scale question being generated directly.
-        _skip_programmatic_scale = False
         if self.agent:
             quick_crisis = self.agent._keyword_crisis_risk(result.user_text)
             if quick_crisis.get("immediate_action"):
@@ -748,7 +745,6 @@ class ConversationPipeline:
                     final_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
                 else:
                     final_suffix = CRISIS_INTERVENTION_SUFFIX
-                _skip_programmatic_scale = True
                 # Crisis lock: block all scales for next 4 turns
                 self._crisis_lock_turns = 4
                 self._active_scale = None
@@ -1224,8 +1220,6 @@ class ConversationPipeline:
                     if fallback.strip():
                         emit("stream_text", fallback.strip())
                         spoken_text = fallback.strip()
-                    else:
-                        spoken_text = spoken_text
 
         # Final safety: if spoken_text is still empty or only contains analysis
         # tags that will be stripped by clean_for_display, use a safe fallback.

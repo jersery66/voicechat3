@@ -286,9 +286,11 @@ class ChatPanel(FrostedPanel):
         QTimer.singleShot(300, do_scroll)
 
     def _on_scroll_range_changed(self, _min, max_value):
-        """Auto-pin to bottom when content height changes (like WeChat)."""
+        """Auto-pin to bottom only if user was already at/near the bottom."""
         bar = self.scroll_area.verticalScrollBar()
-        bar.setValue(max_value)
+        # Only auto-scroll if user was already near the bottom (within 50px)
+        if bar.value() >= bar.maximum() - 50:
+            bar.setValue(max_value)
 
     def _on_send(self):
         text = self.text_input.toPlainText().strip()

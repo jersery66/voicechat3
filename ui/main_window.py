@@ -1377,6 +1377,11 @@ class MainWindow(QMainWindow):
             return False
         if self.orchestrator.ctx.current_relaxation_type:
             return False
+        # Don't recommend relaxation too early in the conversation
+        from config import MIN_ROUNDS_FOR_RELAXATION
+        current_rounds = self.report_service.get_round_count() if self.report_service else 0
+        if current_rounds < MIN_ROUNDS_FOR_RELAXATION:
+            return False
 
         text = result.user_text or ""
         emotion = result.emotion_result.get("emotion", "")

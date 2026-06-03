@@ -175,6 +175,10 @@ class CrisisDialog(BaseDialog):
         msg.setStyleSheet("color: #2c3e50; font-size: 12px;")
         layout.addWidget(msg)
 
+        # Handle dict format (key=name, value=number)
+        if isinstance(hotlines, dict):
+            hotlines = [{"name": k, "number": v} for k, v in hotlines.items()]
+
         for item in hotlines:
             if isinstance(item, dict):
                 name = item.get("name") or item.get("label") or item.get("title") or "危机热线"
