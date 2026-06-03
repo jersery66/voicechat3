@@ -513,6 +513,12 @@ class MainWindow(QMainWindow):
                     relax_key = relax_map.get(tag, tag)
                     QTimer.singleShot(delay_ms, lambda rk=relax_key: self.control_panel.highlight_relax_button(rk))
 
+                elif msg_type == "replace_greeting":
+                    self._replace_greeting(content)
+
+                elif msg_type == "replace_last_system":
+                    self._replace_last_system(content)
+
                 elif msg_type == "all_scales_completed":
                     self._recommend_relaxation_after_scales()
 
@@ -1173,7 +1179,7 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 60:
                     generated = generated[:60]
-                QTimer.singleShot(0, lambda g=generated: self._replace_greeting(g))
+                self.processing_queue.put(("replace_greeting", generated))
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _replace_greeting(self, new_greeting):
@@ -1210,7 +1216,7 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 50:
                     generated = generated[:50]
-                QTimer.singleShot(0, lambda g=generated: self._replace_last_system(g))
+                self.processing_queue.put(("replace_last_system", generated))
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _replace_last_system(self, new_text):
