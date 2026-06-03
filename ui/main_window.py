@@ -408,11 +408,17 @@ class MainWindow(QMainWindow):
         """Route pipeline result to appropriate actions."""
         if result.end_type:
             et = get_end_type_enum(result.end_type)
-            if et == EndType.SAFETY and result.crisis_risk < 7:
-                self.processing_queue.put(("show_crisis", None))
-            self._handle_session_end(et, result.relaxation_rec)
-        elif result.all_scales_completed:
-            # All triggered scales done — recommend a short relaxation
+            # Safety can proceed directly
+            if et == EndType.SAFETY:
+                self._handle_session_end(et, result.relaxation_rec)
+                return
+            # Other END types: confirm with operator first
+            self._pending_end_type = et
+            self.processing_queue.put(("session_warning", "检测到可能想结束。请确认是继续聊，还是结束会话。"))
+            self.processing_queue.put(("time_limit_ask", None))
+            return
+
+        if result.all_scales_completed:
             self.processing_queue.put(("all_scales_completed", None))
         elif result.relaxation_rec and not result.scale_active:
             self.processing_queue.put(("highlight_relax", result.relaxation_rec))
@@ -420,6 +426,10 @@ class MainWindow(QMainWindow):
         elif result.intent == "entertainment":
             self.processing_queue.put(("highlight_relax", "game"))
             self.processing_queue.put(("status", "准备就绪"))
+        elif self._should_soft_recommend_relaxation(result):
+            tag = self._get_end_relaxation_tag()
+            self.processing_queue.put(("highlight_relax", tag))
+            self.processing_queue.put(("status", "可以尝试左侧放松训练"))
         else:
             self.processing_queue.put(("status", "准备就绪"))
 
@@ -492,6 +502,15 @@ class MainWindow(QMainWindow):
                     }
                     relax_key = relax_map.get(content, content)
                     self.control_panel.highlight_relax_button(relax_key)
+
+                elif msg_type == "highlight_relax_delayed":
+                    tag, delay_ms = content
+                    relax_map = {
+                        "呼吸": "breathing", "肌肉": "muscle", "冥想": "meditation", "游戏": "game",
+                        "breathing": "breathing", "muscle": "muscle", "meditation": "meditation", "game": "game",
+                    }
+                    relax_key = relax_map.get(tag, tag)
+                    QTimer.singleShot(delay_ms, lambda rk=relax_key: self.control_panel.highlight_relax_button(rk))
 
                 elif msg_type == "all_scales_completed":
                     self._recommend_relaxation_after_scales()
@@ -849,13 +868,14 @@ class MainWindow(QMainWindow):
             self._post_relaxation_dialog.close()
 
     def _on_post_relaxation_timeout(self):
-        """放松后超时：播放结束语 → 生成报告结束会话"""
+        """放松后超时：不自动结束，只提醒用户选择。"""
         if self.orchestrator.state != SessionState.POST_RELAXATION:
             return
-        message = random.choice(TIMEOUT_END_MESSAGE)
-        self.chat_panel.add_system_message(message)
-        self._play_tts_async(message)
-        QTimer.singleShot(5000, lambda: self._handle_session_end(EndType.TIME_LIMIT))
+        self.orchestrator.ctx.post_relaxation_timed_out = True
+        self.chat_panel.add_system_message(
+            "放松训练已经结束。可以继续聊，也可以点击结束会话。"
+        )
+        self.control_panel.set_status("放松结束，请选择继续或结束")
 
     def _cancel_post_relaxation_timer(self):
         """取消放松后超时定时器（用户做出选择或关闭弹窗时调用）"""
@@ -1323,6 +1343,27 @@ class MainWindow(QMainWindow):
         self._play_tts_async("好，那咱们继续。")
         self.orchestrator.transition_to(SessionState.CHATTING)
 
+    def _should_soft_recommend_relaxation(self, result):
+        """Check if relaxation should be softly recommended based on emotion/symptoms."""
+        if self.orchestrator.state != SessionState.CHATTING:
+            return False
+        if self.orchestrator.ctx.current_relaxation_type:
+            return False
+
+        text = result.user_text or ""
+        emotion = result.emotion_result.get("emotion", "")
+        intensity = result.emotion_result.get("intensity", 0)
+
+        keywords = [
+            "睡不着", "失眠", "紧张", "焦虑", "烦躁", "心慌",
+            "喘不过气", "身体很累", "很累", "没力气", "不耐烦",
+        ]
+        return (
+            any(k in text for k in keywords)
+            or emotion in {"anxious", "stressed", "angry"}
+            or intensity >= 0.75
+        )
+
     def _get_end_relaxation_tag(self):
         """Get the recommended relaxation tag for end-session dialog."""
         if self.orchestrator.ctx.current_relaxation_type:
@@ -1587,7 +1628,7 @@ class MainWindow(QMainWindow):
             rec_text = f"等等，在结束之前，我留意到你还是有点紧张。要不咱们先做个{tag_cn}放松训练？只需几分钟，效果很好的。"
             self.processing_queue.put(("append_chat", ("ai", rec_text)))
             self._play_tts_async(rec_text)
-            QTimer.singleShot(1000, lambda: self.processing_queue.put(("highlight_relax", tag)))
+            self.processing_queue.put(("highlight_relax_delayed", (tag, 1000)))
             self.processing_queue.put(("status", "请尝试放松训练"))
             self._session_ending = False
             self.session_end_controller.defer_for_relaxation()

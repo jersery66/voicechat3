@@ -263,6 +263,26 @@ def detect_phq_item_from_text(text: str) -> Optional[int]:
     return None
 
 
+def is_user_explicit_end_text(text: str) -> bool:
+    """Check if user explicitly wants to end the session.
+
+    Weak responses like "好吧", "嗯", "没有" should NOT trigger session end.
+    """
+    t = (text or "").strip("。！？!?,， ")
+
+    # Weak responses — definitely not ending
+    weak = {"好吧", "嗯", "哦", "没有", "行吧", "可以吧", "还好吧", "不知道", "嗯嗯", "好的", "行"}
+    if t in weak:
+        return False
+
+    explicit_end = [
+        "不想聊了", "今天不聊了", "今天先这样", "先到这吧", "先这样吧",
+        "我要结束", "结束吧", "不说了", "我想休息了", "我累了想睡了",
+        "可以结束了", "聊完了", "好多了", "舒服多了", "轻松多了", "没事了", "现在好多了",
+    ]
+    return any(x in t for x in explicit_end)
+
+
 # ==================== Pipeline Result ====================
 
 @dataclass
@@ -792,7 +812,17 @@ class ConversationPipeline:
         result.tts_text = clean_for_tts(result.spoken_text)
 
         # --- Tag detection ---
-        result.end_type = detect_tag(result.full_response, END_PATTERNS)
+        raw_end_type = detect_tag(result.full_response, END_PATTERNS)
+        # Only allow END tag if user explicitly wants to end (not "好吧", "嗯", etc.)
+        if raw_end_type and is_user_explicit_end_text(result.user_text):
+            result.end_type = raw_end_type
+        else:
+            if raw_end_type:
+                logger.warning(
+                    f"[EndDebug] suppress END tag: user did not explicitly end. "
+                    f"user={result.user_text!r}, raw_end={raw_end_type}"
+                )
+            result.end_type = None
         result.relaxation_rec = detect_tag(result.full_response, REC_TAGS)
         result.scale_tags = parse_scale_tags(result.full_response)
         # Track answered questions per scale
