@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
         self._pipeline_busy = False
         self._completion_status = None
         self._timeout_dialog_open = False
+        self._auto_ending_after_relaxation = False
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -515,6 +516,9 @@ class MainWindow(QMainWindow):
                 elif msg_type == "all_scales_completed":
                     self._recommend_relaxation_after_scales()
 
+                elif msg_type == "auto_end_session":
+                    self._handle_session_end(content, allow_force_relaxation=False)
+
                 elif msg_type == "session_warning":
                     if content == "TIME_LIMIT_ASK":
                         self._ask_continue_or_end()
@@ -766,6 +770,7 @@ class MainWindow(QMainWindow):
         self._pending_quit = False
         self._pipeline_busy = False
         self._completion_status = None
+        self._auto_ending_after_relaxation = False
         self.current_user_id = None
         self.user_info = {}
         self.info_confirmed = False
@@ -868,14 +873,18 @@ class MainWindow(QMainWindow):
             self._post_relaxation_dialog.close()
 
     def _on_post_relaxation_timeout(self):
-        """放松后超时：不自动结束，只提醒用户选择。"""
+        """放松后超时：播放提示TTS，播完后自动进入完整结束流程。"""
         if self.orchestrator.state != SessionState.POST_RELAXATION:
             return
         self.orchestrator.ctx.post_relaxation_timed_out = True
-        self.chat_panel.add_system_message(
-            "放松训练已经结束。可以继续聊，也可以点击结束会话。"
-        )
-        self.control_panel.set_status("放松结束，请选择继续或结束")
+        self._auto_ending_after_relaxation = True
+
+        message = random.choice(TIMEOUT_END_MESSAGE)
+        self.chat_panel.add_system_message(message)
+        self.control_panel.set_status("放松结束，正在自动结束会话...")
+
+        # Play TTS first, then enter full session-end flow
+        self._play_tts_then_auto_end(message, EndType.TIME_LIMIT)
 
     def _cancel_post_relaxation_timer(self):
         """取消放松后超时定时器（用户做出选择或关闭弹窗时调用）"""
@@ -889,6 +898,19 @@ class MainWindow(QMainWindow):
                 self.tts_service.generate_and_play(text)
         except Exception as e:
             logger.warning(f"Farewell TTS failed: {e}")
+
+    def _play_tts_then_auto_end(self, text, end_type):
+        """Play a short auto-end notice, then enter the full session-end flow."""
+        def runner():
+            try:
+                if self.tts_service and text:
+                    self.tts_service.generate_and_play(text)
+            except Exception as e:
+                logger.warning(f"Auto-end notice TTS failed: {e}")
+            finally:
+                self.processing_queue.put(("auto_end_session", end_type))
+
+        threading.Thread(target=runner, daemon=True).start()
 
     def _on_continue_chosen(self):
         """用户选择继续聊天"""
@@ -961,6 +983,9 @@ class MainWindow(QMainWindow):
         # X-button close = treat as "continue chatting" (unless timeout fired)
         def on_dialog_finished():
             self._cancel_post_relaxation_timer()
+            # Already auto-ending, don't trigger continue
+            if getattr(self, "_auto_ending_after_relaxation", False):
+                return
             if self.orchestrator.state == SessionState.POST_RELAXATION:
                 if self.orchestrator.ctx.post_relaxation_timed_out:
                     self._on_post_relaxation_timeout()
@@ -1010,6 +1035,9 @@ class MainWindow(QMainWindow):
 
         def on_dialog_finished():
             self._cancel_post_relaxation_timer()
+            # Already auto-ending, don't trigger continue
+            if getattr(self, "_auto_ending_after_relaxation", False):
+                return
             if self.orchestrator.state == SessionState.POST_RELAXATION:
                 if self.orchestrator.ctx.post_relaxation_timed_out:
                     self._on_post_relaxation_timeout()
