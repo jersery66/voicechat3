@@ -738,77 +738,11 @@ class ConversationPipeline:
                 self._scale_pause_turns = max(self._scale_pause_turns, 4)
                 logger.warning(f"[Pipeline] Crisis keywords detected pre-LLM: risk={quick_crisis.get('risk_level')}, lock=4 turns")
 
-        # --- Programmatic first scale question (bypass LLM) ---
-        # If we just started a new scale or moved to a new question and are NOT
-        # waiting for an answer, generate the question directly from a template
-        # instead of relying on the LLM (which may ignore the scale prompt in
-        # favor of relaxation training recommendations from SYSTEM_PROMPT).
-        # Skipped when crisis keywords are detected — safety takes priority.
-        _programmatic_scale = False
-        if self._active_scale and not self._active_scale_waiting_answer and not _skip_programmatic_scale:
-            from services.scales import SCALES
-            scale_def = SCALES.get(self._active_scale)
-            if scale_def:
-                q_num = self._active_scale_q
-                total = len(scale_def["questions"])
-                q_text = scale_def["questions"][q_num - 1]
-                # Use natural question phrasing if available
-                natural = NATURAL_SCALE_QUESTIONS.get((self._active_scale, q_num))
-                if q_num == 1:
-                    spoken_text = f"我先顺着你刚才说的了解一下。[breath]{natural or q_text}"
-                else:
-                    spoken_text = f"[breath]{natural or q_text}"
-
-                analysis_text = (
-                    f"【情绪识别】待评估【状态评估】配合中"
-                    f"【变革话语】无【策略选择】量表评估 - {self._active_scale} Q{q_num}/{total}"
-                )
-                full_response = f"{analysis_text}|||{spoken_text}"
-
-                # Emit UI updates
-                emit("start_ai_message", None)
-                emit("stream_text", clean_for_display(spoken_text))
-                emit("finish_streaming", None)
-
-                result.full_response = full_response
-                result.analysis_text = analysis_text
-                result.spoken_text = spoken_text
-                result.clean_spoken = clean_for_display(spoken_text)
-                result.tts_text = clean_for_tts(spoken_text)
-                result.intent = "counseling"
-
-                # Mark as waiting for answer
-                self._active_scale_waiting_answer = True
-
-                logger.warning(
-                    f"[ScaleDebug] Programmatic Q{q_num} for {self._active_scale}: {q_text}"
-                )
-
-                # Save assistant message
-                if self.data:
-                    self.data.save_assistant_message(None, full_response, sample_rate=48000)
-
-                # Keep LLM conversation history consistent
-                if self.llm and hasattr(self.llm, "conversation_history"):
-                    self.llm.conversation_history.append({
-                        "role": "assistant",
-                        "content": full_response
-                    })
-
-                # TTS
-                if config.use_tts and self.tts and result.tts_text:
-                    emit("status", "正在播放...")
-                    try:
-                        with get_metrics().timer("tts.play"):
-                            self.tts.generate_and_play(result.tts_text)
-                    except Exception as e:
-                        logger.warning(f"TTS error: {e}")
-
-                metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
-                _programmatic_scale = True
-
-        if _programmatic_scale:
-            return result
+        # --- No programmatic scale questions ---
+        # Scales are now explored naturally by the LLM via subtle system_suffix
+        # hints. Background scoring happens via [SCALE:] tags and
+        # infer_scale_score_from_text(). The LLM generates a natural response,
+        # not a template question.
 
         # Append extra system context (e.g. remaining scale questions at exit)
         if config.extra_system_suffix:
@@ -1099,10 +1033,12 @@ class ConversationPipeline:
 
     def _build_active_scale_prompt(self, scale_name: str, q_num: int,
                                     waiting_answer: bool) -> str:
-        """Build a prompt that tells the LLM which symptom dimension to explore.
+        """Build a subtle system hint for natural symptom exploration.
 
-        The prompt is for the LLM's internal reasoning only.  The hard rule
-        at the top ensures clinical jargon never leaks into spoken output.
+        This does NOT tell the LLM to "ask question N" or "score this item".
+        Instead, it hints which symptom area to naturally explore, and lets
+        the LLM generate a conversational response. Background scoring
+        happens via [SCALE:] tags and infer_scale_score_from_text().
         """
         from services.scales import SCALES
         scale = SCALES.get(scale_name)
@@ -1112,85 +1048,44 @@ class ConversationPipeline:
         total = len(scale["questions"])
         q_text = scale["questions"][q_num - 1]
         natural_q = NATURAL_SCALE_QUESTIONS.get((scale_name, q_num), q_text)
-        options_text = " / ".join(
-            f"{opt['score']}-{opt['label']}" for opt in scale["options"]
-        )
 
-        next_q_num = q_num + 1
-        next_q_text = scale["questions"][next_q_num - 1] if next_q_num <= total else None
-        next_natural = NATURAL_SCALE_QUESTIONS.get((scale_name, next_q_num), next_q_text) if next_q_text else None
+        # Map scale to a brief clinical hint
+        scale_hints = {
+            "PHQ-9": "抑郁倾向",
+            "GAD-7": "焦虑倾向",
+            "PCL-5": "创伤应激倾向",
+        }
+        clinical_hint = scale_hints.get(scale_name, "心理困扰")
 
-        # Common preamble — invisible-assessment expression rules
-        rule_block = f"""
-【无感量表表达规则】
-你正在做的是后台症状评估，但口语回复必须像自然聊天。
-口语回复中严禁出现以下词语：
-"量表""问卷""题""这一题""上一题""下一题""第几题""评分""分数"
-"{scale_name}""PHQ-9""GAD-7""PCL-5""接下来"
+        # Build a list of symptom areas still to explore
+        answered = self._scale_answers.get(scale_name, {})
+        remaining_areas = []
+        for i, q in enumerate(scale["questions"], start=1):
+            if i not in answered:
+                area = NATURAL_SCALE_QUESTIONS.get((scale_name, i), q)
+                remaining_areas.append(area)
 
-禁止说：
-- "接下来这一题是关于……"
-- "下一题想问……"
-- "上一题你的回答……"
-- "这个量表……"
-
-允许说：
-- "我也想顺着了解一下……"
-- "那睡眠这块呢……"
-- "这种状态挺频繁的，吃饭/睡觉有没有也受影响？"
-- "我再轻轻问一句……"
-- "这块我想多了解一点……"
-"""
-
-        # Not yet asked — ask current question, no scoring
         if not waiting_answer:
-            return f"""{rule_block}
-【后台任务】询问第 {q_num}/{total} 个症状维度。
-维度描述：{q_text}
-口语化表述：{natural_q}
-
-本轮用户还没有回答，不要输出 SCALE 标签。
-先简短共情一句（不超过15字），然后用口语化表述自然询问。
-不要泛泛追问原因，要围绕该维度具体问。
-
-【优先级】如果本轮同时存在知识库提示，必须以症状探索为主。知识库内容只能作为一句简短支持或过渡。
+            # First time exploring this symptom area — give a subtle hint
+            return f"""
+【后台提示】来访者可能有{clinical_hint}。可以自然了解一下相关方面，但不要暴露你在做评估。
+当前可以自然了解的方面：{natural_q}
+口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来""第几题"。
+像正常聊天一样自然地问，不要像在做问卷。
 """
-
-        # Waiting for answer — score this turn
-        if next_q_text:
-            return f"""{rule_block}
-【后台任务】评分第 {q_num}/{total} 个维度并自然过渡到下一个维度。
-当前维度：{q_text}
-下一维度口语化表述：{next_natural}
-
-用户本轮输入是对当前维度的回答。
-
-评分规则：
-- 如果用户回答足够判断频率/程度，在回复末尾输出 [SCALE:{scale_name}:Q{q_num}:S分数]
-- 然后把下一维度自然融入口语追问，不要说"下一题/接下来"
-- 如果用户回答模糊（如"还好""差不多"），禁止猜测分数，不要输出 SCALE 标签。请围绕当前维度追问一个澄清问题，例如"是偶尔几天，还是一半以上时间都这样？"
-
+        else:
+            # Already asked — the LLM should continue the conversation naturally.
+            # Background scoring will happen via [SCALE:] tags.
+            # Hint: if user's response clearly maps to a score, output the tag.
+            options_text = " / ".join(
+                f"{opt['score']}-{opt['label']}" for opt in scale["options"]
+            )
+            return f"""
+【后台提示】来访者正在回应关于"{natural_q}"的了解。
+如果回答足够判断频率/程度，在回复末尾输出 [SCALE:{scale_name}:Q{q_num}:S分数]。
 评分标准：{options_text}
-
-禁止改问"发生了什么事""为什么这样"这类泛化问题。
-
-【优先级】如果本轮同时存在知识库提示，必须以症状探索为主。
-"""
-        # Last question — score and wrap up
-        return f"""{rule_block}
-【后台任务】评分最后一个维度（第 {q_num}/{total}）。
-当前维度：{q_text}
-
-用户本轮输入是对该维度的回答。
-
-评分规则：
-- 如果用户回答足够判断，在回复末尾输出 [SCALE:{scale_name}:Q{q_num}:S分数]
-- 然后用一句自然、温暖的话收束，不要暴露"最后一题/量表结束"等信息
-- 如果用户回答模糊，禁止猜测分数。请追问一个澄清问题。
-
-评分标准：{options_text}
-
-【优先级】如果本轮同时存在知识库提示，必须以症状探索为主。
+如果回答模糊，不要猜分数，自然追问一句。
+口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来"。
 """
 
     def _build_system_suffix(self, text: str) -> str:
