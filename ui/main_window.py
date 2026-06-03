@@ -1296,11 +1296,13 @@ class MainWindow(QMainWindow):
         )
 
         if has_active_session and not self._current_report_generated:
-            # Need to generate report before quitting
+            # Use unified end flow — will check scales, relaxation, then end
             self._pending_quit = True
             self._user_explicit_end = True
             self._show_exit_waiting_dialog("正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000)
-            self._handle_session_end(EndType.QUIT)
+            self._request_end_with_readiness_check(
+                EndType.QUIT, allow_force_relaxation=False, source="exit_program"
+            )
             return
 
         self._force_quit_now()
@@ -1325,10 +1327,9 @@ class MainWindow(QMainWindow):
         - auto-end, time limit, user click, model END tag, relaxation timeout
 
         Checks:
-        1. Crisis risk (handled separately)
-        2. Incomplete scales → prompt to continue or end
-        3. No relaxation done → recommend once
-        4. Then proceed to actual end
+        1. Incomplete scales → prompt to continue or end
+        2. No relaxation done → recommend once (non-blocking)
+        3. Then proceed to actual end
         """
         logger.info(f"[EndFlow] _request_end_with_readiness_check: end_type={end_type}, source={source}")
 
@@ -1337,24 +1338,29 @@ class MainWindow(QMainWindow):
         scale_incomplete = state["scale_incomplete"]
         relax_done = state["relax_done"]
 
-        # If scales incomplete and user hasn't explicitly chosen to end, prompt
-        if scale_incomplete and source not in ("user_explicit_end", "auto_end_after_relaxation"):
+        # Store pending end info for use in _end_session_directly
+        self._pending_end_type = end_type
+        self._pending_end_allow_force = allow_force_relaxation
+        self._pending_end_source = source
+
+        # If scales incomplete, always prompt (except when user already confirmed direct end)
+        if scale_incomplete and source != "direct_end_confirmed":
             self._show_end_decision_dialog(state)
             return
 
-        # If no relaxation done, recommend once (but don't block)
-        if not relax_done and source not in ("auto_end_after_relaxation",):
+        # If no relaxation done, recommend once (non-blocking)
+        if not relax_done and source not in ("auto_end_after_relaxation", "direct_end_confirmed"):
             tag = self._get_end_relaxation_tag()
             tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
             rec_text = f"结束前要不要先做个短的{tag_cn}放松？左边有按钮，做完咱们再结束。"
             self.chat_panel.add_system_message(rec_text, as_ai=True)
             self._play_tts_async(rec_text)
-            # Still proceed to end — don't block
+            # Still show dialog so user can choose
             self._show_end_decision_dialog(state)
             return
 
-        # All checks passed — proceed to end
-        self._show_end_decision_dialog(state)
+        # All checks passed — proceed to end directly
+        self._handle_session_end(end_type, allow_force_relaxation=allow_force_relaxation)
 
     def _get_end_readiness_state(self):
         """Return completion state before ending current subject session."""
@@ -1454,8 +1460,7 @@ class MainWindow(QMainWindow):
         return "breathing"
 
     def _end_session_directly(self, state=None):
-        """User chose 'end directly' — skip relaxation, generate report."""
-        self._pending_quit = False
+        """User chose 'end directly' in the decision dialog — confirmed direct end."""
         self._user_explicit_end = True
         # Store completion_status for report
         if state:
@@ -1468,8 +1473,20 @@ class MainWindow(QMainWindow):
             }
         else:
             self._completion_status = {"ended_by_user": True}
-        self._show_exit_waiting_dialog("会话结束，感谢你的参与，请稍候...")
-        self._handle_session_end(EndType.GOAL_ACHIEVED, allow_force_relaxation=False)
+
+        # Use pending end info from _request_end_with_readiness_check
+        end_type = getattr(self, '_pending_end_type', EndType.GOAL_ACHIEVED)
+        allow_force = getattr(self, '_pending_end_allow_force', False)
+        source = getattr(self, '_pending_end_source', '')
+
+        if source == "exit_program":
+            self._pending_quit = True
+            self._show_exit_waiting_dialog("正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000)
+        else:
+            self._show_exit_waiting_dialog("会话结束，感谢你的参与，请稍候...")
+
+        # Call _handle_session_end with source="direct_end_confirmed" to skip re-checking
+        self._handle_session_end(end_type, allow_force_relaxation=allow_force)
 
     def _end_session_with_relaxation(self):
         """User chose 'do relaxation first' — recommend training, no report yet."""
