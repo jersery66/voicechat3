@@ -175,7 +175,23 @@ class CrisisDialog(BaseDialog):
         msg.setStyleSheet("color: #2c3e50; font-size: 12px;")
         layout.addWidget(msg)
 
-        for name, number in hotlines:
+        for item in hotlines:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("label") or item.get("title") or "危机热线"
+                number = item.get("number") or item.get("phone") or item.get("value") or ""
+            elif isinstance(item, (list, tuple)):
+                if len(item) >= 2:
+                    name = str(item[0])
+                    number = " / ".join(str(x) for x in item[1:] if x)
+                elif len(item) == 1:
+                    name = "危机热线"
+                    number = str(item[0])
+                else:
+                    continue
+            else:
+                name = "危机热线"
+                number = str(item)
+
             hl = QLabel(f"  {name}: {number}")
             hl.setStyleSheet("color: #c0392b; font-size: 13px; font-weight: bold; padding: 2px 8px;")
             layout.addWidget(hl)

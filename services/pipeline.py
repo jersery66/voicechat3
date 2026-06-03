@@ -328,6 +328,7 @@ class ConversationPipeline:
         self._active_scale_waiting_answer: bool = False  # True = asked, waiting for user reply
         self._scale_queue: List[str] = []           # scales queued while one is active
         self._scale_pause_turns: int = 0            # turns to pause before next scale item
+        self._crisis_lock_turns: int = 0            # turns to block all scales after crisis
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -351,6 +352,7 @@ class ConversationPipeline:
         self._active_scale_waiting_answer = False
         self._scale_queue.clear()
         self._scale_pause_turns = 0
+        self._crisis_lock_turns = 0
 
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
@@ -438,6 +440,40 @@ class ConversationPipeline:
             }
 
         return results
+
+    @staticmethod
+    def _is_valid_scale_trigger_text(text: str) -> bool:
+        """Check if user text is meaningful enough to trigger a scale.
+
+        Suppresses scale start on ASR noise, meaningless short text, or
+        utterances with no clear symptom/emotion keywords.
+        """
+        t = (text or "").strip("。！？!?,， ")
+        if len(t) < 4:
+            return False
+
+        # Obvious ASR noise or meaningless short phrases
+        noise = {"啊", "哦", "嗯", "好", "是吧", "最早", "友谊酒店", "528",
+                 "没有了吧", "还好吧", "不知道", "嗯嗯", "好的", "行"}
+        if t in noise:
+            return False
+
+        # Mostly digits
+        digit_count = sum(ch.isdigit() for ch in t)
+        if digit_count >= 2 and digit_count / max(len(t), 1) > 0.4:
+            return False
+
+        # Must contain clear symptom / emotion / functional impairment keywords
+        symptom_keywords = [
+            "心情不好", "不开心", "低落", "难受", "没意思", "没兴趣",
+            "睡不着", "失眠", "睡不好", "早醒", "睡太多",
+            "吃不下", "没胃口", "吃太多",
+            "累", "没力气", "没劲", "疲惫", "乏力",
+            "焦虑", "紧张", "害怕", "恐惧", "烦躁",
+            "不想活", "想死", "自杀", "自残", "伤害自己",
+            "绝望", "没希望", "痛苦", "心里累", "撑不住",
+        ]
+        return any(k in t for k in symptom_keywords)
 
     def get_remaining_scale_prompt(self) -> Optional[str]:
         """Generate a prompt for the LLM to ask remaining scale questions."""
@@ -561,10 +597,16 @@ class ConversationPipeline:
         from services.scales import get_scale_manager
         scale_mgr = get_scale_manager()
 
+        # Crisis lock: block all scale logic for N turns after crisis detection
+        if self._crisis_lock_turns > 0:
+            self._crisis_lock_turns -= 1
+            self._active_scale = None
+            logger.warning(f"[CrisisDebug] crisis lock active, skip scale logic: remaining={self._crisis_lock_turns}")
+
         # Round gate: don't start new scales in early rapport-building rounds.
         # Active scales (already in progress) are不受此限制.
         current_rounds = self.report.get_round_count() if self.report else 0
-        allow_new_scale = current_rounds >= MIN_ROUNDS_BEFORE_SCALE
+        allow_new_scale = current_rounds >= MIN_ROUNDS_BEFORE_SCALE and self._crisis_lock_turns <= 0
 
         # Active scale takes priority — keep asking until completed
         if self._active_scale:
@@ -644,7 +686,9 @@ class ConversationPipeline:
 
                 logger.warning(f"[ScaleDebug] text={result.user_text!r}, "
                                f"candidates={candidates}, administered={self._administered_scales}")
-                if candidates:
+                # Text quality gate: suppress scale on ASR noise / meaningless short text
+                _valid_trigger = self._is_valid_scale_trigger_text(result.user_text)
+                if candidates and _valid_trigger:
                     first = candidates[0]
                     self._administered_scales.add(first)
                     self._active_scale = first
@@ -660,6 +704,10 @@ class ConversationPipeline:
                         system_suffix += "\n" + active_prompt
                         logger.warning(f"[ScaleDebug] started {first}, "
                                        f"queued={self._scale_queue}")
+                elif candidates and not _valid_trigger:
+                    logger.warning(
+                        f"[ScaleDebug] suppress scale start due to weak/noisy trigger: {result.user_text!r}"
+                    )
 
         if self.emotion_tracker:
             hint = self.emotion_tracker.get_intervention_hint()
@@ -681,7 +729,14 @@ class ConversationPipeline:
                 else:
                     final_suffix = CRISIS_INTERVENTION_SUFFIX
                 _skip_programmatic_scale = True
-                logger.warning(f"[Pipeline] Crisis keywords detected pre-LLM: risk={quick_crisis.get('risk_level')}")
+                # Crisis lock: block all scales for next 4 turns
+                self._crisis_lock_turns = 4
+                self._active_scale = None
+                self._active_scale_q = 1
+                self._active_scale_waiting_answer = False
+                self._scale_queue.clear()
+                self._scale_pause_turns = max(self._scale_pause_turns, 4)
+                logger.warning(f"[Pipeline] Crisis keywords detected pre-LLM: risk={quick_crisis.get('risk_level')}, lock=4 turns")
 
         # --- Programmatic first scale question (bypass LLM) ---
         # If we just started a new scale or moved to a new question and are NOT
