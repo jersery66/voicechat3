@@ -128,9 +128,19 @@ class ChatPanel(FrostedPanel):
         self._msg_layout = QVBoxLayout(self._msg_container)
         self._msg_layout.setContentsMargins(6, 8, 6, 8)
         self._msg_layout.setSpacing(8)
-        self._msg_layout.addStretch()
+
+        # Top spacer: messages stay at bottom when few, auto-compress when many
+        from PySide6.QtWidgets import QSpacerItem, QSizePolicy
+        self._top_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        self._msg_layout.addItem(self._top_spacer)
 
         self.scroll_area.setWidget(self._msg_container)
+
+        # Auto-pin to bottom when content height changes (like WeChat)
+        self.scroll_area.verticalScrollBar().rangeChanged.connect(
+            self._on_scroll_range_changed
+        )
+
         layout.addWidget(self.scroll_area)
 
         # AI status indicator
@@ -258,24 +268,27 @@ class ChatPanel(FrostedPanel):
         self.status_indicator.set_state(status)
 
     def _add_bubble(self, bubble):
-        """Insert bubble before the stretch."""
-        count = self._msg_layout.count()
-        self._msg_layout.insertWidget(count - 1, bubble)
+        """Append bubble after the top spacer, so messages stay at the bottom."""
+        self._msg_layout.addWidget(bubble)
         self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
-        """Scroll to bottom after Qt has recalculated bubble/layout heights."""
+        """Keep newest message visible at the bottom."""
         def do_scroll():
             self._msg_container.adjustSize()
             self._msg_container.updateGeometry()
-            QApplication.processEvents()
             bar = self.scroll_area.verticalScrollBar()
             bar.setValue(bar.maximum())
 
-        # Multiple delayed scrolls to handle QLabel word-wrap and streaming height changes
         QTimer.singleShot(0, do_scroll)
         QTimer.singleShot(50, do_scroll)
         QTimer.singleShot(150, do_scroll)
+        QTimer.singleShot(300, do_scroll)
+
+    def _on_scroll_range_changed(self, _min, max_value):
+        """Auto-pin to bottom when content height changes (like WeChat)."""
+        bar = self.scroll_area.verticalScrollBar()
+        bar.setValue(max_value)
 
     def _on_send(self):
         text = self.text_input.toPlainText().strip()
