@@ -413,10 +413,8 @@ class MainWindow(QMainWindow):
             if et == EndType.SAFETY:
                 self._handle_session_end(et, result.relaxation_rec)
                 return
-            # Other END types: confirm with operator first
-            self._pending_end_type = et
-            self.processing_queue.put(("session_warning", "检测到可能想结束。请确认是继续聊，还是结束会话。"))
-            self.processing_queue.put(("time_limit_ask", None))
+            # Other END types: use unified readiness check
+            self._request_end_with_readiness_check(et, source="model_end_tag")
             return
 
         if result.all_scales_completed:
@@ -523,7 +521,7 @@ class MainWindow(QMainWindow):
                     self._recommend_relaxation_after_scales()
 
                 elif msg_type == "auto_end_session":
-                    self._handle_session_end(content, allow_force_relaxation=False)
+                    self._request_end_with_readiness_check(content, allow_force_relaxation=False, source="auto_end_after_relaxation")
 
                 elif msg_type == "session_warning":
                     if content == "TIME_LIMIT_ASK":
@@ -1318,7 +1316,44 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message("当前没有进行中的会话。请填写参与者信息后开始。")
             return
 
+        self._request_end_with_readiness_check(EndType.GOAL_ACHIEVED, source="user_button")
+
+    def _request_end_with_readiness_check(self, end_type, allow_force_relaxation=True, source="unknown"):
+        """Unified end flow: check readiness before ending.
+
+        All end paths should go through this method:
+        - auto-end, time limit, user click, model END tag, relaxation timeout
+
+        Checks:
+        1. Crisis risk (handled separately)
+        2. Incomplete scales → prompt to continue or end
+        3. No relaxation done → recommend once
+        4. Then proceed to actual end
+        """
+        logger.info(f"[EndFlow] _request_end_with_readiness_check: end_type={end_type}, source={source}")
+
+        # Get readiness state
         state = self._get_end_readiness_state()
+        scale_incomplete = state["scale_incomplete"]
+        relax_done = state["relax_done"]
+
+        # If scales incomplete and user hasn't explicitly chosen to end, prompt
+        if scale_incomplete and source not in ("user_explicit_end", "auto_end_after_relaxation"):
+            self._show_end_decision_dialog(state)
+            return
+
+        # If no relaxation done, recommend once (but don't block)
+        if not relax_done and source not in ("auto_end_after_relaxation",):
+            tag = self._get_end_relaxation_tag()
+            tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
+            rec_text = f"结束前要不要先做个短的{tag_cn}放松？左边有按钮，做完咱们再结束。"
+            self.chat_panel.add_system_message(rec_text, as_ai=True)
+            self._play_tts_async(rec_text)
+            # Still proceed to end — don't block
+            self._show_end_decision_dialog(state)
+            return
+
+        # All checks passed — proceed to end
         self._show_end_decision_dialog(state)
 
     def _get_end_readiness_state(self):

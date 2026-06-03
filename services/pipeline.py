@@ -283,6 +283,23 @@ def is_user_explicit_end_text(text: str) -> bool:
     return any(x in t for x in explicit_end)
 
 
+def is_scale_interruption_text(text: str) -> bool:
+    """Check if user is interrupting/resisting scale questioning.
+
+    Returns True if the user is clearly resisting, changing topic, or
+    expressing frustration about being questioned.
+    """
+    t = (text or "").strip()
+
+    interruption_phrases = [
+        "为啥一直问", "为什么一直问", "别问了", "不想回答", "换个话题",
+        "不想说这个", "就是想聊天", "你怎么老问", "别再问了",
+        "聊点别的", "说点别的", "不想聊这个", "不要问了",
+        "我来聊天的", "我不是来做问卷的",
+    ]
+    return any(x in t for x in interruption_phrases)
+
+
 # ==================== Pipeline Result ====================
 
 @dataclass
@@ -622,6 +639,14 @@ class ConversationPipeline:
             self._crisis_lock_turns -= 1
             self._active_scale = None
             logger.warning(f"[CrisisDebug] crisis lock active, skip scale logic: remaining={self._crisis_lock_turns}")
+
+        # Interruption detection: if user resists questioning, stop scale immediately
+        if self._active_scale and is_scale_interruption_text(result.user_text):
+            logger.warning(f"[ScaleDebug] user interrupted scale questioning: {result.user_text!r}")
+            self._active_scale = None
+            self._active_scale_q = 1
+            self._active_scale_waiting_answer = False
+            self._scale_pause_turns = 3  # pause before next scale attempt
 
         # Round gate: don't start new scales in early rapport-building rounds.
         # Active scales (already in progress) are不受此限制.
