@@ -422,8 +422,8 @@ class MainWindow(QMainWindow):
         if result.all_scales_completed:
             self.processing_queue.put(("all_scales_completed", None))
         elif result.relaxation_rec and not result.scale_active:
-            self.processing_queue.put(("highlight_relax", result.relaxation_rec))
-            self.processing_queue.put(("status", "准备就绪"))
+            self.processing_queue.put(("highlight_relax_delayed", (result.relaxation_rec, 300)))
+            self.processing_queue.put(("status", "可以尝试左侧放松训练"))
         elif result.intent == "entertainment":
             self.processing_queue.put(("highlight_relax", "game"))
             self.processing_queue.put(("status", "准备就绪"))

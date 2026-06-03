@@ -646,28 +646,20 @@ class ConversationPipeline:
             candidates = scale_mgr.recommend_scale_candidates(
                 result.user_text, administered=self._administered_scales
             )
-            for c in candidates:
-                if c != self._active_scale and c not in self._scale_queue:
-                    self._scale_queue.append(c)
-                    logger.warning(f"[ScaleDebug] queued {c} (active: {self._active_scale})")
             if candidates:
-                logger.warning(f"[ScaleDebug] candidates={candidates}, "
-                               f"active={self._active_scale}, queue={self._scale_queue}")
+                logger.warning(
+                    f"[ScaleDebug] latent mode ignores extra candidates={candidates}, "
+                    f"active={self._active_scale}"
+                )
         else:
             # Pause: don't start new scale items for N turns after last sampling
             if self._scale_pause_turns > 0:
                 self._scale_pause_turns -= 1
                 logger.warning(f"[ScaleDebug] scale paused, remaining={self._scale_pause_turns}")
             elif self._scale_queue:
-                next_scale = self._scale_queue.pop(0)
-                self._administered_scales.add(next_scale)
-                self._active_scale = next_scale
-                self._active_scale_q = 1
-                self._active_scale_waiting_answer = False
-                active_prompt = self._build_active_scale_prompt(next_scale, 1, False)
-                if active_prompt:
-                    system_suffix += "\n" + active_prompt
-                    logger.warning(f"[ScaleDebug] started queued {next_scale}, asking Q1")
+                # Latent sampling mode: don't auto-start queued scales
+                logger.warning(f"[ScaleDebug] drop queued scales in latent sampling mode: {self._scale_queue}")
+                self._scale_queue.clear()
             elif not allow_new_scale:
                 # Still in rapport-building rounds — don't start new scales yet
                 logger.warning(
@@ -714,11 +706,12 @@ class ConversationPipeline:
                     self._active_scale = first
                     self._active_scale_q = 1
                     self._active_scale_waiting_answer = False
-                    # Queue the rest
-                    for c in candidates[1:]:
-                        if c not in self._administered_scales:
-                            self._administered_scales.add(c)
-                            self._scale_queue.append(c)
+                    # Don't queue or mark extra candidates — latent sampling only
+                    if len(candidates) > 1:
+                        logger.warning(
+                            f"[ScaleDebug] latent mode: only starting {first}, "
+                            f"ignoring {candidates[1:]}"
+                        )
                     active_prompt = self._build_active_scale_prompt(first, 1, False)
                     if active_prompt:
                         system_suffix += "\n" + active_prompt

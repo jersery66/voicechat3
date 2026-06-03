@@ -100,6 +100,9 @@ class BlinkButton(QPushButton):
             return
         self._is_blinking = True
         self._original_style = self.styleSheet()
+        self._blink_phase = False
+        # Immediate first blink, don't wait 500ms
+        self._toggle_blink()
         self._blink_timer.start(500)
 
     def stop_blink(self):
@@ -111,12 +114,16 @@ class BlinkButton(QPushButton):
     def _toggle_blink(self):
         self._blink_phase = not self._blink_phase
         if self._blink_phase:
-            self.setStyleSheet(f"""
-                QPushButton {{
-                    border: 2px solid #FFD700;
-                    background-color: rgba(255, 215, 0, 0.3);
+            self.setStyleSheet("""
+                QPushButton {
+                    border: 3px solid #FFD700;
+                    background-color: #FFD54F;
+                    color: #3E2723;
                     border-radius: 8px;
-                }}
+                    padding: 7px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
             """)
         else:
             self.setStyleSheet(self._original_style)
@@ -294,7 +301,7 @@ class MessageBubble(QFrame):
         self._is_user = is_user
         self._is_system = is_system
         if not is_system:
-            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -304,7 +311,7 @@ class MessageBubble(QFrame):
         self.text_label = QLabel(self._full_text)
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.text_label.setFont(QFont("Microsoft YaHei", 10))
+        self.text_label.setFont(QFont("Microsoft YaHei", 11))
 
         dark = self._dark_mode
         if self._is_system:
@@ -318,25 +325,25 @@ class MessageBubble(QFrame):
             layout.setAlignment(Qt.AlignCenter)
         elif self._is_user:
             self.setStyleSheet(f"""
-                background-color: {'#2d5a27' if dark else '#E7F2E6'};
-                border-radius: 16px 16px 6px 16px;
+                background-color: {'#2d5a27' if dark else '#DCF8C6'};
+                border-radius: 12px 12px 4px 12px;
             """)
             self.text_label.setAlignment(Qt.AlignRight)
             self.text_label.setStyleSheet(f"""
                 color: {'#e0e0e0' if dark else '#2c3e50'};
-                padding: 8px 12px;
+                padding: 10px 14px;
                 background: transparent;
             """)
         else:
             self.setStyleSheet(f"""
-                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.92)'};
-                border: 1px solid {'#3a3a5c' if dark else 'rgba(120, 120, 120, 0.12)'};
-                border-radius: 16px 16px 16px 6px;
+                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.95)'};
+                border: 1px solid {'#3a3a5c' if dark else '#e0e0e0'};
+                border-radius: 12px 12px 12px 4px;
             """)
             self.text_label.setAlignment(Qt.AlignLeft)
             self.text_label.setStyleSheet(f"""
                 color: {'#e0e0e0' if dark else '#2c3e50'};
-                padding: 8px 12px;
+                padding: 10px 14px;
                 background: transparent;
             """)
 
