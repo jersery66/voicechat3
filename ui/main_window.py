@@ -377,8 +377,25 @@ class MainWindow(QMainWindow):
             else:
                 # Voice mode: STT + TTS
                 audio_data = self.stt_service.stop_recording()
+
                 if len(audio_data) == 0:
+                    logger.warning("[ASRDebug] audio_data empty after stop_recording")
                     self.processing_queue.put(("status", "未检测到语音"))
+                    return
+
+                # ASR debug: check audio quality
+                import numpy as np
+                from config import SAMPLE_RATE
+                duration = len(audio_data) / SAMPLE_RATE
+                rms = float(np.sqrt(np.mean(audio_data.astype(np.float64) ** 2)))
+                peak = float(np.max(np.abs(audio_data)))
+                logger.warning(
+                    f"[ASRDebug] captured: samples={len(audio_data)}, "
+                    f"duration={duration:.2f}s, rms={rms:.6f}, peak={peak:.6f}"
+                )
+                if duration < 0.3 or peak < 0.003:
+                    logger.warning("[ASRDebug] audio too weak or too short")
+                    self.processing_queue.put(("status", "声音太小或未检测到有效语音"))
                     return
                 extra = getattr(self, '_pending_scale_prompt', '') or ''
                 self._pending_scale_prompt = None
@@ -437,7 +454,7 @@ class MainWindow(QMainWindow):
         # VAD auto-stop polling
         if (self.is_recording and self.stt_service
                 and self.stt_service.is_vad_triggered()):
-            self.is_recording = False
+            logger.warning("[ASRDebug] VAD triggered, stopping recording")
             self._on_record_stopped()
 
         try:

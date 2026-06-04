@@ -182,41 +182,45 @@ class STTService:
             # Find the best input device
             devices = sd.query_devices()
             best_device_id = None
-            
-            # Priority 1: User requested Virtual Sound Card ("Cable", "Virtual", etc.)
+
+            # Default: prefer real microphone
+            mic_keywords = ["mic", "microphone", "麦克风", "array", "realtek"]
+            virtual_keywords = ["cable", "virtual", "stereo mix"]
+
+            # Priority 1: Real microphone
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0:
                     name = dev['name'].lower()
-                    if "cable" in name or "virtual" in name or "stereo mix" in name:
+                    if any(k in name for k in mic_keywords):
                         best_device_id = i
-                        logger.info(f"Selected prioritized Virtual Device: {dev['name']} (Index {i})")
+                        logger.info(f"[ASRDebug] Selected microphone: {dev['name']} (Index {i})")
                         break
-            
-            # Priority 2: Explicit "Mic" or "麦克风" (Fallback)
+
+            # Priority 2: Virtual/cable (only if no mic found)
             if best_device_id is None:
                 for i, dev in enumerate(devices):
                     if dev['max_input_channels'] > 0:
                         name = dev['name'].lower()
-                        if "mic" in name or "麦克风" in name:
+                        if any(k in name for k in virtual_keywords):
                             best_device_id = i
-                            logger.info(f"Selected Microphone (Fallback): {dev['name']} (Index {i})")
+                            logger.info(f"[ASRDebug] Selected virtual input: {dev['name']} (Index {i})")
                             break
-            
-            # Priority 3: Fallback to default
+
+            # Priority 3: Default input device
             if best_device_id is None:
                 try:
                     default_device = sd.query_devices(kind='input')
                     best_device_id = default_device['index']
-                    logger.info(f"Using default input device: {default_device['name']}")
+                    logger.info(f"[ASRDebug] Using default input: {default_device['name']}")
                 except Exception:
                     pass
-            
-            # Priority 4: Fallback to ANY input device
+
+            # Priority 4: ANY input device
             if best_device_id is None:
                 for i, dev in enumerate(devices):
                     if dev['max_input_channels'] > 0:
                         best_device_id = i
-                        logger.info(f"Found fallback device: {dev.get('name')} (Index {i})")
+                        logger.info(f"[ASRDebug] Fallback device: {dev.get('name')} (Index {i})")
                         break
             
             if best_device_id is None:
