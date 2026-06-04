@@ -656,113 +656,35 @@ class ConversationPipeline:
             self._active_scale_waiting_answer = False
             self._scale_pause_turns = 3  # pause before next scale attempt
 
-        # Round gate: don't start new scales in early rapport-building rounds.
-        # Active scales (already in progress) are不受此限制.
+        # Round gate
         current_rounds = self.report.get_round_count() if self.report else 0
-        allow_new_scale = current_rounds >= MIN_ROUNDS_BEFORE_SCALE and self._crisis_lock_turns <= 0
 
-        # Active scale takes priority — keep asking until completed
-        if self._active_scale:
-            active_prompt = self._build_active_scale_prompt(
-                self._active_scale, self._active_scale_q,
-                self._active_scale_waiting_answer
-            )
-            if active_prompt:
-                system_suffix += "\n" + active_prompt
-                logger.warning(f"[ScaleDebug] active scale {self._active_scale} "
-                               f"Q{self._active_scale_q} waiting={self._active_scale_waiting_answer}")
-            # Mark that we've asked the question — next turn is a user answer
-            if not self._active_scale_waiting_answer:
-                self._active_scale_waiting_answer = True
-
-            # Still detect other scales to queue them (don't discard)
-            candidates = scale_mgr.recommend_scale_candidates(
-                result.user_text, administered=self._administered_scales
-            )
-            if candidates:
+        # --- Agent unified routing (3B model decides scale/relaxation/crisis) ---
+        agent_route = None
+        if self.agent and self.agent.is_available():
+            try:
+                relax_done = self._get_relaxation_done()
+                agent_route = self.agent.route_conversation_actions(
+                    user_text=result.user_text,
+                    recent_history=self._get_recent_dialogue_text(),
+                    current_round=current_rounds,
+                    active_scale=self._active_scale,
+                    collected_scales=self._scale_answers,
+                    relaxation_done=relax_done,
+                )
                 logger.warning(
-                    f"[ScaleDebug] latent mode ignores extra candidates={candidates}, "
-                    f"active={self._active_scale}"
+                    f"[AgentRoute] scale_action={agent_route.get('scale_action')} "
+                    f"scale={agent_route.get('scale')} "
+                    f"confidence={agent_route.get('confidence')} "
+                    f"relax={agent_route.get('recommend_relaxation')} "
+                    f"risk={agent_route.get('risk_level')} "
+                    f"reason={agent_route.get('reason', '')[:60]}"
                 )
-        else:
-            # Pause: don't start new scale items for N turns after last sampling
-            if self._scale_pause_turns > 0:
-                self._scale_pause_turns -= 1
-                logger.warning(f"[ScaleDebug] scale paused, remaining={self._scale_pause_turns}")
-            elif self._scale_queue:
-                # Latent sampling mode: don't auto-start queued scales
-                logger.warning(f"[ScaleDebug] drop queued scales in latent sampling mode: {self._scale_queue}")
-                self._scale_queue.clear()
-            elif not allow_new_scale:
-                # Still in rapport-building rounds — don't start new scales yet
-                logger.warning(
-                    f"[ScaleDebug] skip new scale: round {current_rounds} < {MIN_ROUNDS_BEFORE_SCALE}"
-                )
-            else:
-                # Build conversation context for keyword detection across turns
-                scale_context = ""
-                if self.llm and hasattr(self.llm, 'conversation_history'):
-                    recent_user = [
-                        m["content"] for m in self.llm.conversation_history[-6:]
-                        if m.get("role") == "user"
-                    ]
-                    if recent_user:
-                        scale_context = "\n".join(recent_user[-3:])
+            except Exception as e:
+                logger.warning(f"[AgentRoute] failed: {e}")
+                agent_route = None
 
-                # Combine context + current text for keyword matching
-                detect_text = result.user_text
-                if scale_context:
-                    detect_text = scale_context + "\n" + result.user_text
-
-                # Use candidates for multi-scale detection (keyword-based)
-                candidates = scale_mgr.recommend_scale_candidates(
-                    detect_text, administered=self._administered_scales
-                )
-                # Also check should_administer for agent/emotion fallback
-                if not candidates:
-                    single = scale_mgr.should_administer(
-                        self.emotion_tracker, self.report,
-                        user_text=result.user_text, administered=self._administered_scales,
-                        agent_service=self.agent,
-                        conversation_context=scale_context,
-                    )
-                    if single:
-                        candidates = [single]
-
-                logger.warning(f"[ScaleDebug] text={result.user_text!r}, "
-                               f"candidates={candidates}, administered={self._administered_scales}")
-                # Text quality gate: suppress scale on ASR noise / meaningless short text
-                _valid_trigger = self._is_valid_scale_trigger_text(result.user_text)
-                if candidates and _valid_trigger:
-                    first = candidates[0]
-                    self._administered_scales.add(first)
-                    self._active_scale = first
-                    self._active_scale_q = 1
-                    self._active_scale_waiting_answer = False
-                    # Don't queue or mark extra candidates — latent sampling only
-                    if len(candidates) > 1:
-                        logger.warning(
-                            f"[ScaleDebug] latent mode: only starting {first}, "
-                            f"ignoring {candidates[1:]}"
-                        )
-                    active_prompt = self._build_active_scale_prompt(first, 1, False)
-                    if active_prompt:
-                        system_suffix += "\n" + active_prompt
-                        logger.warning(f"[ScaleDebug] started {first}, "
-                                       f"queued={self._scale_queue}")
-                elif candidates and not _valid_trigger:
-                    logger.warning(
-                        f"[ScaleDebug] suppress scale start due to weak/noisy trigger: {result.user_text!r}"
-                    )
-
-        if self.emotion_tracker:
-            hint = self.emotion_tracker.get_intervention_hint()
-            if hint:
-                system_suffix += "\n" + hint
-
-        final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
-
-        # --- Quick crisis keyword check (fast, before LLM) ---
+        # Hard safety: crisis keywords always take priority (not dependent on agent)
         if self.agent:
             quick_crisis = self.agent._keyword_crisis_risk(result.user_text)
             if quick_crisis.get("immediate_action"):
@@ -771,14 +693,92 @@ class ConversationPipeline:
                     final_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
                 else:
                     final_suffix = CRISIS_INTERVENTION_SUFFIX
-                # Crisis lock: block all scales for next 4 turns
                 self._crisis_lock_turns = 4
                 self._active_scale = None
                 self._active_scale_q = 1
                 self._active_scale_waiting_answer = False
                 self._scale_queue.clear()
-                self._scale_pause_turns = max(self._scale_pause_turns, 4)
-                logger.warning(f"[Pipeline] Crisis keywords detected pre-LLM: risk={quick_crisis.get('risk_level')}, lock=4 turns")
+                logger.warning(f"[Pipeline] Crisis keywords detected: risk={quick_crisis.get('risk_level')}, lock=4 turns")
+                # Override agent route for safety
+                if agent_route:
+                    agent_route["immediate_crisis"] = True
+                    agent_route["scale_action"] = "pause"
+
+        # Gate: block scale logic during crisis lock
+        if self._crisis_lock_turns > 0:
+            self._crisis_lock_turns -= 1
+            self._active_scale = None
+            allow_new_scale = False
+            logger.warning(f"[CrisisDebug] crisis lock active, remaining={self._crisis_lock_turns}")
+        else:
+            allow_new_scale = True
+
+        # --- Scale logic driven by agent route ---
+        if agent_route and agent_route.get("confidence", 0) >= 0.5:
+            scale_action = agent_route.get("scale_action", "none")
+            suggested_scale = agent_route.get("scale")
+            probe_hint = agent_route.get("probe_hint", "")
+
+            if scale_action == "pause":
+                # Agent says user is resisting or context isn't right
+                if self._active_scale:
+                    logger.warning(f"[ScaleDebug] agent pause: clearing {self._active_scale}")
+                self._active_scale = None
+                self._active_scale_q = 1
+                self._active_scale_waiting_answer = False
+                self._scale_pause_turns = 2
+
+            elif scale_action == "start" and not self._active_scale and allow_new_scale:
+                # Agent recommends starting a new scale
+                if suggested_scale and suggested_scale not in self._administered_scales:
+                    self._administered_scales.add(suggested_scale)
+                    self._active_scale = suggested_scale
+                    self._active_scale_q = 1
+                    self._active_scale_waiting_answer = False
+                    logger.warning(
+                        f"[ScaleDebug] agent start: {suggested_scale}, "
+                        f"confidence={agent_route.get('confidence')}, "
+                        f"reason={agent_route.get('reason', '')[:60]}"
+                    )
+                    # Add subtle probe hint to system suffix
+                    if probe_hint:
+                        system_suffix += f"\n【隐性症状采样】{probe_hint}\n不要说量表、问卷、题目、评分。每轮最多一个问题。"
+
+            elif scale_action == "continue" and self._active_scale:
+                # Agent says continue probing current scale
+                if probe_hint:
+                    system_suffix += f"\n【隐性症状采样】{probe_hint}\n不要说量表、问卷、题目、评分。每轮最多一个问题。"
+                logger.warning(f"[ScaleDebug] agent continue: {self._active_scale}, hint={probe_hint[:40]}")
+
+            # Relaxation recommendation from agent
+            if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= 0.6:
+                rec_type = agent_route.get("relaxation_type") or "breathing"
+                result.relaxation_rec = rec_type
+                logger.warning(f"[ScaleDebug] agent recommend relaxation: {rec_type}")
+
+        elif self._active_scale:
+            # No agent route (unavailable) — maintain existing active scale
+            active_prompt = self._build_active_scale_prompt(
+                self._active_scale, self._active_scale_q,
+                self._active_scale_waiting_answer
+            )
+            if active_prompt:
+                system_suffix += "\n" + active_prompt
+                logger.warning(f"[ScaleDebug] active scale {self._active_scale} "
+                               f"Q{self._active_scale_q} waiting={self._active_scale_waiting_answer}")
+            if not self._active_scale_waiting_answer:
+                self._active_scale_waiting_answer = True
+
+        # Scale pause countdown
+        if self._scale_pause_turns > 0:
+            self._scale_pause_turns -= 1
+
+        if self.emotion_tracker:
+            hint = self.emotion_tracker.get_intervention_hint()
+            if hint:
+                system_suffix += "\n" + hint
+
+        final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
         # --- No programmatic scale questions ---
         # Scales are now explored naturally by the LLM via subtle system_suffix
@@ -1139,6 +1139,24 @@ class ConversationPipeline:
 如果回答模糊，不要猜分数，自然追问一句。
 口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来"。
 """
+
+    def _get_relaxation_done(self) -> bool:
+        """Check if relaxation training was completed this session."""
+        if hasattr(self, '_relaxation_done'):
+            return self._relaxation_done
+        return False
+
+    def _get_recent_dialogue_text(self, max_turns: int = 6) -> str:
+        """Get recent dialogue text for agent context."""
+        if not self.llm or not hasattr(self.llm, 'conversation_history'):
+            return ""
+        recent = self.llm.conversation_history[-max_turns * 2:]
+        lines = []
+        for msg in recent:
+            role = "来访者" if msg["role"] == "user" else "薇薇老师"
+            content = msg.get("content", "")[:150]
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines)
 
     def _build_system_suffix(self, text: str) -> str:
         """Build system suffix with round warning + RAG context."""

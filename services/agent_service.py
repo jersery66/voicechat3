@@ -27,7 +27,6 @@ from config import (
     AGENT_EMOTION_SYSTEM_MESSAGE,
     AGENT_SUMMARY_SYSTEM_MESSAGE,
     AGENT_CRISIS_SYSTEM_MESSAGE,
-    AGENT_SCALE_SYSTEM_MESSAGE,
     AGENT_TIMEOUT,
     AGENT_REPORT_TIMEOUT,
     AGENT_ENTERTAINMENT_KEYWORDS,
@@ -615,37 +614,115 @@ class AgentService:
 
         return results[:limit]
 
-    # ==================== Scale Recommendation ====================
+    # ==================== Unified Conversation Routing ====================
 
-    def recommend_scale(self, user_text: str, timeout: float = None,
-                        context: str = "") -> Optional[str]:
+    def route_conversation_actions(
+        self,
+        user_text: str,
+        recent_history: str = "",
+        current_round: int = 0,
+        active_scale: str = None,
+        collected_scales: dict = None,
+        relaxation_done: bool = False,
+        timeout: float = None,
+    ) -> dict:
+        """Unified routing decision for scale/relaxation/crisis per turn.
+
+        Returns a dict with:
+          scale_action: "none" | "start" | "continue" | "pause"
+          scale: scale name or null
+          item: question number or null
+          probe_hint: hint for LLM to naturally explore
+          recommend_relaxation: bool
+          relaxation_type: "breathing" | "muscle" | "meditation" | "game" | null
+          risk_level: 0-10
+          immediate_crisis: bool
+          confidence: 0.0-1.0
+          reason: explanation string
         """
-        Ask the 3B model whether a clinical scale should be administered.
-        Returns scale name ("PHQ-9", "GAD-7", "PCL-5") or None.
+        # Build context for the agent
+        context_parts = []
+        if recent_history:
+            context_parts.append(f"最近对话：\n{recent_history}")
+        context_parts.append(f"当前轮次：第{current_round}轮")
+        if active_scale:
+            context_parts.append(f"当前正在采样的量表：{active_scale}")
+        if collected_scales:
+            summary = []
+            for scale_name, answers in collected_scales.items():
+                summary.append(f"{scale_name}: 已采{len(answers)}题")
+            context_parts.append(f"已采样量表：{', '.join(summary)}")
+        if relaxation_done:
+            context_parts.append("已完成放松训练")
+        context_parts.append(f"用户本轮说：{user_text}")
 
-        Args:
-            user_text: Current user message.
-            context: Recent conversation history for multi-turn judgment.
-        """
-        if not user_text:
-            return None
+        context = "\n".join(context_parts)
 
-        query = f"对话历史：\n{context}\n\n用户最新发言：{user_text}" if context else user_text
+        system_prompt = """你是心理咨询系统的路由决策模块。根据用户当前输入和对话上下文，判断本轮应该做什么。
+
+输出严格JSON格式：
+{
+  "scale_action": "none|start|continue|pause",
+  "scale": "PHQ-9|GAD-7|PCL-5|null",
+  "item": null,
+  "probe_hint": "",
+  "recommend_relaxation": false,
+  "relaxation_type": "breathing|muscle|meditation|game|null",
+  "risk_level": 0,
+  "immediate_crisis": false,
+  "confidence": 0.0,
+  "reason": ""
+}
+
+规则：
+1. scale_action: 用户明确表达症状时(start)、已采样但需继续时(continue)、用户抗拒时(pause)、否则none
+2. scale: 抑郁/低落/没兴趣→PHQ-9，焦虑/紧张/担心→GAD-7，创伤/噩梦/回避→PCL-5
+3. item: 建议采样的具体维度编号(PHQ-9:1-9, GAD-7:1-7, PCL-5:1-8)
+4. probe_hint: 给主对话模型的隐性提示，不要出现量表名
+5. recommend_relaxation: 用户焦虑/紧张/失眠/疲惫时推荐
+6. risk_level: 0-10，有自杀/自残想法时>=7
+7. immediate_crisis: 有明确自杀/自残意图时true
+8. confidence: 0-1，判断置信度
+
+注意：
+- "好久了""每天吧""没有"等短句要结合上下文判断，不能单独当噪声过滤
+- 前2轮以建立关系为主，第3轮后可以开始隐性采样
+- 用户说"别问了""换个话题"时scale_action必须是pause
+- 不确定时confidence设低，主程序会根据阈值决定是否执行"""
 
         timeout = timeout or AGENT_TIMEOUT
         try:
             result = self._call_json(
-                AGENT_SCALE_SYSTEM_MESSAGE, query,
-                max_tokens=60, temperature=0.1, timeout=timeout,
+                system_prompt, context,
+                max_tokens=200, temperature=0.1, timeout=timeout,
             )
-            rec = result.get("recommend", "none")
-            if rec in ("PHQ-9", "GAD-7", "PCL-5"):
-                logger.info(f"Agent recommends scale: {rec} — {result.get('reason', '')}")
-                return rec
-            return None
+            # Ensure all required fields exist with defaults
+            result.setdefault("scale_action", "none")
+            result.setdefault("scale", None)
+            result.setdefault("item", None)
+            result.setdefault("probe_hint", "")
+            result.setdefault("recommend_relaxation", False)
+            result.setdefault("relaxation_type", None)
+            result.setdefault("risk_level", 0)
+            result.setdefault("immediate_crisis", False)
+            result.setdefault("confidence", 0.0)
+            result.setdefault("reason", "")
+            return result
         except Exception as e:
-            logger.debug(f"Scale recommendation failed: {e}")
-            return None
+            logger.warning(f"Route conversation actions failed: {e}")
+            # Fallback: return no-action
+            return {
+                "scale_action": "none",
+                "scale": None,
+                "item": None,
+                "probe_hint": "",
+                "recommend_relaxation": False,
+                "relaxation_type": None,
+                "risk_level": 0,
+                "immediate_crisis": False,
+                "confidence": 0.0,
+                "reason": f"agent fallback: {e}",
+            }
 
 
 # Singleton
