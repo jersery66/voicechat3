@@ -484,8 +484,26 @@ class ConversationPipeline:
 
         Suppresses scale start on ASR noise, meaningless short text, or
         utterances with no clear symptom/emotion keywords.
+        Symptom keywords take priority over length checks.
         """
         t = (text or "").strip("。！？!?,， ")
+        if not t:
+            return False
+
+        # Symptom keywords pass immediately, even if short (e.g., "睡不好")
+        symptom_keywords = [
+            "心情不好", "不开心", "低落", "难受", "没意思", "没兴趣",
+            "睡不着", "失眠", "睡不好", "早醒", "睡太多",
+            "吃不下", "没胃口", "吃太多",
+            "累", "没力气", "没劲", "疲惫", "乏力",
+            "焦虑", "紧张", "害怕", "恐惧", "烦躁",
+            "不想活", "想死", "自杀", "自残", "伤害自己",
+            "绝望", "没希望", "痛苦", "心里累", "撑不住",
+        ]
+        if any(k in t for k in symptom_keywords):
+            return True
+
+        # No symptom keywords — apply length and noise filters
         if len(t) < 4:
             return False
 
@@ -500,17 +518,7 @@ class ConversationPipeline:
         if digit_count >= 2 and digit_count / max(len(t), 1) > 0.4:
             return False
 
-        # Must contain clear symptom / emotion / functional impairment keywords
-        symptom_keywords = [
-            "心情不好", "不开心", "低落", "难受", "没意思", "没兴趣",
-            "睡不着", "失眠", "睡不好", "早醒", "睡太多",
-            "吃不下", "没胃口", "吃太多",
-            "累", "没力气", "没劲", "疲惫", "乏力",
-            "焦虑", "紧张", "害怕", "恐惧", "烦躁",
-            "不想活", "想死", "自杀", "自残", "伤害自己",
-            "绝望", "没希望", "痛苦", "心里累", "撑不住",
-        ]
-        return any(k in t for k in symptom_keywords)
+        return False
 
     def get_remaining_scale_prompt(self) -> Optional[str]:
         """Generate a prompt for the LLM to ask remaining scale questions."""

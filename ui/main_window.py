@@ -419,8 +419,8 @@ class MainWindow(QMainWindow):
 
         if result.all_scales_completed:
             self.processing_queue.put(("all_scales_completed", None))
-        elif result.relaxation_rec and not result.scale_active:
-            self.processing_queue.put(("highlight_relax_delayed", (result.relaxation_rec, 300)))
+        elif result.relaxation_rec:
+            self.processing_queue.put(("highlight_relax_delayed", (result.relaxation_rec, 500)))
             self.processing_queue.put(("status", "可以尝试左侧放松训练"))
         elif result.intent == "entertainment":
             self.processing_queue.put(("highlight_relax", "game"))
@@ -509,7 +509,7 @@ class MainWindow(QMainWindow):
                         "breathing": "breathing", "muscle": "muscle", "meditation": "meditation", "game": "game",
                     }
                     relax_key = relax_map.get(tag, tag)
-                    QTimer.singleShot(delay_ms, lambda rk=relax_key: self.control_panel.highlight_relax_button(rk))
+                    QTimer.singleShot(delay_ms, lambda rk=relax_key: self._highlight_relax_safe(rk))
 
                 elif msg_type == "replace_greeting":
                     self._replace_greeting(content)
@@ -845,6 +845,16 @@ class MainWindow(QMainWindow):
         indicators = risk_data.get("indicators", []) if risk_data else []
         dialog = CrisisDialog(self, CRISIS_HOTLINES, risk_level, indicators)
         dialog.exec()
+
+    def _highlight_relax_safe(self, relax_key: str):
+        """Highlight relaxation button with logging and safety checks."""
+        logger.warning(f"[UIDebug] highlight_relax_safe called: {relax_key}")
+        try:
+            self.control_panel.set_buttons_enabled(True)
+            self.control_panel.highlight_relax_button(relax_key)
+            self.control_panel.set_status("可以尝试左侧放松训练")
+        except Exception as e:
+            logger.warning(f"[UIDebug] highlight_relax failed: {e}")
 
     def _recommend_relaxation_after_scales(self):
         """After all scales are done, recommend a short relaxation training."""
