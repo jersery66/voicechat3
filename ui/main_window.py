@@ -72,6 +72,9 @@ class MainWindow(QMainWindow):
         self._completion_status = None
         self._timeout_dialog_open = False
         self._auto_ending_after_relaxation = False
+        self._end_decision_open = False
+        self._end_request_in_progress = False
+        self._pre_end_relax_prompted = False
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -774,6 +777,9 @@ class MainWindow(QMainWindow):
         self._session_ending = False
         self._pending_quit = False
         self._pipeline_busy = False
+        self._end_decision_open = False
+        self._end_request_in_progress = False
+        self._pre_end_relax_prompted = False
         self._completion_status = None
         self._auto_ending_after_relaxation = False
         self.current_user_id = None
@@ -1320,7 +1326,8 @@ class MainWindow(QMainWindow):
 
     def _on_end_session(self):
         """结束当前被试会话：先检查完成度，再弹窗让用户选择。"""
-        if self._session_ending:
+        if self._session_ending or self._end_decision_open or self._end_request_in_progress:
+            logger.info("[EndFlow] duplicate end click ignored")
             return
 
         if not self.models_loaded or self.orchestrator.state in (
@@ -1329,6 +1336,7 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message("当前没有进行中的会话。请填写参与者信息后开始。")
             return
 
+        self._end_request_in_progress = True
         self._request_end_with_readiness_check(EndType.GOAL_ACHIEVED, source="user_button")
 
     def _request_end_with_readiness_check(self, end_type, allow_force_relaxation=True, source="unknown"):
@@ -1359,14 +1367,18 @@ class MainWindow(QMainWindow):
             self._show_end_decision_dialog(state)
             return
 
-        # If no relaxation done, recommend once (non-blocking)
+        # If no relaxation done, recommend once (non-blocking, no TTS to avoid overlap)
         if not relax_done and source not in ("auto_end_after_relaxation", "direct_end_confirmed"):
             tag = self._get_end_relaxation_tag()
             tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
-            rec_text = f"结束前要不要先做个短的{tag_cn}放松？左边有按钮，做完咱们再结束。"
-            self.chat_panel.add_system_message(rec_text, as_ai=True)
-            self._play_tts_async(rec_text)
-            # Still show dialog so user can choose
+
+            if not self._pre_end_relax_prompted:
+                self._pre_end_relax_prompted = True
+                rec_text = f"结束前要不要先做个短的{tag_cn}放松？左边有按钮，做完咱们再结束。"
+                self.chat_panel.add_system_message(rec_text, as_ai=True)
+                # Don't play TTS — it overlaps with farewell TTS if user clicks "direct end"
+                self.processing_queue.put(("highlight_relax_delayed", (tag, 300)))
+
             self._show_end_decision_dialog(state)
             return
 
@@ -1394,14 +1406,29 @@ class MainWindow(QMainWindow):
 
     def _show_end_decision_dialog(self, state):
         """Show end-session decision dialog based on completion state."""
-        from .dialogs import EndSessionDecisionDialog
-        recommended = self._get_end_relaxation_tag()
-        dialog = EndSessionDecisionDialog(self, state=state, recommended_tag=recommended)
-        dialog.continue_chosen.connect(self._end_session_continue_chat)
-        dialog.relax_chosen.connect(self._end_session_with_relaxation)
-        dialog.end_chosen.connect(lambda: self._end_session_directly(state))
-        dialog.cancel_chosen.connect(lambda: None)
-        dialog.exec()
+        if self._end_decision_open:
+            logger.info("[EndFlow] decision dialog already open; skip")
+            return
+
+        self._end_decision_open = True
+        self._end_request_in_progress = False
+        self.control_panel.set_buttons_enabled(False)
+
+        try:
+            from .dialogs import EndSessionDecisionDialog
+            recommended = self._get_end_relaxation_tag()
+            dialog = EndSessionDecisionDialog(self, state=state, recommended_tag=recommended)
+            dialog.continue_chosen.connect(self._end_session_continue_chat)
+            dialog.relax_chosen.connect(self._end_session_with_relaxation)
+            dialog.end_chosen.connect(lambda: self._end_session_directly(state))
+            dialog.cancel_chosen.connect(lambda: None)
+            dialog.exec()
+        finally:
+            self._end_decision_open = False
+            if not self._session_ending and self.orchestrator.state not in (
+                SessionState.SESSION_ENDING, SessionState.SESSION_ENDED
+            ):
+                self.control_panel.set_buttons_enabled(True)
 
     def _end_session_continue_chat(self):
         """User chose to continue chatting — resume, set pending scale prompt."""
@@ -1473,6 +1500,14 @@ class MainWindow(QMainWindow):
     def _end_session_directly(self, state=None):
         """User chose 'end directly' in the decision dialog — confirmed direct end."""
         self._user_explicit_end = True
+
+        # Stop pre-end recommendation TTS before farewell TTS starts
+        try:
+            if self.tts_service:
+                self.tts_service.stop_playing()
+        except Exception:
+            pass
+
         # Store completion_status for report
         if state:
             self._completion_status = {
@@ -1690,6 +1725,9 @@ class MainWindow(QMainWindow):
 
     def _handle_session_end(self, end_type, relaxation_tag=None, allow_force_relaxation=True):
         """Handle session end using orchestrator decision logic."""
+        if self._session_ending:
+            logger.info("[EndFlow] _handle_session_end ignored: already ending")
+            return
         if not self.session_end_controller.begin().accepted:
             return
         self._session_ending = True
