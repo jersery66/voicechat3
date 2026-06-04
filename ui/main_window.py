@@ -217,17 +217,16 @@ class MainWindow(QMainWindow):
     # ==================== User Info ====================
 
     def _on_confirm_user(self, info):
-        # If previous session ended, clean up before starting new one
-        if self.orchestrator.state in (SessionState.SESSION_ENDED, SessionState.IDLE):
-            self._prepare_next_subject()
-
+        """确认被试信息并开始一个全新的会话。"""
         normalized = self._normalize_user_info(info)
         user_id = normalized.get("user_id", "default_user")
-        user_changed = self.current_user_id is not None and user_id != self.current_user_id
 
         self.user_info = normalized
         self.info_confirmed = True
         self.current_user_id = user_id
+
+        # Always start a fresh session for each confirmed subject
+        self._start_new_session()
 
         if self.data_manager:
             self.data_manager.set_user_id(user_id)
@@ -239,14 +238,6 @@ class MainWindow(QMainWindow):
                     include_summaries=3,
                 )
                 self.llm_service.set_history_context(context)
-
-        if user_changed:
-            self._start_new_session()
-        elif not self.data_manager.current_folder_name:
-            self._start_new_session()
-
-        if not user_changed and self.current_user_id == user_id:
-            pass
 
         self._play_opening_greeting()
         self.control_panel.set_status("请等待问候后再录音")
@@ -277,8 +268,13 @@ class MainWindow(QMainWindow):
         return normalized
 
     def _on_modify_user(self):
+        """用户点击'修改信息/新会话'：准备下一位，但不播放欢迎语。"""
         self.info_confirmed = False
-        self.control_panel.set_status("请重新填写信息")
+        # If previous session already ended, clean up now
+        if self.orchestrator.state in (SessionState.SESSION_ENDED, SessionState.IDLE):
+            self._prepare_next_subject()
+        else:
+            self.control_panel.set_status("请重新填写信息")
 
     # ==================== Recording ====================
 
