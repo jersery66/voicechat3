@@ -689,10 +689,10 @@ class ConversationPipeline:
             quick_crisis = self.agent._keyword_crisis_risk(result.user_text)
             if quick_crisis.get("immediate_action"):
                 from config import CRISIS_INTERVENTION_SUFFIX
-                if final_suffix:
-                    final_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
+                if system_suffix:
+                    system_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
                 else:
-                    final_suffix = CRISIS_INTERVENTION_SUFFIX
+                    system_suffix = CRISIS_INTERVENTION_SUFFIX
                 self._crisis_lock_turns = 4
                 self._active_scale = None
                 self._active_scale_q = 1
@@ -730,13 +730,17 @@ class ConversationPipeline:
 
             elif scale_action == "start" and not self._active_scale and allow_new_scale:
                 # Agent recommends starting a new scale
-                if suggested_scale and suggested_scale not in self._administered_scales:
-                    self._administered_scales.add(suggested_scale)
+                if suggested_scale:
                     self._active_scale = suggested_scale
-                    self._active_scale_q = 1
+                    # Use agent's item suggestion if available
+                    route_item = agent_route.get("item")
+                    if isinstance(route_item, int) and route_item > 0:
+                        self._active_scale_q = route_item
+                    else:
+                        self._active_scale_q = self._next_unanswered_item(suggested_scale)
                     self._active_scale_waiting_answer = False
                     logger.warning(
-                        f"[ScaleDebug] agent start: {suggested_scale}, "
+                        f"[ScaleDebug] agent start: {suggested_scale} Q{self._active_scale_q}, "
                         f"confidence={agent_route.get('confidence')}, "
                         f"reason={agent_route.get('reason', '')[:60]}"
                     )
@@ -757,17 +761,10 @@ class ConversationPipeline:
                 logger.warning(f"[ScaleDebug] agent recommend relaxation: {rec_type}")
 
         elif self._active_scale:
-            # No agent route (unavailable) — maintain existing active scale
-            active_prompt = self._build_active_scale_prompt(
-                self._active_scale, self._active_scale_q,
-                self._active_scale_waiting_answer
+            # Agent unavailable — in latent mode, don't use explicit scale prompts
+            logger.warning(
+                f"[ScaleDebug] agent unavailable; skip active scale prompt in latent mode: {self._active_scale}"
             )
-            if active_prompt:
-                system_suffix += "\n" + active_prompt
-                logger.warning(f"[ScaleDebug] active scale {self._active_scale} "
-                               f"Q{self._active_scale_q} waiting={self._active_scale_waiting_answer}")
-            if not self._active_scale_waiting_answer:
-                self._active_scale_waiting_answer = True
 
         # Scale pause countdown
         if self._scale_pause_turns > 0:
@@ -908,18 +905,12 @@ class ConversationPipeline:
                         self._active_scale = None
                         self._active_scale_q = 1
                         self._active_scale_waiting_answer = False
-                        # Start next queued scale if any
+                        # Clear any stale queue in latent sampling mode
                         if self._scale_queue:
-                            next_scale = self._scale_queue.pop(0)
-                            self._administered_scales.add(next_scale)
-                            self._active_scale = next_scale
-                            self._active_scale_q = 1
-                            self._active_scale_waiting_answer = False
-                            logger.warning(f"[ScaleDebug] starting queued {next_scale}")
-                        else:
-                            # All triggered scales are now complete
-                            result.all_scales_completed = True
-                            logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
+                            logger.warning(f"[ScaleDebug] clearing stale scale_queue in latent mode: {self._scale_queue}")
+                            self._scale_queue.clear()
+                        result.all_scales_completed = True
+                        logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
                     else:
                         # Sampled one point — exit active scale, return to conversation.
                         # Don't chain Q2→Q3→Q4 in consecutive turns.
@@ -1139,6 +1130,16 @@ class ConversationPipeline:
 如果回答模糊，不要猜分数，自然追问一句。
 口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来"。
 """
+
+    def _next_unanswered_item(self, scale_name: str) -> int:
+        """Get the next unanswered question number for a scale."""
+        from services.scales import SCALES
+        total = len(SCALES.get(scale_name, {}).get("questions", []))
+        answered = self._scale_answers.get(scale_name, {})
+        for i in range(1, total + 1):
+            if i not in answered:
+                return i
+        return 1
 
     def _get_relaxation_done(self) -> bool:
         """Check if relaxation training was completed this session."""
