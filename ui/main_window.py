@@ -1297,9 +1297,9 @@ class MainWindow(QMainWindow):
 
         if has_active_session and not self._current_report_generated:
             # Use unified end flow — will check scales, relaxation, then end
+            # Don't show waiting dialog yet — let readiness check decide
             self._pending_quit = True
             self._user_explicit_end = True
-            self._show_exit_waiting_dialog("正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000)
             self._request_end_with_readiness_check(
                 EndType.QUIT, allow_force_relaxation=False, source="exit_program"
             )
