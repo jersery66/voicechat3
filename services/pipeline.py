@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.logger import get_logger
 from services.metrics import get_metrics
-from config import MIN_ROUNDS_BEFORE_SCALE
+from config import MIN_ROUNDS_BEFORE_SCALE, SCALE_ROUTE_CONFIDENCE, RELAX_ROUTE_CONFIDENCE
 
 logger = get_logger(__name__)
 
@@ -673,12 +673,16 @@ class ConversationPipeline:
                     relaxation_done=relax_done,
                 )
                 logger.warning(
-                    f"[AgentRoute] scale_action={agent_route.get('scale_action')} "
+                    f"[AgentRoute] user={result.user_text!r} "
+                    f"scale_action={agent_route.get('scale_action')} "
                     f"scale={agent_route.get('scale')} "
+                    f"item={agent_route.get('item')} "
+                    f"probe_hint={agent_route.get('probe_hint', '')[:80]} "
+                    f"recommend_relaxation={agent_route.get('recommend_relaxation')} "
+                    f"relaxation_type={agent_route.get('relaxation_type')} "
                     f"confidence={agent_route.get('confidence')} "
-                    f"relax={agent_route.get('recommend_relaxation')} "
                     f"risk={agent_route.get('risk_level')} "
-                    f"reason={agent_route.get('reason', '')[:60]}"
+                    f"reason={agent_route.get('reason', '')[:100]}"
                 )
             except Exception as e:
                 logger.warning(f"[AgentRoute] failed: {e}")
@@ -714,7 +718,7 @@ class ConversationPipeline:
             allow_new_scale = True
 
         # --- Scale logic driven by agent route ---
-        if agent_route and agent_route.get("confidence", 0) >= 0.5:
+        if agent_route and agent_route.get("confidence", 0) >= SCALE_ROUTE_CONFIDENCE:
             scale_action = agent_route.get("scale_action", "none")
             suggested_scale = agent_route.get("scale")
             probe_hint = agent_route.get("probe_hint", "")
@@ -755,7 +759,7 @@ class ConversationPipeline:
                 logger.warning(f"[ScaleDebug] agent continue: {self._active_scale}, hint={probe_hint[:40]}")
 
             # Relaxation recommendation from agent
-            if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= 0.6:
+            if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE:
                 rec_type = agent_route.get("relaxation_type") or "breathing"
                 result.relaxation_rec = rec_type
                 logger.warning(f"[ScaleDebug] agent recommend relaxation: {rec_type}")
@@ -842,7 +846,10 @@ class ConversationPipeline:
                     f"user={result.user_text!r}, raw_end={raw_end_type}"
                 )
             result.end_type = None
-        result.relaxation_rec = detect_tag(result.full_response, REC_TAGS)
+        # Only override agent's relaxation_rec if LLM explicitly output a REC tag
+        llm_rec = detect_tag(result.full_response, REC_TAGS)
+        if llm_rec:
+            result.relaxation_rec = llm_rec
         result.scale_tags = parse_scale_tags(result.full_response)
         # Track answered questions per scale
         for scale_name, answers in result.scale_tags.items():
@@ -853,7 +860,8 @@ class ConversationPipeline:
         # Fallback: if LLM didn't output a [SCALE:...] tag for the current
         # question, try to infer the score from the user's plain text answer.
         # Also detect if user is naturally talking about a different symptom.
-        if self._active_scale and self._active_scale_waiting_answer:
+        # In latent mode, also try scoring even without explicit waiting state.
+        if self._active_scale:
             answered = self._scale_answers.get(self._active_scale, {})
             if self._active_scale_q not in answered:
                 # First check if user is talking about a different PHQ-9 item

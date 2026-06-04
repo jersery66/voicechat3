@@ -502,6 +502,10 @@ MIN_ROUNDS_FOR_RELAXATION = 8
 # First N rounds are for natural rapport-building and problem exploration.
 MIN_ROUNDS_BEFORE_SCALE = 5
 
+# Agent routing confidence thresholds
+SCALE_ROUTE_CONFIDENCE = 0.45   # Minimum confidence for scale start/continue
+RELAX_ROUTE_CONFIDENCE = 0.6    # Minimum confidence for relaxation recommendation
+
 # Post-relaxation continue chat timeout (seconds)
 POST_RELAXATION_TIMEOUT = 60
 
