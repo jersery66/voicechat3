@@ -129,10 +129,24 @@ class AgentService:
             temperature=temperature,
             timeout=timeout,
         )
-        content = (resp.choices[0].message.content or "").strip()
+        choice = resp.choices[0] if resp.choices else None
+        message = choice.message if choice else None
+        content = (getattr(message, "content", None) or "").strip()
+        finish_reason = getattr(choice, "finish_reason", None) if choice else None
+
+        logger.warning(
+            f"[AgentRaw] model={self.model} finish_reason={finish_reason} "
+            f"content_len={len(content)} content_head={content[:300]!r}"
+        )
+
         if not content:
-            raise ValueError("empty response")
-        return json.loads(content)
+            raise ValueError(f"empty response; finish_reason={finish_reason}")
+
+        try:
+            return json.loads(content)
+        except Exception as e:
+            logger.warning(f"[AgentRaw] JSON parse failed: {e}; raw={content[:1000]!r}")
+            raise
 
     # ==================== Intent Classification ====================
 
@@ -616,6 +630,27 @@ class AgentService:
 
     # ==================== Unified Conversation Routing ====================
 
+    def _parse_json_loose(self, content: str) -> Dict[str, Any]:
+        """Parse JSON from agent output, allowing ```json fences or extra prose."""
+        text = (content or "").strip()
+
+        # Strip markdown fences
+        text = re.sub(r"^```(?:json)?", "", text.strip(), flags=re.IGNORECASE).strip()
+        text = re.sub(r"```$", "", text.strip()).strip()
+
+        # Try direct parse
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        # Try to find JSON object in prose
+        m = re.search(r"\{[\s\S]*\}", text)
+        if m:
+            return json.loads(m.group(0))
+
+        raise ValueError(f"No JSON object found in route output: {text[:500]!r}")
+
     def route_conversation_actions(
         self,
         user_text: str,
@@ -628,17 +663,8 @@ class AgentService:
     ) -> dict:
         """Unified routing decision for scale/relaxation/crisis per turn.
 
-        Returns a dict with:
-          scale_action: "none" | "start" | "continue" | "pause"
-          scale: scale name or null
-          item: question number or null
-          probe_hint: hint for LLM to naturally explore
-          recommend_relaxation: bool
-          relaxation_type: "breathing" | "muscle" | "meditation" | "game" | null
-          risk_level: 0-10
-          immediate_crisis: bool
-          confidence: 0.0-1.0
-          reason: explanation string
+        Uses direct API call without response_format to avoid Ollama
+        compatibility issues with json_object mode on small models.
         """
         # Build context for the agent
         context_parts = []
@@ -658,44 +684,65 @@ class AgentService:
 
         context = "\n".join(context_parts)
 
-        system_prompt = """你是心理咨询系统的路由决策模块。根据用户当前输入和对话上下文，判断本轮应该做什么。
+        system_prompt = """你是心理咨询系统的路由决策模块。只输出一个JSON对象，不要Markdown，不要解释，不要代码块。
 
-输出严格JSON格式：
+字段必须完整，类型如下：
 {
-  "scale_action": "none|start|continue|pause",
-  "scale": "PHQ-9|GAD-7|PCL-5|null",
-  "item": null,
-  "probe_hint": "",
-  "recommend_relaxation": false,
-  "relaxation_type": "breathing|muscle|meditation|game|null",
-  "risk_level": 0,
-  "immediate_crisis": false,
-  "confidence": 0.0,
-  "reason": ""
+  "scale_action": "none" 或 "start" 或 "continue" 或 "pause",
+  "scale": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
+  "item": null 或 1-9 的整数,
+  "probe_hint": "一句给主模型的自然采样提示",
+  "recommend_relaxation": true 或 false,
+  "relaxation_type": null 或 "breathing" 或 "muscle" 或 "meditation" 或 "game",
+  "risk_level": 0-10 的整数,
+  "immediate_crisis": true 或 false,
+  "confidence": 0.0-1.0 的小数,
+  "reason": "20字以内原因"
 }
 
 规则：
-1. scale_action: 用户明确表达症状时(start)、已采样但需继续时(continue)、用户抗拒时(pause)、否则none
-2. scale: 抑郁/低落/没兴趣→PHQ-9，焦虑/紧张/担心→GAD-7，创伤/噩梦/回避→PCL-5
-3. item: 建议采样的具体维度编号(PHQ-9:1-9, GAD-7:1-7, PCL-5:1-8)
-4. probe_hint: 给主对话模型的隐性提示，不要出现量表名
-5. recommend_relaxation: 用户焦虑/紧张/失眠/疲惫时推荐
-6. risk_level: 0-10，有自杀/自残想法时>=7
-7. immediate_crisis: 有明确自杀/自残意图时true
-8. confidence: 0-1，判断置信度
+- 用户明确表达症状时 scale_action="start"
+- 已采样但需继续时 scale_action="continue"
+- 用户抗拒/换话题时 scale_action="pause"
+- 否则 scale_action="none"
+- 抑郁/低落/没兴趣→PHQ-9，焦虑/紧张/担心→GAD-7，创伤/噩梦→PCL-5
+- "好久了""每天吧""没有"等短句要结合上下文，不能单独当噪声
+- 前2轮建立关系，第3轮后可以隐性采样
+- 用户焦虑/紧张/失眠/疲惫时 recommend_relaxation=true
 
-注意：
-- "好久了""每天吧""没有"等短句要结合上下文判断，不能单独当噪声过滤
-- 前2轮以建立关系为主，第3轮后可以开始隐性采样
-- 用户说"别问了""换个话题"时scale_action必须是pause
-- 不确定时confidence设低，主程序会根据阈值决定是否执行"""
+示例1：用户说"对，我心情不好"，上下文有持续低落
+{"scale_action":"start","scale":"PHQ-9","item":2,"probe_hint":"自然了解这种心情不好是偶尔出现还是经常在。","recommend_relaxation":false,"relaxation_type":null,"risk_level":0,"immediate_crisis":false,"confidence":0.78,"reason":"持续低落情绪"}
+
+示例2：用户说"睡不好，很焦虑"
+{"scale_action":"start","scale":"GAD-7","item":1,"probe_hint":"自然了解这种紧张担心最近是不是经常冒出来。","recommend_relaxation":true,"relaxation_type":"breathing","risk_level":0,"immediate_crisis":false,"confidence":0.82,"reason":"焦虑伴睡不好"}"""
 
         timeout = timeout or AGENT_TIMEOUT
         try:
-            result = self._call_json(
-                system_prompt, context,
-                max_tokens=200, temperature=0.1, timeout=timeout,
+            # Direct call without response_format for Ollama compatibility
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": context},
+                ],
+                max_tokens=300,
+                temperature=0.0,
+                timeout=timeout,
             )
+            choice = resp.choices[0] if resp.choices else None
+            content = ((choice.message.content if choice and choice.message else "") or "").strip()
+            finish_reason = getattr(choice, "finish_reason", None) if choice else None
+
+            logger.warning(
+                f"[AgentRouteRaw] finish_reason={finish_reason} "
+                f"len={len(content)} head={content[:500]!r}"
+            )
+
+            if not content:
+                raise ValueError(f"route empty response; finish_reason={finish_reason}")
+
+            result = self._parse_json_loose(content)
+
             # Ensure all required fields exist with defaults
             result.setdefault("scale_action", "none")
             result.setdefault("scale", None)
@@ -723,6 +770,27 @@ class AgentService:
                 "confidence": 0.0,
                 "reason": f"agent fallback: {e}",
             }
+
+    def validate_route_json(self) -> bool:
+        """Test if agent can produce valid route JSON."""
+        try:
+            r = self.route_conversation_actions(
+                user_text="我最近心情不好，睡不好",
+                recent_history="",
+                current_round=4,
+                timeout=15.0,
+            )
+            ok = (
+                isinstance(r, dict)
+                and "scale_action" in r
+                and "confidence" in r
+                and r.get("confidence", 0) > 0
+            )
+            logger.warning(f"[AgentHealth] route_json_ok={ok}, result={r}")
+            return ok
+        except Exception as e:
+            logger.warning(f"[AgentHealth] route_json_failed: {e}")
+            return False
 
 
 # Singleton
