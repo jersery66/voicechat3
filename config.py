@@ -574,6 +574,9 @@ VAD_SILENCE_THRESHOLD = 0.01
 VAD_SILENCE_DURATION = 1.5
 VAD_SPEECH_MIN_DURATION = 0.5
 
+# ============== TTS Control ==============
+ENABLE_TTS = True  # Set to False to disable TTS entirely (for debugging)
+
 # ============== VoxCPM2 TTS ==============
 VOXCPM_CFG_VALUE = 2.0
 VOXCPM_INFERENCE_TIMESTEPS = 10

@@ -620,6 +620,11 @@ class MainWindow(QMainWindow):
 
             def load_tts():
                 nonlocal tts_ok
+                from config import ENABLE_TTS
+                if not ENABLE_TTS:
+                    self.tts_service = None
+                    logger.warning("TTS disabled by config; continuing without TTS.")
+                    return
                 try:
                     service = TTSService()
                     service.load_model(use_streaming=True)

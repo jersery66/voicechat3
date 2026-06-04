@@ -1,6 +1,8 @@
 import os
 import sys
 import re
+import queue
+import threading
 import numpy as np
 import torch
 import torchaudio
@@ -79,7 +81,7 @@ class TTSService:
                 voxcpm_model_path=voxcpm_path,
                 zipenhancer_model_path=None,
                 enable_denoiser=False,
-                optimize=True,
+                optimize=False,
             )
         else:
             voxcpm_path = self._download_model()
@@ -87,7 +89,7 @@ class TTSService:
                 voxcpm_model_path=voxcpm_path,
                 zipenhancer_model_path=None,
                 enable_denoiser=False,
-                optimize=True,
+                optimize=False,
             )
 
         self.sample_rate = self.model.tts_model.sample_rate
