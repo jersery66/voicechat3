@@ -766,12 +766,15 @@ class ConversationPipeline:
 
         elif self._active_scale:
             # Agent unavailable — keep active scale alive with subtle hint
+            # Use next unanswered item, not current _active_scale_q
+            next_item = self._next_unanswered_item(self._active_scale)
+            hint_q = next_item if next_item else self._active_scale_q
             logger.warning(
                 f"[ScaleDebug] agent route failed but active scale remains: "
-                f"{self._active_scale} Q{self._active_scale_q}"
+                f"{self._active_scale} Q{hint_q}"
             )
             natural = NATURAL_SCALE_QUESTIONS.get(
-                (self._active_scale, self._active_scale_q), ""
+                (self._active_scale, hint_q), ""
             )
             if natural:
                 system_suffix += f"""
@@ -924,37 +927,24 @@ class ConversationPipeline:
 
                 if current_q in answered:
                     # Current question was scored successfully — advance
-                    next_q = None
-                    for i in range(1, total + 1):
-                        if i not in answered:
-                            next_q = i
-                            break
-                    if next_q is None:
-                        # Scale complete
-                        completed_name = self._active_scale
-                        logger.warning(f"[ScaleDebug] completed scale {completed_name}: {answered}")
+                    completed_name = self._active_scale
+                    self._advance_active_scale_after_score(completed_name)
+                    if self._active_scale is None:
+                        # Scale fully complete
                         result.scale_completed = True
                         result.completed_scale_name = completed_name
-                        self._active_scale = None
-                        self._active_scale_q = 1
-                        self._active_scale_waiting_answer = False
-                        # Clear any stale queue in latent sampling mode
                         if self._scale_queue:
-                            logger.warning(f"[ScaleDebug] clearing stale scale_queue in latent mode: {self._scale_queue}")
+                            logger.warning(f"[ScaleDebug] clearing stale scale_queue: {self._scale_queue}")
                             self._scale_queue.clear()
                         result.all_scales_completed = True
                         logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
                     else:
-                        # Sampled one point — exit active scale, return to conversation.
-                        # Don't chain Q2→Q3→Q4 in consecutive turns.
+                        # Advanced to next item — pause 1 turn, don't chain questions
+                        self._scale_pause_turns = 1
                         logger.warning(
-                            f"[ScaleDebug] sampled {self._active_scale} Q{current_q}={answered.get(current_q)}; "
-                            f"returning to normal conversation (next would be Q{next_q})"
+                            f"[ScaleDebug] scored {completed_name} Q{current_q}={answered.get(current_q)}; "
+                            f"next Q{self._active_scale_q}, pause 1 turn"
                         )
-                        self._active_scale = None
-                        self._active_scale_q = 1
-                        self._active_scale_waiting_answer = False
-                        self._scale_pause_turns = 2  # at least 2 turns before next scale item
                 else:
                     # No score for current Q — LLM was clarifying or asking again
                     self._active_scale_waiting_answer = True
@@ -1175,9 +1165,10 @@ class ConversationPipeline:
         return None
 
     def _record_scale_score(self, scale_name: str, item: int, score: int):
-        """Record a scale score into _scale_answers."""
+        """Record a scale score into _scale_answers and mark as administered."""
         self._scale_answers.setdefault(scale_name, {})
         self._scale_answers[scale_name][int(item)] = int(score)
+        self._administered_scales.add(scale_name)
 
     def _advance_active_scale_after_score(self, scale_name: str):
         """After scoring an item, advance to next unanswered or complete."""
