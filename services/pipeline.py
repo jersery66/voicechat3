@@ -122,6 +122,100 @@ NATURAL_SCALE_QUESTIONS = {
     ("PCL-5", 8): "集中注意力有没有变得困难？",
 }
 
+# Scale item core definitions — provides the clinical meaning of each item
+# for the agent to pass to the main model. NOT fixed question templates.
+# The main model rewrites these into natural conversation.
+PHQ9_ITEM_CORE = {
+    1: {
+        "scale_item_text": "过去两周，对做事的兴趣或愉快感是否明显减少？",
+        "scoring_target": "兴趣下降或愉快感减少的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    2: {
+        "scale_item_text": "过去两周，是否经常感到心情低落、沮丧或绝望？",
+        "scoring_target": "低落、沮丧、绝望感的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    3: {
+        "scale_item_text": "过去两周，睡眠是否受影响，例如入睡困难、睡不安稳或睡得过多？",
+        "scoring_target": "睡眠问题的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    4: {
+        "scale_item_text": "过去两周，是否经常感到疲倦、没劲或精力不足？",
+        "scoring_target": "疲倦、乏力、精力不足的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    5: {
+        "scale_item_text": "过去两周，食欲是否有明显变化（吃不下或吃太多）？",
+        "scoring_target": "食欲变化的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    6: {
+        "scale_item_text": "过去两周，是否经常觉得自己很糟、失败、或让家人失望？",
+        "scoring_target": "自责、失败感的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    7: {
+        "scale_item_text": "过去两周，注意力是否难以集中（如阅读、看电视）？",
+        "scoring_target": "注意力困难的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    8: {
+        "scale_item_text": "过去两周，是否动作或说话明显变慢，或反过来烦躁坐立不安？",
+        "scoring_target": "精神运动迟缓或激越的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    9: {
+        "scale_item_text": "过去两周，是否出现过不想活或伤害自己的念头？",
+        "scoring_target": "自杀/自伤意念的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+}
+
+GAD7_ITEM_CORE = {
+    1: {
+        "scale_item_text": "过去两周，是否经常感到紧张、焦虑或急切？",
+        "scoring_target": "紧张、焦虑感的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    2: {
+        "scale_item_text": "过去两周，是否无法停止或控制担忧？",
+        "scoring_target": "不可控担忧的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    3: {
+        "scale_item_text": "过去两周，是否对各种事情担忧过多？",
+        "scoring_target": "过度担忧的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    4: {
+        "scale_item_text": "过去两周，是否很难放松下来？",
+        "scoring_target": "放松困难的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    5: {
+        "scale_item_text": "过去两周，是否因不安而无法静坐？",
+        "scoring_target": "坐立不安的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    6: {
+        "scale_item_text": "过去两周，是否变得容易烦恼或急躁？",
+        "scoring_target": "易怒、急躁的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+    7: {
+        "scale_item_text": "过去两周，是否感到似乎将有可怕的事情发生？",
+        "scoring_target": "恐惧/灾难化预期的频率",
+        "required_answer_axis": "没有、几天、超过一半天数、几乎每天",
+    },
+}
+
+SCALE_ITEM_CORES = {
+    "PHQ-9": PHQ9_ITEM_CORE,
+    "GAD-7": GAD7_ITEM_CORE,
+}
+
 
 def detect_tag(text: str, patterns: dict) -> Optional[str]:
     """Find the first matching tag in text. Returns string name or None.
@@ -748,15 +842,17 @@ class ConversationPipeline:
                         f"confidence={agent_route.get('confidence')}, "
                         f"reason={agent_route.get('reason', '')[:60]}"
                     )
-                    # Add subtle probe hint to system suffix
-                    if probe_hint:
-                        system_suffix += f"\n【隐性症状采样】{probe_hint}\n不要说量表、问卷、题目、评分。每轮最多一个问题。"
+                    # Build scale context hint with item core info
+                    hint = self._build_scale_context_hint(suggested_scale, self._active_scale_q, agent_route)
+                    if hint:
+                        system_suffix += hint
 
             elif scale_action == "continue" and self._active_scale:
                 # Agent says continue probing current scale
-                if probe_hint:
-                    system_suffix += f"\n【隐性症状采样】{probe_hint}\n不要说量表、问卷、题目、评分。每轮最多一个问题。"
-                logger.warning(f"[ScaleDebug] agent continue: {self._active_scale}, hint={probe_hint[:40]}")
+                hint = self._build_scale_context_hint(self._active_scale, self._active_scale_q, agent_route)
+                if hint:
+                    system_suffix += hint
+                logger.warning(f"[ScaleDebug] agent continue: {self._active_scale} Q{self._active_scale_q}")
 
             # Relaxation recommendation from agent
             if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE:
@@ -765,23 +861,16 @@ class ConversationPipeline:
                 logger.warning(f"[ScaleDebug] agent recommend relaxation: {rec_type}")
 
         elif self._active_scale:
-            # Agent unavailable — keep active scale alive with subtle hint
-            # Use next unanswered item, not current _active_scale_q
+            # Agent unavailable — keep active scale alive with item core context
             next_item = self._next_unanswered_item(self._active_scale)
             hint_q = next_item if next_item else self._active_scale_q
             logger.warning(
                 f"[ScaleDebug] agent route failed but active scale remains: "
                 f"{self._active_scale} Q{hint_q}"
             )
-            natural = NATURAL_SCALE_QUESTIONS.get(
-                (self._active_scale, hint_q), ""
-            )
-            if natural:
-                system_suffix += f"""
-【隐性症状采样】当前仍有一个状态点没了解完整。继续正常聊天。
-如果语境自然，顺手了解：{natural}
-不要说量表、问卷、题目、评分。每轮最多一个问题。
-"""
+            hint = self._build_scale_context_hint(self._active_scale, hint_q, {})
+            if hint:
+                system_suffix += hint
 
         # Scale pause countdown
         if self._scale_pause_turns > 0:
@@ -948,16 +1037,10 @@ class ConversationPipeline:
                 else:
                     # No score for current Q — continue waiting, add hint for next turn
                     self._active_scale_waiting_answer = True
-                    natural = NATURAL_SCALE_QUESTIONS.get(
-                        (self._active_scale, current_q), ""
-                    )
-                    if natural:
-                        system_suffix += f"""
-【隐性症状采样】当前维度仍未了解完整。继续正常聊天。
-如果语境自然，顺手了解：{natural}
-不要说量表、问卷、题目、评分。每轮最多一个问题。
-"""
-                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting, hint={natural[:30] if natural else 'none'}")
+                    hint = self._build_scale_context_hint(self._active_scale, current_q, {})
+                    if hint:
+                        system_suffix += hint
+                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting")
 
         # Refresh final_suffix after all scale hints are added
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
@@ -1226,6 +1309,49 @@ class ConversationPipeline:
 
         # Reject everything else — don't guess
         return None
+
+    def _build_scale_context_hint(self, scale_name: str, item: int, agent_route: dict) -> str:
+        """Build a detailed scale context hint for the main model.
+
+        Uses agent-provided scale_item_text/scoring_target/required_answer_axis
+        if available, otherwise falls back to SCALE_ITEM_CORES dict.
+        """
+        # Try agent-provided fields first
+        scale_item_text = agent_route.get("scale_item_text", "")
+        scoring_target = agent_route.get("scoring_target", "")
+        required_answer_axis = agent_route.get("required_answer_axis", "")
+
+        # Fallback to SCALE_ITEM_CORES if agent didn't provide
+        if not scale_item_text:
+            cores = SCALE_ITEM_CORES.get(scale_name, {})
+            core = cores.get(item, {})
+            scale_item_text = core.get("scale_item_text", "")
+            scoring_target = core.get("scoring_target", "")
+            required_answer_axis = core.get("required_answer_axis", "")
+
+        if not scale_item_text:
+            # Last resort: use NATURAL_SCALE_QUESTIONS
+            natural = NATURAL_SCALE_QUESTIONS.get((scale_name, item), "")
+            if natural:
+                return f"\n【隐性症状采样】如果语境自然，顺手了解：{natural}\n不要说量表、问卷、题目、评分。每轮最多一个问题。\n"
+            return ""
+
+        return f"""
+【隐性症状采样】当前仍有一个状态点没了解完整。继续正常聊天。
+[内部采样目标，不要直接暴露给用户]
+量表：{scale_name}
+题目：Q{item}
+题目原意：{scale_item_text}
+需要采集：{scoring_target}
+回答轴：{required_answer_axis}
+生成要求：
+- 先用一句话承接用户情绪
+- 然后自然问出这个症状问题
+- 不要说{scale_name}、量表、问卷、第几题、评分
+- 不要把问题改成泛泛的"哪里不舒服""想不想聊聊"
+- 不要同时问多个维度
+- 本轮回复最后必须包含一个可回答的问题
+"""
 
     def _get_relaxation_done(self) -> bool:
         """Check if relaxation training was completed this session."""
