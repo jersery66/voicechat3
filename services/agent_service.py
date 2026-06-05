@@ -697,8 +697,10 @@ class AgentService:
   "risk_level": 0-10 的整数,
   "immediate_crisis": true 或 false,
   "confidence": 0.0-1.0 的小数,
-  "reason": "20字以内原因"
+  "reason": "12字以内原因"
 }
+
+要求：只输出单行JSON，不要换行。probe_hint不超过30字。reason不超过12字。
 
 规则：
 - 用户明确表达症状时 scale_action="start"
@@ -725,7 +727,7 @@ class AgentService:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": context},
                 ],
-                max_tokens=300,
+                max_tokens=512,
                 temperature=0.0,
                 timeout=timeout,
             )

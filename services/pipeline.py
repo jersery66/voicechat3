@@ -765,10 +765,20 @@ class ConversationPipeline:
                 logger.warning(f"[ScaleDebug] agent recommend relaxation: {rec_type}")
 
         elif self._active_scale:
-            # Agent unavailable — in latent mode, don't use explicit scale prompts
+            # Agent unavailable — keep active scale alive with subtle hint
             logger.warning(
-                f"[ScaleDebug] agent unavailable; skip active scale prompt in latent mode: {self._active_scale}"
+                f"[ScaleDebug] agent route failed but active scale remains: "
+                f"{self._active_scale} Q{self._active_scale_q}"
             )
+            natural = NATURAL_SCALE_QUESTIONS.get(
+                (self._active_scale, self._active_scale_q), ""
+            )
+            if natural:
+                system_suffix += f"""
+【隐性症状采样】当前仍有一个状态点没了解完整。继续正常聊天。
+如果语境自然，顺手了解：{natural}
+不要说量表、问卷、题目、评分。每轮最多一个问题。
+"""
 
         # Scale pause countdown
         if self._scale_pause_turns > 0:
@@ -856,6 +866,21 @@ class ConversationPipeline:
             if scale_name not in self._scale_answers:
                 self._scale_answers[scale_name] = {}
             self._scale_answers[scale_name].update(answers)
+
+        # Short answer scoring: "经常", "是的", "没有" etc. for active scale items
+        if self._active_scale:
+            answered = self._scale_answers.get(self._active_scale, {})
+            if self._active_scale_q not in answered:
+                short_score = self._score_short_scale_answer(
+                    self._active_scale, self._active_scale_q, result.user_text
+                )
+                if short_score is not None:
+                    self._record_scale_score(self._active_scale, self._active_scale_q, short_score)
+                    result.scale_tags.setdefault(self._active_scale, {})[self._active_scale_q] = short_score
+                    logger.warning(
+                        f"[ScaleDebug] short answer scored {self._active_scale} "
+                        f"Q{self._active_scale_q} = {short_score}, text={result.user_text!r}"
+                    )
 
         # Fallback: if LLM didn't output a [SCALE:...] tag for the current
         # question, try to infer the score from the user's plain text answer.
@@ -1139,15 +1164,61 @@ class ConversationPipeline:
 口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来"。
 """
 
-    def _next_unanswered_item(self, scale_name: str) -> int:
-        """Get the next unanswered question number for a scale."""
+    def _next_unanswered_item(self, scale_name: str):
+        """Get the next unanswered question number for a scale, or None if complete."""
         from services.scales import SCALES
         total = len(SCALES.get(scale_name, {}).get("questions", []))
         answered = self._scale_answers.get(scale_name, {})
         for i in range(1, total + 1):
             if i not in answered:
                 return i
-        return 1
+        return None
+
+    def _record_scale_score(self, scale_name: str, item: int, score: int):
+        """Record a scale score into _scale_answers."""
+        self._scale_answers.setdefault(scale_name, {})
+        self._scale_answers[scale_name][int(item)] = int(score)
+
+    def _advance_active_scale_after_score(self, scale_name: str):
+        """After scoring an item, advance to next unanswered or complete."""
+        next_item = self._next_unanswered_item(scale_name)
+        if next_item is None:
+            logger.warning(f"[ScaleDebug] {scale_name} completed: {self._scale_answers.get(scale_name, {})}")
+            self._active_scale = None
+            self._active_scale_q = 1
+            self._active_scale_waiting_answer = False
+            return
+        self._active_scale = scale_name
+        self._active_scale_q = next_item
+        self._active_scale_waiting_answer = False
+        logger.warning(f"[ScaleDebug] advance {scale_name} to Q{next_item}")
+
+    def _score_short_scale_answer(self, scale_name: str, item: int, user_text: str):
+        """Score short natural answers to the currently active scale item.
+
+        Returns score (0-3) or None if can't determine.
+        """
+        t = (user_text or "").strip("。！？!?,， ").lower()
+        if not t:
+            return None
+
+        # Denial
+        if t in {"没有", "没", "没有了", "也没有", "不是", "不太会", "不会", "不"}:
+            return 0
+
+        # Frequency answers (PHQ-9 / GAD-7)
+        if any(x in t for x in ["偶尔", "有时候", "有时", "几天", "一两天"]):
+            return 1
+        if any(x in t for x in ["经常", "挺多", "不少", "一半以上", "大多数", "多数时候", "好多天"]):
+            return 2
+        if any(x in t for x in ["每天", "天天", "几乎每天", "一直", "总是", "老是", "基本每天"]):
+            return 3
+
+        # Affirmative without frequency — conservative score 1
+        if t in {"是", "是的", "对", "对的", "嗯", "有", "会", "还会", "会的"}:
+            return 1
+
+        return None
 
     def _get_relaxation_done(self) -> bool:
         """Check if relaxation training was completed this session."""
