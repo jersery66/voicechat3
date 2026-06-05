@@ -946,9 +946,21 @@ class ConversationPipeline:
                             f"next Q{self._active_scale_q}, pause 1 turn"
                         )
                 else:
-                    # No score for current Q — LLM was clarifying or asking again
+                    # No score for current Q — continue waiting, add hint for next turn
                     self._active_scale_waiting_answer = True
-                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting")
+                    natural = NATURAL_SCALE_QUESTIONS.get(
+                        (self._active_scale, current_q), ""
+                    )
+                    if natural:
+                        system_suffix += f"""
+【隐性症状采样】当前维度仍未了解完整。继续正常聊天。
+如果语境自然，顺手了解：{natural}
+不要说量表、问卷、题目、评分。每轮最多一个问题。
+"""
+                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting, hint={natural[:30] if natural else 'none'}")
+
+        # Refresh final_suffix after all scale hints are added
+        final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
         logger.info(
             f"[Pipeline] End type: {result.end_type} "
@@ -1188,16 +1200,19 @@ class ConversationPipeline:
         """Score short natural answers to the currently active scale item.
 
         Returns score (0-3) or None if can't determine.
+        Only scores clean denials and clear frequency words — rejects
+        ambiguous text like "没有具体的" which isn't answering the scale item.
         """
         t = (user_text or "").strip("。！？!?,， ").lower()
         if not t:
             return None
 
-        # Denial
-        if t in {"没有", "没", "没有了", "也没有", "不是", "不太会", "不会", "不"}:
+        # Clean denial only — "没有具体的" "没有什么" etc. are NOT scale answers
+        clean_denials = {"没有", "没", "没有了", "也不会", "不太会", "不会", "不"}
+        if t in clean_denials:
             return 0
 
-        # Frequency answers (PHQ-9 / GAD-7)
+        # Frequency answers (PHQ-9 / GAD-7) — must be short and clear
         if any(x in t for x in ["偶尔", "有时候", "有时", "几天", "一两天"]):
             return 1
         if any(x in t for x in ["经常", "挺多", "不少", "一半以上", "大多数", "多数时候", "好多天"]):
@@ -1209,6 +1224,7 @@ class ConversationPipeline:
         if t in {"是", "是的", "对", "对的", "嗯", "有", "会", "还会", "会的"}:
             return 1
 
+        # Reject everything else — don't guess
         return None
 
     def _get_relaxation_done(self) -> bool:
