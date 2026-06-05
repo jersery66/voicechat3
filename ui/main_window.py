@@ -911,18 +911,12 @@ class MainWindow(QMainWindow):
             self._post_relaxation_dialog.close()
 
     def _on_post_relaxation_timeout(self):
-        """放松后超时：播放提示TTS，播完后自动进入完整结束流程。"""
+        """放松后超时：回到正常聊天，不自动结束。"""
         if self.orchestrator.state != SessionState.POST_RELAXATION:
             return
-        self.orchestrator.ctx.post_relaxation_timed_out = True
-        self._auto_ending_after_relaxation = True
-
-        message = random.choice(TIMEOUT_END_MESSAGE)
-        self.chat_panel.add_system_message(message)
-        self.control_panel.set_status("放松结束，正在自动结束会话...")
-
-        # Play TTS first, then enter full session-end flow
-        self._play_tts_then_auto_end(message, EndType.TIME_LIMIT)
+        # Just return to chat — relaxation is a mid-session intervention, not pre-end
+        self.orchestrator.transition_to(SessionState.CHATTING)
+        self.control_panel.set_status("继续对话中...")
 
     def _cancel_post_relaxation_timer(self):
         """取消放松后超时定时器（用户做出选择或关闭弹窗时调用）"""
@@ -989,10 +983,8 @@ class MainWindow(QMainWindow):
         threading.Thread(target=video_runner, daemon=True).start()
 
     def _on_video_finished(self, relaxation_type):
-        """视频播放完成后的处理：记录 → 问候 → 弹窗 + 超时"""
-        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
-
-        # Record relaxation AFTER video finishes (only if it actually played)
+        """视频播放完成：记录放松，回到正常聊天。不弹结束框。"""
+        # Record relaxation AFTER video finishes
         relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
         if relax_name:
             self.orchestrator.ctx.current_relaxation_type = relax_name
@@ -1005,34 +997,16 @@ class MainWindow(QMainWindow):
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 })
 
-        # 1. 播放放松后问候
-        self._play_post_relaxation_greeting()
+        # Return to normal chat — no dialog, no timeout, no end prompt
+        self.orchestrator.transition_to(SessionState.CHATTING)
+        self._end_decision_open = False
+        self._pre_end_relax_prompted = False
 
-        # 2. 启动超时定时器
-        self.orchestrator.ctx.post_relaxation_timed_out = False
-        self._start_post_relaxation_timeout()
-
-        # 3. 显示继续/结束弹窗
-        dialog = ContinueOrEndDialog(self)
-        self._post_relaxation_dialog = dialog
-        dialog.continue_chosen.connect(self._on_continue_chosen)
-        dialog.end_chosen.connect(self._on_end_chosen)
-
-        # X-button close = treat as "continue chatting" (unless timeout fired)
-        def on_dialog_finished():
-            self._cancel_post_relaxation_timer()
-            # Already auto-ending, don't trigger continue
-            if getattr(self, "_auto_ending_after_relaxation", False):
-                return
-            if self.orchestrator.state == SessionState.POST_RELAXATION:
-                if self.orchestrator.ctx.post_relaxation_timed_out:
-                    self._on_post_relaxation_timeout()
-                else:
-                    self._on_continue_chosen()
-
-        dialog.finished.connect(on_dialog_finished)
-        dialog.exec()
-        self._post_relaxation_dialog = None
+        # Short continuation message
+        message = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "刚才这个练习先到这里，你可以感受一下现在身体有没有稍微松一点。我们可以继续聊。"
+        self.chat_panel.add_system_message(message)
+        self._play_tts_async(message)
+        self.control_panel.set_status("继续对话中...")
 
     def _play_game(self):
         if not self.orchestrator.can_play_video():
@@ -1053,38 +1027,26 @@ class MainWindow(QMainWindow):
         threading.Thread(target=game_runner, daemon=True).start()
 
     def _on_game_finished(self):
-        """Game finished — greeting + continue/end dialog, same as post-relaxation."""
-        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
+        """Game finished — return to normal chat. No dialog, no end prompt."""
+        # Record relaxation
+        if self.report_service:
+            self.report_service.record_relaxation("game")
+            self.report_service.activity_log.append({
+                "type": "relaxation",
+                "relaxation_type": "game",
+                "relaxation_name": "game",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
 
-        # Post-game greeting
-        fallback = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "玩完啦，感觉怎么样？放松一点了吗？"
-        self.chat_panel.add_system_message(fallback)
-        self._play_tts_async(fallback)
+        # Return to normal chat
+        self.orchestrator.transition_to(SessionState.CHATTING)
+        self._end_decision_open = False
+        self._pre_end_relax_prompted = False
 
-        # Timeout timer
-        self.orchestrator.ctx.post_relaxation_timed_out = False
-        self._start_post_relaxation_timeout()
-
-        # Continue/end dialog
-        dialog = ContinueOrEndDialog(self)
-        self._post_relaxation_dialog = dialog
-        dialog.continue_chosen.connect(self._on_continue_chosen)
-        dialog.end_chosen.connect(self._on_end_chosen)
-
-        def on_dialog_finished():
-            self._cancel_post_relaxation_timer()
-            # Already auto-ending, don't trigger continue
-            if getattr(self, "_auto_ending_after_relaxation", False):
-                return
-            if self.orchestrator.state == SessionState.POST_RELAXATION:
-                if self.orchestrator.ctx.post_relaxation_timed_out:
-                    self._on_post_relaxation_timeout()
-                else:
-                    self._on_continue_chosen()
-
-        dialog.finished.connect(on_dialog_finished)
-        dialog.exec()
-        self._post_relaxation_dialog = None
+        message = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "玩完啦，感觉怎么样？放松一点了吗？"
+        self.chat_panel.add_system_message(message)
+        self._play_tts_async(message)
+        self.control_panel.set_status("继续对话中...")
 
     def _ask_continue_or_end(self):
         """Ask user whether to continue or end when time limit is reached."""
