@@ -812,6 +812,9 @@ class ConversationPipeline:
             allow_new_scale = True
 
         # --- Scale logic driven by agent route ---
+        # If we're waiting for an answer on current item, agent can't change it
+        _waiting_for_answer = self._active_scale and self._active_scale_waiting_answer
+
         if agent_route and agent_route.get("confidence", 0) >= SCALE_ROUTE_CONFIDENCE:
             scale_action = agent_route.get("scale_action", "none")
             suggested_scale = agent_route.get("scale")
@@ -826,7 +829,7 @@ class ConversationPipeline:
                 self._active_scale_waiting_answer = False
                 self._scale_pause_turns = 2
 
-            elif scale_action == "start" and not self._active_scale and allow_new_scale:
+            elif scale_action == "start" and not self._active_scale and allow_new_scale and not _waiting_for_answer:
                 # Agent recommends starting a new scale
                 if suggested_scale:
                     self._active_scale = suggested_scale
@@ -862,7 +865,7 @@ class ConversationPipeline:
 
         elif self._active_scale:
             # Agent unavailable — keep active scale alive with item core context
-            next_item = self._next_unanswered_item(self._active_scale)
+            next_item = self._next_unanswered_item(self._active_scale, after_item=self._active_scale_q - 1)
             hint_q = next_item if next_item else self._active_scale_q
             logger.warning(
                 f"[ScaleDebug] agent route failed but active scale remains: "
@@ -1249,12 +1252,15 @@ class ConversationPipeline:
 口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来"。
 """
 
-    def _next_unanswered_item(self, scale_name: str):
-        """Get the next unanswered question number for a scale, or None if complete."""
+    def _next_unanswered_item(self, scale_name: str, after_item: int = 0):
+        """Get the next unanswered question number after after_item, or None if complete.
+
+        Advances forward only — never goes back to earlier items.
+        """
         from services.scales import SCALES
         total = len(SCALES.get(scale_name, {}).get("questions", []))
         answered = self._scale_answers.get(scale_name, {})
-        for i in range(1, total + 1):
+        for i in range(after_item + 1, total + 1):
             if i not in answered:
                 return i
         return None
@@ -1266,8 +1272,8 @@ class ConversationPipeline:
         self._administered_scales.add(scale_name)
 
     def _advance_active_scale_after_score(self, scale_name: str):
-        """After scoring an item, advance to next unanswered or complete."""
-        next_item = self._next_unanswered_item(scale_name)
+        """After scoring an item, advance to next unanswered after current item."""
+        next_item = self._next_unanswered_item(scale_name, after_item=self._active_scale_q)
         if next_item is None:
             logger.warning(f"[ScaleDebug] {scale_name} completed: {self._scale_answers.get(scale_name, {})}")
             self._active_scale = None
@@ -1316,18 +1322,12 @@ class ConversationPipeline:
         Uses agent-provided scale_item_text/scoring_target/required_answer_axis
         if available, otherwise falls back to SCALE_ITEM_CORES dict.
         """
-        # Try agent-provided fields first
-        scale_item_text = agent_route.get("scale_item_text", "")
-        scoring_target = agent_route.get("scoring_target", "")
-        required_answer_axis = agent_route.get("required_answer_axis", "")
-
-        # Fallback to SCALE_ITEM_CORES if agent didn't provide
-        if not scale_item_text:
-            cores = SCALE_ITEM_CORES.get(scale_name, {})
-            core = cores.get(item, {})
-            scale_item_text = core.get("scale_item_text", "")
-            scoring_target = core.get("scoring_target", "")
-            required_answer_axis = core.get("required_answer_axis", "")
+        # Always use SCALE_ITEM_CORES as single source of truth
+        cores = SCALE_ITEM_CORES.get(scale_name, {})
+        core = cores.get(item, {})
+        scale_item_text = core.get("scale_item_text", "")
+        scoring_target = core.get("scoring_target", "")
+        required_answer_axis = core.get("required_answer_axis", "")
 
         if not scale_item_text:
             # Last resort: use NATURAL_SCALE_QUESTIONS
@@ -1395,10 +1395,10 @@ class ConversationPipeline:
                 if recent:
                     rag_text = "\n".join(recent[-3:] + [text])
             rag_suffix = self.rag.get_system_suffix(rag_text)
-            # Truncate RAG suffix to keep prompt manageable for real-time voice
-            MAX_RAG_SUFFIX_CHARS = 1200
-            if rag_suffix and len(rag_suffix) > MAX_RAG_SUFFIX_CHARS:
-                rag_suffix = rag_suffix[:MAX_RAG_SUFFIX_CHARS] + "\n【知识库已截断，仅保留最相关内容】"
+            # Truncate RAG — tighter when active scale to reduce agent truncation
+            max_rag = 500 if self._active_scale else 1200
+            if rag_suffix and len(rag_suffix) > max_rag:
+                rag_suffix = rag_suffix[:max_rag] + "\n【知识库已截断】"
             logger.warning(f"[RagDebug] user_text={text!r} rag_text={rag_text!r} "
                           f"injected={bool(rag_suffix)} len={len(rag_suffix) if rag_suffix else 0}")
             if rag_suffix:
