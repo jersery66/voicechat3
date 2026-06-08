@@ -216,6 +216,57 @@ SCALE_ITEM_CORES = {
     "GAD-7": GAD7_ITEM_CORE,
 }
 
+# Common ASR errors in psychological counseling context
+# Maps (wrong_text, context_hint) → corrected_text
+_ASR_CORRECTIONS = {
+    # Frequency errors
+    "进场": "经常",
+    "进场很": "经常很",
+    "金蝉": "经常",
+    "井场": "经常",
+    # Duration errors
+    "带三个星期": "大概三个星期",
+    "带两周": "大概两周",
+    "代两周": "大概两周",
+    # Sleep errors
+    "中途不醒": "中途会醒",
+    "中途部醒": "中途会醒",
+    "不睡不着": "睡不着",
+    # General
+    "叫我了": "焦虑了",
+    "久了": "久了",  # keep as-is, context dependent
+    "心慌": "心慌",  # keep as-is
+}
+
+
+def correct_asr_text(raw_text: str, recent_context: str = "") -> tuple:
+    """Post-process ASR output to fix common speech recognition errors.
+
+    Returns (corrected_text, corrections_list).
+    """
+    if not raw_text:
+        return raw_text, []
+
+    corrected = raw_text
+    corrections = []
+
+    # Apply known corrections
+    for wrong, right in _ASR_CORRECTIONS.items():
+        if wrong == right:
+            continue
+        if wrong in corrected:
+            corrected = corrected.replace(wrong, right)
+            corrections.append(f"{wrong}→{right}")
+
+    # Context-aware corrections
+    # "没有什么事" + positive emotion → don't "correct" but note it
+    # This is handled in scoring logic, not here
+
+    if corrections:
+        logger.warning(f"[ASRCorrect] raw={raw_text!r} corrected={corrected!r} fixes={corrections}")
+
+    return corrected, corrections
+
 
 def detect_tag(text: str, patterns: dict) -> Optional[str]:
     """Find the first matching tag in text. Returns string name or None.
@@ -665,6 +716,12 @@ class ConversationPipeline:
                 return result
         else:
             result.user_text = config.user_text
+
+        # ASR post-processing: correct common speech recognition errors
+        raw_text = result.user_text
+        result.user_text, _asr_corrections = correct_asr_text(raw_text)
+        if _asr_corrections:
+            logger.warning(f"[ASRCorrect] raw={raw_text!r} corrected={result.user_text!r}")
 
         emit("append_chat", ("user", result.user_text))
 
@@ -1296,10 +1353,22 @@ class ConversationPipeline:
         if not t:
             return None
 
-        # Clean denial only — "没有具体的" "没有什么" etc. are NOT scale answers
+        # Symptom-positive words — if present, "没有" is denying cause, not symptom
+        _symptom_positive = [
+            "不开心", "心情不好", "低落", "难受", "没意思", "沮丧",
+            "绝望", "痛苦", "累", "焦虑", "紧张", "烦躁", "害怕",
+            "就是", "一直", "还是",
+        ]
+        has_symptom = any(x in t for x in _symptom_positive)
+
+        # Clean denial only — must NOT co-occur with symptom words
         clean_denials = {"没有", "没", "没有了", "也不会", "不太会", "不会", "不"}
         if t in clean_denials:
             return 0
+
+        # "没有什么事，就是不开心" — denying cause, NOT denying symptom
+        if any(x in t for x in ["没有什么", "没有原因", "没有具体", "不知道为什么"]) and has_symptom:
+            return None  # ambiguous — continue asking frequency
 
         # Frequency answers (PHQ-9 / GAD-7) — must be short and clear
         if any(x in t for x in ["偶尔", "有时候", "有时", "几天", "一两天"]):
