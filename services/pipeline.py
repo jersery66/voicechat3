@@ -525,6 +525,8 @@ class ConversationPipeline:
         self._scale_pause_turns: int = 0            # turns to pause before next scale item
         self._scale_soft_paused: bool = False       # True when scale is temporarily paused
         self._scale_resume_item: int = 1            # item to resume after soft pause
+        self._post_scale_relaxation_done: bool = False  # True after post-scale relaxation recommended
+        self._relaxation_recommended_this_session: set = set()  # track which types recommended
         self._crisis_lock_turns: int = 0            # turns to block all scales after crisis
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
@@ -552,6 +554,8 @@ class ConversationPipeline:
         self._crisis_lock_turns = 0
         self._scale_soft_paused = False
         self._scale_resume_item = 1
+        self._post_scale_relaxation_done = False
+        self._relaxation_recommended_this_session.clear()
 
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
@@ -940,11 +944,14 @@ class ConversationPipeline:
                     system_suffix += hint
                 logger.warning(f"[ScaleDebug] agent continue: {self._active_scale} Q{self._active_scale_q}")
 
-            # Relaxation recommendation from agent
+            # Relaxation recommendation from agent — suppress during active scale
             if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE:
-                rec_type = agent_route.get("relaxation_type") or "breathing"
-                result.relaxation_rec = rec_type
-                logger.warning(f"[ScaleDebug] agent recommend relaxation: {rec_type}")
+                if self._active_scale and not result.scale_completed:
+                    logger.warning(f"[RelaxDebug] skip relaxation during active scale: {self._active_scale} Q{self._active_scale_q}")
+                else:
+                    rec_type = agent_route.get("relaxation_type") or "breathing"
+                    result.relaxation_rec = rec_type
+                    logger.warning(f"[RelaxDebug] agent recommend relaxation: {rec_type}")
 
         elif self._active_scale:
             # Agent unavailable — keep active scale alive with item core context
@@ -1116,6 +1123,14 @@ class ConversationPipeline:
                             self._scale_queue.clear()
                         result.all_scales_completed = True
                         logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
+                        # Post-scale relaxation recommendation
+                        if not self._post_scale_relaxation_done:
+                            rec_type = self._choose_post_scale_relaxation(completed_name)
+                            if rec_type:
+                                result.relaxation_rec = rec_type
+                                self._post_scale_relaxation_done = True
+                                self._relaxation_recommended_this_session.add(rec_type)
+                                logger.warning(f"[RelaxDebug] post-scale relaxation: {completed_name} -> {rec_type}")
                     else:
                         # Advanced to next item — pause 1 turn, don't chain questions
                         self._scale_pause_turns = 1
@@ -1363,6 +1378,23 @@ class ConversationPipeline:
             if i not in answered:
                 return i
         return None
+
+    def _choose_post_scale_relaxation(self, scale_name: str) -> Optional[str]:
+        """Choose relaxation type based on completed scale results."""
+        answers = self._scale_answers.get(scale_name, {})
+        if not answers:
+            return "breathing"
+
+        if scale_name == "PHQ-9":
+            # High sleep score (Q3) or fatigue (Q4) → meditation
+            if answers.get(3, 0) >= 2 or answers.get(4, 0) >= 2:
+                return "meditation"
+            return "breathing"
+
+        if scale_name == "GAD-7":
+            return "breathing"
+
+        return "breathing"
 
     def _soft_pause_scale(self, reason: str = ""):
         """Soft pause: temporarily stop probing, but keep active scale state.
