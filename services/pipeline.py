@@ -301,6 +301,16 @@ def get_end_type_enum(string_name: str):
 
 # ==================== Tag Cleaning ====================
 
+# Internal strategy terms that must NEVER appear in spoken output
+_FORBIDDEN_INTERNAL_TERMS = [
+    "高防御", "低防御", "无情感反映", "情感反映",
+    "具体化开放式提问", "具体化", "开放式提问",
+    "PHQ", "GAD", "PCL", "量表", "评分", "风险等级",
+    "内部策略", "危机干预", "crisis", "risk level",
+    "intent", "emotion detection",
+]
+
+
 def clean_for_display(text: str) -> str:
     """Remove all control tags for UI display. Strips [breath]/[laughter] too."""
     if not text:
@@ -315,6 +325,9 @@ def clean_for_display(text: str) -> str:
     text = _RE_PIPE_TAG.sub('', text)
     text = _RE_BRACKETS_CN.sub('', text)
     text = _RE_BREATH_LAUGH.sub('', text)
+    # Remove internal strategy terms that leaked into spoken output
+    for term in _FORBIDDEN_INTERNAL_TERMS:
+        text = text.replace(term, "")
     return text.strip()
 
 
@@ -1113,10 +1126,23 @@ class ConversationPipeline:
                 else:
                     # No score for current Q — continue waiting, add hint for next turn
                     self._active_scale_waiting_answer = True
-                    hint = self._build_scale_context_hint(self._active_scale, current_q, {})
-                    if hint:
-                        system_suffix += hint
-                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting")
+                    # Check if user expressed strong symptoms (need frequency follow-up)
+                    _strong = any(x in result.user_text for x in [
+                        "非常", "很", "特别", "极其", "沮丧", "绝望", "难受", "低落", "焦虑"
+                    ])
+                    if _strong:
+                        # Symptoms confirmed — ask for frequency specifically
+                        system_suffix += f"""
+【隐性症状采样】用户已明确表达存在症状，但缺少频率信息。
+下一步：先承接情感，然后追问频率。
+示例："这种感觉最近是偶尔出现，还是大多数时间都会有？"
+不要说量表、评分、PHQ。不要跳过情感承接直接问。
+"""
+                    else:
+                        hint = self._build_scale_context_hint(self._active_scale, current_q, {})
+                        if hint:
+                            system_suffix += hint
+                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting, strong_symptom={_strong}")
 
         # Refresh final_suffix after all scale hints are added
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
@@ -1412,6 +1438,15 @@ class ConversationPipeline:
         # Affirmative without frequency — conservative score 1
         if t in {"是", "是的", "对", "对的", "嗯", "有", "会", "还会", "会的"}:
             return 1
+
+        # Strong symptom words without frequency — don't score, keep asking
+        # "非常沮丧" "很绝望" "特别难受" → symptom confirmed, need frequency
+        _strong_symptom = [
+            "非常", "很", "特别", "极其", "十分", "相当", "一直很",
+        ]
+        if any(x in t for x in _strong_symptom) and has_symptom:
+            logger.warning(f"[ScaleDebug] strong symptom detected but no frequency: {user_text!r}")
+            return None  # don't score — continue asking frequency
 
         # Reject everything else — don't guess
         return None

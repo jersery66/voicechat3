@@ -21,7 +21,9 @@ class TestCleanForDisplay:
         assert clean_for_display("结束[END_GOAL_ACHIEVED]") == "结束"
 
     def test_strips_scale_tags(self):
-        assert clean_for_display("评分[SCALE:PHQ-9:Q1:S3]完成") == "评分完成"
+        # SCALE tags are stripped; "评分" is also removed (forbidden internal term)
+        assert clean_for_display("评分[SCALE:PHQ-9:Q1:S3]完成") == "完成"
+        assert clean_for_display("今天不错[SCALE:GAD-7:Q2:S1]") == "今天不错"
 
     def test_strips_chinese_brackets(self):
         # 【】 (U+3010/U+3011) are stripped by _RE_BRACKETS_CN
