@@ -510,6 +510,8 @@ class ConversationPipeline:
         self._active_scale_waiting_answer: bool = False  # True = asked, waiting for user reply
         self._scale_queue: List[str] = []           # scales queued while one is active
         self._scale_pause_turns: int = 0            # turns to pause before next scale item
+        self._scale_soft_paused: bool = False       # True when scale is temporarily paused
+        self._scale_resume_item: int = 1            # item to resume after soft pause
         self._crisis_lock_turns: int = 0            # turns to block all scales after crisis
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
@@ -535,6 +537,8 @@ class ConversationPipeline:
         self._scale_queue.clear()
         self._scale_pause_turns = 0
         self._crisis_lock_turns = 0
+        self._scale_soft_paused = False
+        self._scale_resume_item = 1
 
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
@@ -801,11 +805,8 @@ class ConversationPipeline:
 
         # Interruption detection: if user resists questioning, stop scale immediately
         if self._active_scale and is_scale_interruption_text(result.user_text):
-            logger.warning(f"[ScaleDebug] user interrupted scale questioning: {result.user_text!r}")
-            self._active_scale = None
-            self._active_scale_q = 1
-            self._active_scale_waiting_answer = False
-            self._scale_pause_turns = 3  # pause before next scale attempt
+            logger.warning(f"[ScaleDebug] user interrupted scale: {result.user_text!r}")
+            self._soft_pause_scale(reason="user_interruption")
 
         # Round gate
         current_rounds = self.report.get_round_count() if self.report else 0
@@ -868,6 +869,20 @@ class ConversationPipeline:
         else:
             allow_new_scale = True
 
+        # --- Soft pause recovery ---
+        # If scale was soft paused and user mentions symptoms again, resume
+        if self._scale_soft_paused and self._active_scale:
+            if self._scale_pause_turns <= 0:
+                # Pause expired — check if user is back on topic
+                if agent_route and agent_route.get("scale_action") in ("start", "continue"):
+                    logger.warning(
+                        f"[ScaleDebug] resume {self._active_scale} Q{self._scale_resume_item} "
+                        f"after soft pause"
+                    )
+                    self._active_scale_q = self._scale_resume_item
+                    self._active_scale_waiting_answer = True
+                    self._scale_soft_paused = False
+
         # --- Scale logic driven by agent route ---
         # If we're waiting for an answer on current item, agent can't change it
         _waiting_for_answer = self._active_scale and self._active_scale_waiting_answer
@@ -878,13 +893,11 @@ class ConversationPipeline:
             probe_hint = agent_route.get("probe_hint", "")
 
             if scale_action == "pause":
-                # Agent says user is resisting or context isn't right
+                # Soft pause — don't clear active scale, just pause probing
                 if self._active_scale:
-                    logger.warning(f"[ScaleDebug] agent pause: clearing {self._active_scale}")
-                self._active_scale = None
-                self._active_scale_q = 1
-                self._active_scale_waiting_answer = False
-                self._scale_pause_turns = 2
+                    self._soft_pause_scale(reason=agent_route.get("reason", "agent_pause"))
+                else:
+                    self._scale_pause_turns = 2
 
             elif scale_action == "start" and not self._active_scale and allow_new_scale and not _waiting_for_answer:
                 # Agent recommends starting a new scale
@@ -1013,11 +1026,14 @@ class ConversationPipeline:
         if llm_rec:
             result.relaxation_rec = llm_rec
         result.scale_tags = parse_scale_tags(result.full_response)
+        if result.scale_tags:
+            logger.warning(f"[ScaleDebug] SCALE tags parsed from LLM: {result.scale_tags}")
         # Track answered questions per scale
         for scale_name, answers in result.scale_tags.items():
             if scale_name not in self._scale_answers:
                 self._scale_answers[scale_name] = {}
             self._scale_answers[scale_name].update(answers)
+            logger.warning(f"[ScaleDebug] tag scored {scale_name} {answers}")
 
         # Short answer scoring: "经常", "是的", "没有" etc. for active scale items
         if self._active_scale:
@@ -1321,6 +1337,21 @@ class ConversationPipeline:
             if i not in answered:
                 return i
         return None
+
+    def _soft_pause_scale(self, reason: str = ""):
+        """Soft pause: temporarily stop probing, but keep active scale state.
+
+        Does NOT clear _active_scale, _active_scale_q, or _scale_answers.
+        The scale can resume after 1-2 turns of normal conversation.
+        """
+        self._scale_soft_paused = True
+        self._scale_pause_turns = 2
+        self._scale_resume_item = self._active_scale_q
+        self._active_scale_waiting_answer = True
+        logger.warning(
+            f"[ScaleDebug] soft pause {self._active_scale} Q{self._active_scale_q}, "
+            f"reason={reason}, will resume later"
+        )
 
     def _record_scale_score(self, scale_name: str, item: int, score: int):
         """Record a scale score into _scale_answers and mark as administered."""
