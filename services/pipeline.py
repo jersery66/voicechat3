@@ -216,6 +216,27 @@ SCALE_ITEM_CORES = {
     "GAD-7": GAD7_ITEM_CORE,
 }
 
+# Per-item positive symptom keywords for PHQ-9
+# Used to detect "symptom confirmed but frequency missing" state
+PHQ_POSITIVE_KEYWORDS_BY_ITEM = {
+    1: ["没兴趣", "没意思", "提不起劲", "不想做", "做什么都没劲"],
+    2: ["心情不好", "不开心", "低落", "沮丧", "难过", "绝望", "没希望"],
+    3: ["睡不着", "失眠", "睡不好", "早醒", "睡太多", "入睡困难"],
+    4: ["累", "没力气", "没劲", "疲惫", "乏力", "没活力"],
+    5: ["吃不下", "没胃口", "吃太多", "食欲", "饭量"],
+    6: ["觉得自己很糟", "失败", "让家人失望", "自责", "不够好"],
+    7: ["注意力", "集中不了", "看不进去", "专注不了", "分心"],
+    8: ["坐不住", "坐立不安", "烦躁", "急躁", "动作变慢", "说话变慢", "停不下来"],
+    9: ["不想活", "伤害自己", "自杀", "自残", "死了算了"],
+}
+
+# Frequency words — if present with symptom, can score directly
+FREQUENCY_WORDS = [
+    "没有", "偶尔", "有时候", "有时", "几天", "一两天",
+    "经常", "大多数", "多数时候", "一半以上", "超过一半",
+    "每天", "天天", "几乎每天", "一直", "总是", "老是", "基本每天",
+]
+
 # Common ASR errors in psychological counseling context
 # Maps (wrong_text, context_hint) → corrected_text
 _ASR_CORRECTIONS = {
@@ -303,12 +324,19 @@ def get_end_type_enum(string_name: str):
 
 # Internal strategy terms that must NEVER appear in spoken output
 _FORBIDDEN_INTERNAL_TERMS = [
-    "高防御", "低防御", "无情感反映", "情感反映",
+    "高防御", "中防御", "中等防御", "低防御", "防御",
+    "无情感反映", "情感反映",
     "具体化开放式提问", "具体化", "开放式提问",
-    "PHQ", "GAD", "PCL", "量表", "评分", "风险等级",
+    "策略选择", "状态评估", "情绪识别", "变革话语",
+    "PHQ", "GAD", "PCL", "量表", "问卷", "评分", "分数", "风险等级",
     "内部策略", "危机干预", "crisis", "risk level",
     "intent", "emotion detection",
 ]
+
+
+def _contains_internal_leak(text: str) -> bool:
+    """Check if spoken text contains internal strategy terms that leaked."""
+    return any(term in (text or "") for term in _FORBIDDEN_INTERNAL_TERMS)
 
 
 def clean_for_display(text: str) -> str:
@@ -1025,6 +1053,17 @@ class ConversationPipeline:
         # --- Prepare TTS text immediately ---
         # Limit to one question per reply to prevent rapid-fire questioning
         result.spoken_text = limit_to_one_question(result.spoken_text)
+
+        # Check for internal strategy term leak before display/TTS
+        if _contains_internal_leak(result.spoken_text):
+            logger.warning(f"[OutputClean] internal strategy leaked: {result.spoken_text!r}")
+            if self._active_scale:
+                result.spoken_text = self._make_scale_clarify_reply(
+                    self._active_scale, self._active_scale_q, result.user_text
+                )
+            else:
+                result.spoken_text = make_safe_fallback_reply(result.user_text)
+
         result.clean_spoken = clean_for_display(result.spoken_text)
         emit("clean_last_ai", result.clean_spoken)
         result.tts_text = clean_for_tts(result.spoken_text)
@@ -1145,19 +1184,26 @@ class ConversationPipeline:
                     _strong = any(x in result.user_text for x in [
                         "非常", "很", "特别", "极其", "沮丧", "绝望", "难受", "低落", "焦虑"
                     ])
-                    if _strong:
+                    # Item-aware positive detection: "坐不住" → Q8, "睡不着" → Q3, etc.
+                    _positive_pending = self._is_positive_pending_frequency(
+                        self._active_scale, current_q, result.user_text
+                    )
+                    if _strong or _positive_pending:
                         # Symptoms confirmed — ask for frequency specifically
+                        _item_hint = NATURAL_SCALE_QUESTIONS.get((self._active_scale, current_q), "")
                         system_suffix += f"""
 【隐性症状采样】用户已明确表达存在症状，但缺少频率信息。
-下一步：先承接情感，然后追问频率。
-示例："这种感觉最近是偶尔出现，还是大多数时间都会有？"
+当前维度：{_item_hint}
+不要再问"有没有这个症状"。先承接情感，然后追问频率。
+示例："这种感觉最近是偶尔几天，还是大多数时间都会有？"
 不要说量表、评分、PHQ。不要跳过情感承接直接问。
 """
+                        logger.warning(f"[ScaleDebug] {self._active_scale} Q{current_q} positive_pending_frequency")
                     else:
                         hint = self._build_scale_context_hint(self._active_scale, current_q, {})
                         if hint:
                             system_suffix += hint
-                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting, strong_symptom={_strong}")
+                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting, strong={_strong}, positive_pending={_positive_pending}")
 
         # Refresh final_suffix after all scale hints are added
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
@@ -1379,6 +1425,28 @@ class ConversationPipeline:
                 return i
         return None
 
+    def _make_scale_clarify_reply(self, scale_name: str, item: int, user_text: str) -> str:
+        """Generate a safe reply when internal strategy terms leak into spoken output."""
+        import random
+        if scale_name == "PHQ-9":
+            item_replies = {
+                1: "嗯，兴趣这块确实有变化。[breath]那最近两周，这种提不起劲是偶尔几天，还是大多数时候都这样？",
+                2: "听起来这份低落感挺重的。[breath]那这种感觉最近是偶尔一阵，还是大多数时间都有？",
+                3: "睡眠这块确实很重要。[breath]那最近两周，这种睡眠问题是偶尔几天，还是大多数时候都会有？",
+                4: "嗯，累的感觉确实会很消耗人。[breath]那最近两周，这种疲惫是偶尔几天，还是大多数时间都有？",
+                5: "吃饭这块也有变化是吧。[breath]那最近两周，这种食欲变化是偶尔几天，还是大多数时候？",
+                6: "嗯，自责的感觉确实很沉重。[breath]那最近两周，这种感觉是偶尔出现，还是大多数时候都在？",
+                7: "注意力这块也有影响。[breath]那最近两周，这种难以集中是偶尔几天，还是大多数时候？",
+                8: "嗯，坐不住这种感觉确实挺折腾的。[breath]那最近两周，这种坐立不安是偶尔几天，还是大多数时间都会有？",
+                9: "谢谢你愿意告诉我这个。[breath]当你说这些的时候，有没有出现过伤害自己的念头？",
+            }
+            if item in item_replies:
+                return item_replies[item]
+        return random.choice([
+            "嗯，我听着呢。[breath]你接着说。",
+            "你说的我都有在听。[breath]再往下说说？",
+        ])
+
     def _choose_post_scale_relaxation(self, scale_name: str) -> Optional[str]:
         """Choose relaxation type based on completed scale results."""
         answers = self._scale_answers.get(scale_name, {})
@@ -1430,6 +1498,21 @@ class ConversationPipeline:
         self._active_scale_q = next_item
         self._active_scale_waiting_answer = False
         logger.warning(f"[ScaleDebug] advance {scale_name} to Q{next_item}")
+
+    def _is_positive_pending_frequency(self, scale_name: str, item: int, text: str) -> bool:
+        """Check if user confirmed symptom exists but didn't provide frequency.
+
+        Returns True when text contains item-specific positive keywords
+        but no frequency words. Example: "会的，我感觉我坐不住" → Q8 positive,
+        no frequency → should ask "偶尔几天还是大多数时间？"
+        """
+        if scale_name != "PHQ-9":
+            return False
+        t = text or ""
+        positive_words = PHQ_POSITIVE_KEYWORDS_BY_ITEM.get(item, [])
+        has_positive = any(w in t for w in positive_words)
+        has_frequency = any(w in t for w in FREQUENCY_WORDS)
+        return has_positive and not has_frequency
 
     def _score_short_scale_answer(self, scale_name: str, item: int, user_text: str):
         """Score short natural answers to the currently active scale item.
