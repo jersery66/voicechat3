@@ -107,9 +107,12 @@ class BlinkButton(QPushButton):
 
     def stop_blink(self):
         """Stop blink and restore original style."""
+        if not self._is_blinking:
+            return
         self._is_blinking = False
         self._blink_timer.stop()
-        self.setStyleSheet(self._original_style)
+        if self._original_style:
+            self.setStyleSheet(self._original_style)
 
     def _toggle_blink(self):
         self._blink_phase = not self._blink_phase

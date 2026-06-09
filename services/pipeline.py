@@ -555,6 +555,8 @@ class ConversationPipeline:
         self._scale_resume_item: int = 1            # item to resume after soft pause
         self._post_scale_relaxation_done: bool = False  # True after post-scale relaxation recommended
         self._relaxation_recommended_this_session: set = set()  # track which types recommended
+        self._pending_relaxation_after_scale: Optional[str] = None  # hold relaxation until scale done
+        self._relaxation_candidate: Optional[str] = None  # agent-proposed candidate for current turn
         self._crisis_lock_turns: int = 0            # turns to block all scales after crisis
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
@@ -972,14 +974,11 @@ class ConversationPipeline:
                     system_suffix += hint
                 logger.warning(f"[ScaleDebug] agent continue: {self._active_scale} Q{self._active_scale_q}")
 
-            # Relaxation recommendation from agent — suppress during active scale
+            # Relaxation: agent proposes candidate, only set after spoken_text sync
+            self._relaxation_candidate = None
             if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE:
-                if self._active_scale and not result.scale_completed:
-                    logger.warning(f"[RelaxDebug] skip relaxation during active scale: {self._active_scale} Q{self._active_scale_q}")
-                else:
-                    rec_type = agent_route.get("relaxation_type") or "breathing"
-                    result.relaxation_rec = rec_type
-                    logger.warning(f"[RelaxDebug] agent recommend relaxation: {rec_type}")
+                self._relaxation_candidate = agent_route.get("relaxation_type") or "breathing"
+                logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
 
         elif self._active_scale:
             # Agent unavailable — keep active scale alive with item core context
@@ -1080,10 +1079,28 @@ class ConversationPipeline:
                     f"user={result.user_text!r}, raw_end={raw_end_type}"
                 )
             result.end_type = None
-        # Only override agent's relaxation_rec if LLM explicitly output a REC tag
+        # Relaxation sync: only highlight if spoken_text actually mentions it
         llm_rec = detect_tag(result.full_response, REC_TAGS)
         if llm_rec:
+            # LLM explicitly output REC tag — use it
             result.relaxation_rec = llm_rec
+        elif self._relaxation_candidate:
+            # Agent proposed candidate — check if spoken reply mentions it
+            if self._active_scale and not result.scale_completed:
+                # During active scale: hold for later, don't highlight now
+                self._pending_relaxation_after_scale = self._relaxation_candidate
+                result.relaxation_rec = None
+                logger.warning(f"[RelaxDebug] hold relaxation until scale done: {self._relaxation_candidate}")
+            elif self._reply_mentions_relaxation(result.spoken_text, self._relaxation_candidate):
+                result.relaxation_rec = self._relaxation_candidate
+                logger.warning(f"[RelaxDebug] relaxation synced with reply: {self._relaxation_candidate}")
+            else:
+                result.relaxation_rec = None
+                logger.warning(
+                    f"[RelaxDebug] suppress unsynced: candidate={self._relaxation_candidate}, "
+                    f"spoken={result.spoken_text[:60]!r}"
+                )
+        self._relaxation_candidate = None
         result.scale_tags = parse_scale_tags(result.full_response)
         if result.scale_tags:
             logger.warning(f"[ScaleDebug] SCALE tags parsed from LLM: {result.scale_tags}")
@@ -1446,6 +1463,23 @@ class ConversationPipeline:
             "嗯，我听着呢。[breath]你接着说。",
             "你说的我都有在听。[breath]再往下说说？",
         ])
+
+    @staticmethod
+    def _reply_mentions_relaxation(spoken_text: str, rec_type: str) -> bool:
+        """Check if AI's spoken reply actually mentions the recommended relaxation."""
+        text = spoken_text or ""
+        general = any(x in text for x in [
+            "放松训练", "放松一下", "缓一缓", "调整一下", "左边", "按钮", "跟着做"
+        ])
+        if rec_type == "breathing":
+            specific = any(x in text for x in ["呼吸", "深呼吸", "呼吸放松"])
+        elif rec_type == "muscle":
+            specific = any(x in text for x in ["肌肉", "身体放松", "绷紧再放松"])
+        elif rec_type == "meditation":
+            specific = any(x in text for x in ["冥想", "正念", "静一静"])
+        else:
+            specific = False
+        return general and specific
 
     def _choose_post_scale_relaxation(self, scale_name: str) -> Optional[str]:
         """Choose relaxation type based on completed scale results."""
