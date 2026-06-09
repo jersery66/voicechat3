@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         self._end_decision_open = False
         self._end_request_in_progress = False
         self._pre_end_relax_prompted = False
+        self._pending_end_after_video = None
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -345,8 +346,8 @@ class MainWindow(QMainWindow):
         if not self.models_loaded or not self.pipeline:
             self.chat_panel.add_system_message("模型尚未加载完成，请稍候")
             return
-        if self.orchestrator.state in (SessionState.SESSION_ENDING, SessionState.SESSION_ENDED):
-            self.chat_panel.add_system_message("会话已结束，请开始新对话")
+        if not self.orchestrator.can_start_pipeline():
+            self.chat_panel.add_system_message("当前不在可对话状态，请稍候")
             return
         if not self.info_confirmed:
             self.chat_panel.add_system_message("请先填写左侧基本信息并确认")
@@ -361,8 +362,8 @@ class MainWindow(QMainWindow):
         text=None for voice mode (STT+TTS), text=str for text mode."""
         self._pipeline_busy = True
         try:
-            if self.orchestrator.state in (SessionState.SESSION_ENDING, SessionState.SESSION_ENDED):
-                self.processing_queue.put(("status", "会话已结束，请开始新对话"))
+            if not self.orchestrator.can_start_pipeline():
+                self.processing_queue.put(("status", "当前不在可对话状态，请稍候"))
                 return
 
             # Clear interim report
@@ -797,6 +798,7 @@ class MainWindow(QMainWindow):
         self._end_decision_open = False
         self._end_request_in_progress = False
         self._pre_end_relax_prompted = False
+        self._pending_end_after_video = None
         self._completion_status = None
         self._auto_ending_after_relaxation = False
         self.current_user_id = None
@@ -997,10 +999,20 @@ class MainWindow(QMainWindow):
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 })
 
-        # Return to normal chat — no dialog, no timeout, no end prompt
+        # Return to normal chat
         self.orchestrator.transition_to(SessionState.CHATTING)
         self._end_decision_open = False
         self._pre_end_relax_prompted = False
+
+        # Check if end was deferred while video was playing
+        pending_end = getattr(self, "_pending_end_after_video", None)
+        if pending_end:
+            self._pending_end_after_video = None
+            logger.info(f"[EndFlow] executing deferred end after video: {pending_end}")
+            self._request_end_with_readiness_check(
+                pending_end, allow_force_relaxation=False, source="after_video"
+            )
+            return
 
         # Short continuation message
         message = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "刚才这个练习先到这里，你可以感受一下现在身体有没有稍微松一点。我们可以继续聊。"
@@ -1249,7 +1261,18 @@ class MainWindow(QMainWindow):
         self._keepalive_timer.timeout.connect(self._ollama_keepalive_tick)
         self._keepalive_timer.start(180000)  # 3 minutes
 
+    def _stop_ollama_keepalive(self):
+        """Stop keepalive during session ending/report generation."""
+        timer = getattr(self, "_keepalive_timer", None)
+        if timer and timer.isActive():
+            timer.stop()
+            logger.info("[KeepAlive] stopped during session ending")
+
     def _ollama_keepalive_tick(self):
+        if self._session_ending or self._current_report_generating:
+            return
+        if self.orchestrator.state != SessionState.CHATTING:
+            return
         if self.llm_service:
             threading.Thread(
                 target=self.llm_service.warmup, daemon=True
@@ -1325,11 +1348,19 @@ class MainWindow(QMainWindow):
         - auto-end, time limit, user click, model END tag, relaxation timeout
 
         Checks:
-        1. Incomplete scales → prompt to continue or end
-        2. No relaxation done → recommend once (non-blocking)
-        3. Then proceed to actual end
+        1. VIDEO_PLAYING → defer end until video finishes
+        2. Incomplete scales → prompt to continue or end
+        3. No relaxation done → recommend once (non-blocking)
+        4. Then proceed to actual end
         """
         logger.info(f"[EndFlow] _request_end_with_readiness_check: end_type={end_type}, source={source}")
+
+        # If video is playing, defer end until it finishes
+        if self.orchestrator.state == SessionState.VIDEO_PLAYING:
+            self._pending_end_after_video = end_type
+            self.control_panel.set_status("放松训练结束后将自动完成会话")
+            logger.info("[EndFlow] deferred end until video finishes")
+            return
 
         # Get readiness state
         state = self._get_end_readiness_state()
@@ -1710,6 +1741,15 @@ class MainWindow(QMainWindow):
         if not self.session_end_controller.begin().accepted:
             return
         self._session_ending = True
+
+        # Stop competing resources immediately
+        self._stop_ollama_keepalive()
+        if self.tts_service:
+            try:
+                self.tts_service.stop_playing()
+            except Exception:
+                pass
+        logger.info("[EndFlow] session ending started, keepalive and TTS stopped")
 
         # If user explicitly chose to end or force relaxation is disabled,
         # skip forced relaxation — respect their choice.
