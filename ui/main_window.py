@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         # Relaxation-interrupted-scale resume state
         self._scale_interrupted_by_relaxation = False
         self._resume_scale_after_relaxation = None  # {"scale_name": ..., "item": ...}
+        self._post_scale_relaxation_recommended = False
         self._post_relaxation_feedback_consumed = False
 
         # Tools (initialized in load_models; guarded against partial init)
@@ -626,7 +627,7 @@ class MainWindow(QMainWindow):
                     self._replace_last_system(content)
 
                 elif msg_type == "all_scales_completed":
-                    self._recommend_relaxation_after_scales()
+                    self._handle_scales_completed_recommend_relaxation()
 
                 elif msg_type == "auto_end_session":
                     self._request_end_with_readiness_check(content, allow_force_relaxation=False, source="auto_end_after_relaxation")
@@ -895,6 +896,7 @@ class MainWindow(QMainWindow):
         self._scale_interrupted_by_relaxation = False
         self._resume_scale_after_relaxation = None
         self._post_relaxation_feedback_consumed = False
+        self._post_scale_relaxation_recommended = False
         self.current_user_id = None
         self.user_info = {}
         self.info_confirmed = False
@@ -971,21 +973,31 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"[UIDebug] highlight_relax failed: {e}")
 
-    def _recommend_relaxation_after_scales(self):
-        """After all scales are done, recommend a short relaxation training."""
-        # Don't recommend if already done or currently in relaxation
+    def _handle_scales_completed_recommend_relaxation(self):
+        """After all scales are done, recommend relaxation — not end session."""
+        if self._post_scale_relaxation_recommended:
+            return
         if self.orchestrator.ctx.current_relaxation_type:
             return
         if self.orchestrator.state == SessionState.RELAXATION_RECOMMENDED:
             return
 
-        tag = self._get_end_relaxation_tag()
+        self._post_scale_relaxation_recommended = True
+
+        tag = self._get_end_relaxation_tag() or "breathing"
         tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
 
-        # Display text (no [breath] tag)
-        display_text = f"刚才我们把最近这段时间的状态大致捋清楚了。现在可以做个短的{tag_cn}放松，让身体也缓一缓。"
-        # TTS text (with [breath] for natural pause)
-        tts_text = f"刚才我们把最近这段时间的状态大致捋清楚了。[breath]现在可以做个短的{tag_cn}放松，让身体也缓一缓。"
+        display_text = (
+            f"刚才我们已经把你最近这段时间的状态大致了解清楚了。"
+            f"你前面提到的这些感受，身体上也可能会跟着紧绷。"
+            f"先不用急着结束，可以做一个短的{tag_cn}放松训练，让身体缓一缓。"
+            f"你可以点左侧的{tag_cn}放松训练，跟着做几分钟。"
+        )
+        tts_text = (
+            f"刚才我们已经把你最近这段时间的状态大致了解清楚了。[breath]"
+            f"你前面提到的这些感受，身体上也可能会跟着紧绷。[breath]"
+            f"先不用急着结束，可以做一个短的{tag_cn}放松训练，让身体缓一缓。"
+        )
 
         self.chat_panel.add_system_message(display_text, as_ai=True)
         self._play_tts_async(tts_text)
