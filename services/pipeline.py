@@ -237,6 +237,17 @@ FREQUENCY_WORDS = [
     "每天", "天天", "几乎每天", "一直", "总是", "老是", "基本每天",
 ]
 
+# Per-item positive symptom keywords for GAD-7
+GAD7_POSITIVE_KEYWORDS_BY_ITEM = {
+    1: ["紧张", "焦虑", "急切", "心慌", "不安"],
+    2: ["停不下来", "控制不了", "控制不住", "一直担心"],
+    3: ["担心", "担忧", "操心", "放心不下"],
+    4: ["放松不了", "放松不下来", "静不下来"],
+    5: ["坐不住", "坐立不安", "静不下来", "动来动去"],
+    6: ["烦", "急躁", "容易生气", "不耐烦"],
+    7: ["害怕", "恐惧", "觉得要出事", "总觉得不好"],
+}
+
 # Common ASR errors in psychological counseling context
 # Maps (wrong_text, context_hint) → corrected_text
 _ASR_CORRECTIONS = {
@@ -843,12 +854,6 @@ class ConversationPipeline:
 
         from services.scales import get_scale_manager
         scale_mgr = get_scale_manager()
-
-        # Crisis lock: block all scale logic for N turns after crisis detection
-        if self._crisis_lock_turns > 0:
-            self._crisis_lock_turns -= 1
-            self._active_scale = None
-            logger.warning(f"[CrisisDebug] crisis lock active, skip scale logic: remaining={self._crisis_lock_turns}")
 
         # Interruption detection: if user resists questioning, stop scale immediately
         if self._active_scale and is_scale_interruption_text(result.user_text):
@@ -1540,10 +1545,13 @@ class ConversationPipeline:
         but no frequency words. Example: "会的，我感觉我坐不住" → Q8 positive,
         no frequency → should ask "偶尔几天还是大多数时间？"
         """
-        if scale_name != "PHQ-9":
-            return False
         t = text or ""
-        positive_words = PHQ_POSITIVE_KEYWORDS_BY_ITEM.get(item, [])
+        if scale_name == "PHQ-9":
+            positive_words = PHQ_POSITIVE_KEYWORDS_BY_ITEM.get(item, [])
+        elif scale_name == "GAD-7":
+            positive_words = GAD7_POSITIVE_KEYWORDS_BY_ITEM.get(item, [])
+        else:
+            return False
         has_positive = any(w in t for w in positive_words)
         has_frequency = any(w in t for w in FREQUENCY_WORDS)
         return has_positive and not has_frequency

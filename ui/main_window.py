@@ -999,7 +999,8 @@ class MainWindow(QMainWindow):
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 })
 
-        # Return to normal chat
+        # Return to normal chat (must go through POST_RELAXATION first)
+        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
         self.orchestrator.transition_to(SessionState.CHATTING)
         self._end_decision_open = False
         self._pre_end_relax_prompted = False
@@ -1050,7 +1051,8 @@ class MainWindow(QMainWindow):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
 
-        # Return to normal chat
+        # Return to normal chat (must go through POST_RELAXATION first)
+        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
         self.orchestrator.transition_to(SessionState.CHATTING)
         self._end_decision_open = False
         self._pre_end_relax_prompted = False

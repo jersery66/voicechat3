@@ -207,6 +207,9 @@ class LLMService:
                 f"[LLM] Thinking-only: reasoning={len(reasoning_buffer)} chars, content=0. "
                 f"model={self.model}, user_msg={user_message[:80]!r}"
             )
+            # Rollback user message — no assistant response was generated
+            if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+                self.conversation_history.pop()
             raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
         # Retry once if truly empty (no thinking, no content)
@@ -228,6 +231,9 @@ class LLMService:
                 logger.warning(f"[LLM] Retry also failed: {retry_err}")
 
             if not full_response.strip():
+                # Rollback user message — no assistant response was generated
+                if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+                    self.conversation_history.pop()
                 raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
             yield full_response
