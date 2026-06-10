@@ -434,11 +434,12 @@ class MainWindow(QMainWindow):
             self._request_end_with_readiness_check(et, source="model_end_tag")
             return
 
-        if result.all_scales_completed:
-            self.processing_queue.put(("all_scales_completed", None))
-        elif result.relaxation_rec:
+        if result.relaxation_rec:
+            # Pipeline synced relaxation with spoken_text — safe to highlight
             self.processing_queue.put(("highlight_relax_delayed", (result.relaxation_rec, 500)))
             self.processing_queue.put(("status", "可以尝试左侧放松训练"))
+        elif result.all_scales_completed:
+            self.processing_queue.put(("all_scales_completed", None))
         elif result.intent == "entertainment":
             self.processing_queue.put(("highlight_relax", "game"))
             self.processing_queue.put(("status", "准备就绪"))
@@ -888,15 +889,16 @@ class MainWindow(QMainWindow):
         tag = self._get_end_relaxation_tag()
         tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
 
-        rec_text = (
-            f"刚才我们把最近这段时间的状态大致捋清楚了。[breath]"
-            f"现在可以做个短的{tag_cn}放松，让身体也缓一缓。"
-        )
-        self.chat_panel.add_system_message(rec_text, as_ai=True)
-        self._play_tts_async(rec_text)
+        # Display text (no [breath] tag)
+        display_text = f"刚才我们把最近这段时间的状态大致捋清楚了。现在可以做个短的{tag_cn}放松，让身体也缓一缓。"
+        # TTS text (with [breath] for natural pause)
+        tts_text = f"刚才我们把最近这段时间的状态大致捋清楚了。[breath]现在可以做个短的{tag_cn}放松，让身体也缓一缓。"
+
+        self.chat_panel.add_system_message(display_text, as_ai=True)
+        self._play_tts_async(tts_text)
 
         self.orchestrator.transition_to(SessionState.RELAXATION_RECOMMENDED)
-        QTimer.singleShot(1000, lambda: self.control_panel.highlight_relax_button(tag))
+        self.processing_queue.put(("highlight_relax_delayed", (tag, 500)))
         self.control_panel.set_status("建议完成放松训练")
 
     def _start_post_relaxation_timeout(self):
