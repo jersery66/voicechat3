@@ -81,6 +81,11 @@ class MainWindow(QMainWindow):
         self._pipeline_generation = 0
         self._pipeline_cancel_generation = -1
 
+        # Relaxation-interrupted-scale resume state
+        self._scale_interrupted_by_relaxation = False
+        self._resume_scale_after_relaxation = None  # {"scale_name": ..., "item": ...}
+        self._post_relaxation_feedback_consumed = False
+
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
         self.relaxation_tool = None
@@ -402,6 +407,39 @@ class MainWindow(QMainWindow):
         try:
             if not self.orchestrator.can_start_pipeline():
                 self.processing_queue.put(("status", "当前不在可对话状态，请稍候"))
+                return
+
+            # Post-relaxation feedback: consume first user message, then resume scale
+            if self._scale_interrupted_by_relaxation and not self._post_relaxation_feedback_consumed:
+                if text is not None:
+                    user_text = text
+                else:
+                    audio_data = self.stt_service.stop_recording()
+                    if len(audio_data) == 0:
+                        self.processing_queue.put(("status", "未检测到语音"))
+                        return
+                    user_text = self.stt_service.transcribe(audio_data)
+                    if not user_text.strip():
+                        self.processing_queue.put(("status", "无法识别内容"))
+                        return
+
+                self._post_relaxation_feedback_consumed = True
+                logger.warning(f"[RelaxResume] consume post-relaxation feedback: {user_text!r}")
+
+                # Restore the interrupted scale
+                resume_info = self._resume_scale_after_relaxation
+                if resume_info and self.pipeline:
+                    self.pipeline.restore_active_scale(
+                        resume_info["scale_name"], resume_info["item"]
+                    )
+
+                # Acknowledge feedback and prompt to continue
+                ack_text = "好，那我们继续把刚才没问完的几个问题补完，问完就结束。"
+                self.chat_panel.add_system_message(ack_text, as_ai=True)
+                self._play_tts_async(ack_text)
+                self.processing_queue.put(("status", "继续量表采样..."))
+                self._scale_interrupted_by_relaxation = False
+                self._resume_scale_after_relaxation = None
                 return
 
             # Clear interim report
@@ -854,6 +892,9 @@ class MainWindow(QMainWindow):
         self._pending_end_after_video = None
         self._completion_status = None
         self._auto_ending_after_relaxation = False
+        self._scale_interrupted_by_relaxation = False
+        self._resume_scale_after_relaxation = None
+        self._post_relaxation_feedback_consumed = False
         self.current_user_id = None
         self.user_info = {}
         self.info_confirmed = False
@@ -1022,6 +1063,15 @@ class MainWindow(QMainWindow):
         if not self.orchestrator.can_play_video():
             return
 
+        # Record scale state before relaxation interrupts it
+        if self.pipeline:
+            active_state = self.pipeline.get_active_scale_state()
+            if active_state:
+                self._scale_interrupted_by_relaxation = True
+                self._resume_scale_after_relaxation = active_state
+                self._post_relaxation_feedback_consumed = False
+                logger.warning(f"[RelaxResume] relaxation will interrupt scale: {active_state}")
+
         self.orchestrator.transition_to(SessionState.VIDEO_PLAYING)
         self.control_panel.stop_all_blinks()
 
@@ -1069,11 +1119,20 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Short continuation message
-        message = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "刚才这个练习先到这里，你可以感受一下现在身体有没有稍微松一点。我们可以继续聊。"
-        self.chat_panel.add_system_message(message)
-        self._play_tts_async(message)
-        self.control_panel.set_status("继续对话中...")
+        # If a scale was interrupted by relaxation, set up for resume
+        if self._scale_interrupted_by_relaxation and self._resume_scale_after_relaxation:
+            # Ask for relaxation feedback first — don't resume scale yet
+            self._post_relaxation_feedback_consumed = False
+            message = "刚才这个练习先到这里，你现在身体有没有稍微松一点？"
+            self.chat_panel.add_system_message(message)
+            self._play_tts_async(message)
+            self.control_panel.set_status("等待反馈后继续...")
+        else:
+            # Normal continuation
+            message = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "刚才这个练习先到这里，你可以感受一下现在身体有没有稍微松一点。我们可以继续聊。"
+            self.chat_panel.add_system_message(message)
+            self._play_tts_async(message)
+            self.control_panel.set_status("继续对话中...")
 
     def _play_game(self):
         if not self.orchestrator.can_play_video():
@@ -1413,6 +1472,21 @@ class MainWindow(QMainWindow):
             self.control_panel.set_status("放松训练结束后将自动完成会话")
             logger.info("[EndFlow] deferred end until video finishes")
             return
+
+        # If scale was interrupted by relaxation and not yet resumed, block end
+        if self._scale_interrupted_by_relaxation and not self._post_relaxation_feedback_consumed:
+            if source != "direct_end_confirmed":
+                self.chat_panel.add_system_message(
+                    "还剩几个问题没补完，补完后报告会更完整。我们再问几个很短的问题就结束。"
+                )
+                # Restore scale so next user message goes through feedback handler
+                if self._resume_scale_after_relaxation and self.pipeline:
+                    self.pipeline.restore_active_scale(
+                        self._resume_scale_after_relaxation["scale_name"],
+                        self._resume_scale_after_relaxation["item"]
+                    )
+                self._end_request_in_progress = False
+                return
 
         # Get readiness state
         state = self._get_end_readiness_state()

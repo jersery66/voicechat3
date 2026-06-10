@@ -598,6 +598,32 @@ class ConversationPipeline:
         self._post_scale_relaxation_done = False
         self._relaxation_recommended_this_session.clear()
 
+    def get_active_scale_state(self) -> Optional[Dict[str, Any]]:
+        """Return current active scale state for relaxation-interruption tracking."""
+        if self._active_scale and self._active_scale_q:
+            return {
+                "scale_name": self._active_scale,
+                "item": self._active_scale_q,
+                "incomplete": True,
+            }
+        return None
+
+    def restore_active_scale(self, scale_name: str, item: int):
+        """Restore active scale after relaxation interruption."""
+        # Find the actual next unanswered item (item might already be scored)
+        next_item = self._next_unanswered_item(scale_name, after_item=item - 1)
+        if next_item is None:
+            # All items answered — scale is complete
+            logger.warning(f"[ScaleDebug] restore skipped: {scale_name} already complete")
+            return
+        self._active_scale = scale_name
+        self._active_scale_q = next_item
+        self._active_scale_waiting_answer = False
+        self._scale_soft_paused = False
+        self._scale_pause_turns = 0
+        self._scale_resume_item = None
+        logger.warning(f"[ScaleDebug] restore active scale after relaxation: {scale_name} Q{next_item}")
+
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
 
