@@ -77,6 +77,10 @@ class MainWindow(QMainWindow):
         self._pre_end_relax_prompted = False
         self._pending_end_after_video = None
 
+        # Pipeline generation token — used to cancel stale results
+        self._pipeline_generation = 0
+        self._pipeline_cancel_generation = -1
+
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
         self.relaxation_tool = None
@@ -317,7 +321,9 @@ class MainWindow(QMainWindow):
         self.is_recording = True
         self.control_panel.set_recording_state(True)
         self.control_panel.set_status("正在录音...")
-        self.control_panel.stop_all_blinks()
+        # Don't kill relaxation highlight when user starts recording during RELAXATION_RECOMMENDED
+        if self.orchestrator.state != SessionState.RELAXATION_RECOMMENDED:
+            self.control_panel.stop_all_blinks()
 
         if self.stt_service:
             threading.Thread(target=self.stt_service.start_recording, daemon=True).start()
@@ -331,10 +337,24 @@ class MainWindow(QMainWindow):
         self.control_panel.set_status("正在处理...")
 
         if self.stt_service:
-            threading.Thread(target=self._run_pipeline, daemon=True).start()
+            self._pipeline_generation += 1
+            gen = self._pipeline_generation
+            threading.Thread(target=self._run_pipeline, args=(None, gen), daemon=True).start()
         else:
             self.control_panel.set_status("测试模式 - 服务未加载")
             self.control_panel.reset_recording()
+
+    def _cancel_active_pipeline(self, reason=""):
+        """Cancel any in-flight pipeline result to prevent stale TTS/UI updates."""
+        self._pipeline_cancel_generation = self._pipeline_generation
+        logger.warning(
+            f"[PipelineCancel] cancel active pipeline gen={self._pipeline_cancel_generation}, reason={reason}"
+        )
+        try:
+            if self.tts_service:
+                self.tts_service.stop_playing()
+        except Exception:
+            pass
 
     def _on_text_submitted(self, text):
         """Handle text input from chat panel."""
@@ -353,14 +373,32 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message("请先填写左侧基本信息并确认")
             return
         self.processing_queue.put(("status", "正在思考..."))
-        threading.Thread(target=self._run_pipeline, args=(text,), daemon=True).start()
+        self._pipeline_generation += 1
+        gen = self._pipeline_generation
+        threading.Thread(target=self._run_pipeline, args=(text, gen), daemon=True).start()
 
     # ==================== Pipeline ====================
 
-    def _run_pipeline(self, text=None):
+    def _run_pipeline(self, text=None, generation=None):
         """Unified pipeline entry point. Runs on a background thread.
-        text=None for voice mode (STT+TTS), text=str for text mode."""
+        text=None for voice mode (STT+TTS), text=str for text mode.
+        generation: monotonically increasing token for stale result suppression."""
+        if generation is None:
+            generation = self._pipeline_generation
         self._pipeline_busy = True
+
+        def safe_put(mt, ct):
+            """Suppress callbacks from stale/cancelled pipeline results."""
+            if generation <= self._pipeline_cancel_generation or self._session_ending:
+                logger.warning(f"[PipelineCancel] suppress callback {mt} from gen={generation}")
+                return
+            if self.orchestrator.state != SessionState.CHATTING and mt in (
+                "append_chat", "replace_last_ai", "stream_text", "start_ai_message"
+            ):
+                logger.warning(f"[PipelineCancel] suppress UI callback {mt} in state={self.orchestrator.state}")
+                return
+            self.processing_queue.put((mt, ct))
+
         try:
             if not self.orchestrator.can_start_pipeline():
                 self.processing_queue.put(("status", "当前不在可对话状态，请稍候"))
@@ -402,12 +440,26 @@ class MainWindow(QMainWindow):
                 self._pending_scale_prompt = None
                 config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data, extra_system_suffix=extra)
 
-            result = self.pipeline.execute(config, lambda mt, ct: self.processing_queue.put((mt, ct)))
+            result = self.pipeline.execute(config, safe_put)
             # Cumulate scale tags — don't overwrite previous rounds' scores
             if result.scale_tags:
                 for scale_name, answers in result.scale_tags.items():
                     self._scale_tags.setdefault(scale_name, {})
                     self._scale_tags[scale_name].update(answers)
+
+            # Drop stale pipeline results (user clicked end/relaxation during processing)
+            if generation <= self._pipeline_cancel_generation or self._session_ending:
+                logger.warning(
+                    f"[PipelineCancel] drop stale pipeline result gen={generation}, "
+                    f"cancel_gen={self._pipeline_cancel_generation}, state={self.orchestrator.state}"
+                )
+                return
+            if self.orchestrator.state != SessionState.CHATTING:
+                logger.warning(
+                    f"[PipelineCancel] drop result in non-chatting state: {self.orchestrator.state}"
+                )
+                return
+
             self._post_pipeline_routing(result)
 
         except Exception as e:
@@ -1290,12 +1342,7 @@ class MainWindow(QMainWindow):
 
     def _on_exit_program(self):
         """退出整个程序。如果当前被试报告未生成，先生成报告再退出。"""
-        # Stop any playing TTS immediately on exit
-        if self.tts_service:
-            try:
-                self.tts_service.stop_playing()
-            except Exception:
-                pass
+        self._cancel_active_pipeline(reason="exit program")
 
         if self._session_ending:
             # Session end flow already running — just mark for quit after it finishes
@@ -1335,6 +1382,7 @@ class MainWindow(QMainWindow):
         if self._session_ending or self._end_decision_open or self._end_request_in_progress:
             logger.info("[EndFlow] duplicate end click ignored")
             return
+        self._cancel_active_pipeline(reason="end session requested")
 
         if not self.models_loaded or self.orchestrator.state in (
             SessionState.SESSION_ENDED, SessionState.IDLE
@@ -1550,6 +1598,7 @@ class MainWindow(QMainWindow):
 
     def _end_session_with_relaxation(self):
         """User chose 'do relaxation first' — recommend training, no report yet."""
+        self._cancel_active_pipeline(reason="end with relaxation chosen")
         self._pending_quit = False
         self._user_explicit_end = False
 
