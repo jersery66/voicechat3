@@ -1971,20 +1971,8 @@ class MainWindow(QMainWindow):
 
                 self.orchestrator.transition_to(SessionState.SESSION_ENDED)
 
-                # --- Phase 2: TTS in background, do NOT block report generation ---
-                # Exit path: don't play long farewell audio.
-                # End session: play farewell in background thread.
-                farewell_tts_thread = None
-                if self.tts_service and full_feedback and not is_exit:
-                    farewell_tts_thread = threading.Thread(
-                        target=self._safe_play_farewell_tts,
-                        args=(full_feedback,),
-                        daemon=True
-                    )
-                    farewell_tts_thread.start()
-
-                # --- Phase 3: Save raw snapshot → Generate report + PDF ---
-                # Reports are the priority — generate immediately, don't wait for TTS.
+                # --- Phase 2: Save raw snapshot → Generate report + PDF FIRST ---
+                # Reports MUST complete before farewell TTS plays.
                 self._current_report_generating = True
                 self.processing_queue.put(("status", "正在保存会话数据..."))
                 raw_snapshot_saved = False
@@ -2079,10 +2067,14 @@ class MainWindow(QMainWindow):
                 logger.warning(f"Report generation failed: {e}")
 
             finally:
-                # Wait for farewell TTS to finish before clearing UI
-                if not is_exit and farewell_tts_thread is not None and farewell_tts_thread.is_alive():
-                    logger.info("[SessionEnd] waiting farewell TTS before clearing UI")
-                    farewell_tts_thread.join(timeout=90)
+                # --- Phase 3: Play farewell TTS AFTER report/PDF is done ---
+                if not is_exit and full_feedback and self.tts_service:
+                    logger.info("[SessionEnd] report/PDF done, now playing farewell TTS")
+                    try:
+                        self.tts_service.generate_and_play(full_feedback)
+                        logger.info("[SessionEnd] farewell TTS finished")
+                    except Exception as e:
+                        logger.warning(f"[SessionEnd] farewell TTS failed: {e}")
 
                 if is_exit:
                     logger.info("[ExitDebug] report done, queuing quit")
