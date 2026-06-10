@@ -429,6 +429,8 @@ class ControlPanel(FrostedPanel):
         self.btn_muscle.setEnabled(enabled)
         self.btn_meditation.setEnabled(enabled)
         self.btn_game.setEnabled(enabled)
+        if hasattr(self, 'btn_media'):
+            self.btn_media.setEnabled(enabled)
 
     @staticmethod
     def _make_progress_bar(bar_color="#4CAF50"):

@@ -32,7 +32,7 @@ REC_TAGS = {
     r'\[REC_GAME\]': 'game',
 }
 
-SCALE_PATTERN = re.compile(r'\[SCALE:(\w+-\d+):Q(\d+):S(\d+)\]', re.IGNORECASE)
+SCALE_PATTERN = re.compile(r'\[SCALE:(\w+-\d+):Q(\d+):S?(\d+)\]', re.IGNORECASE)
 
 # Pre-compiled regexes for hot-path tag stripping (avoids re-compiling per chunk)
 _RE_REC_TAG = re.compile(r'\[REC_[A-Z_]+\]')
@@ -475,7 +475,7 @@ def is_user_explicit_end_text(text: str) -> bool:
     explicit_end = [
         "不想聊了", "今天不聊了", "今天先这样", "先到这吧", "先这样吧",
         "我要结束", "结束吧", "不说了", "我想休息了", "我累了想睡了",
-        "可以结束了", "聊完了", "好多了", "舒服多了", "轻松多了", "没事了", "现在好多了",
+        "可以结束了", "聊完了", "退出",
     ]
     return any(x in t for x in explicit_end)
 
@@ -927,11 +927,13 @@ class ConversationPipeline:
             if self._scale_pause_turns <= 0:
                 # Pause expired — check if user is back on topic
                 if agent_route and agent_route.get("scale_action") in ("start", "continue"):
+                    # Don't resume to stale item — keep current if it's ahead
+                    if self._scale_resume_item and self._scale_resume_item > self._active_scale_q:
+                        self._active_scale_q = self._scale_resume_item
                     logger.warning(
-                        f"[ScaleDebug] resume {self._active_scale} Q{self._scale_resume_item} "
+                        f"[ScaleDebug] resume {self._active_scale} Q{self._active_scale_q} "
                         f"after soft pause"
                     )
-                    self._active_scale_q = self._scale_resume_item
                     self._active_scale_waiting_answer = True
                     self._scale_soft_paused = False
 
