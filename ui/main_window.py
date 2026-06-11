@@ -427,15 +427,19 @@ class MainWindow(QMainWindow):
                 self._post_relaxation_feedback_consumed = True
                 logger.warning(f"[RelaxResume] consume post-relaxation feedback: {user_text!r}")
 
-                # Restore the interrupted scale
+                # Restore the interrupted scale and get the question phrasing
                 resume_info = self._resume_scale_after_relaxation
+                natural_q = ""
                 if resume_info and self.pipeline:
-                    self.pipeline.restore_active_scale(
+                    natural_q = self.pipeline.restore_active_scale(
                         resume_info["scale_name"], resume_info["item"]
-                    )
+                    ) or ""
 
-                # Acknowledge feedback and prompt to continue
-                ack_text = "好，那我们继续把刚才没问完的几个问题补完，问完就结束。"
+                # Acknowledge feedback and prompt to continue with the actual question
+                if natural_q:
+                    ack_text = f"好，那我们继续把刚才没问完的几个问题补完。{natural_q}"
+                else:
+                    ack_text = "好，那我们继续把刚才没问完的几个问题补完。"
                 self.chat_panel.add_system_message(ack_text, as_ai=True)
                 self._play_tts_async(ack_text)
                 self.processing_queue.put(("status", "继续量表采样..."))
@@ -1579,7 +1583,8 @@ class MainWindow(QMainWindow):
                 self.control_panel.set_buttons_enabled(True)
 
     def _end_session_continue_chat(self):
-        """User chose to continue chatting — resume, set pending scale prompt."""
+        """User chose to continue — enter force-complete scales mode."""
+        self._force_complete_scales = True
         incomplete = []
         if self.pipeline and hasattr(self.pipeline, "get_incomplete_scales"):
             try:
@@ -1587,9 +1592,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         if incomplete:
-            prompt = self.pipeline.get_remaining_scale_prompt()
-            if prompt:
-                self._pending_scale_prompt = prompt
             first = incomplete[0]
             scale_name = first["scale_name"]
             remaining = first.get("remaining_nums", [])

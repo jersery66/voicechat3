@@ -59,23 +59,38 @@ def parse_scale_tags(text: str) -> Dict[str, Dict[int, int]]:
     return results
 
 
-def infer_scale_score_from_text(text: str, scale_name: str) -> Optional[int]:
+def infer_scale_score_from_text(text: str, scale_name: str, item: int = None) -> Optional[int]:
     """Fallback: infer a scale score from the user's plain-text answer.
 
     Used when the LLM fails to output a [SCALE:...] tag.  Returns None if
     the text doesn't match any known option pattern.
+
+    When item is provided, frequency words only apply if the text also
+    contains symptom keywords for that item. This prevents "没有，在戒毒所
+    里面基本每天都很紧张" from scoring PHQ-9 Q5=3 (it should be Q5=0).
     """
     t = text.strip()
+    if not t:
+        return None
+
+    # Check if text contains symptom keywords for the current item
+    _item_symptom_match = True
+    if item is not None and scale_name == "PHQ-9":
+        item_keywords = PHQ_POSITIVE_KEYWORDS_BY_ITEM.get(item, [])
+        _item_symptom_match = any(kw in t for kw in item_keywords)
 
     if scale_name in ("PHQ-9", "GAD-7"):
-        if any(x in t for x in ["完全不会", "没有", "不会"]):
+        # Denial: "没有"/"不会" → 0 (only if no conflicting symptom keywords)
+        if any(x in t for x in ["完全不会", "不会"]) or (t in {"没有", "没"}):
             return 0
-        if any(x in t for x in ["好几天", "几天", "偶尔"]):
-            return 1
-        if any(x in t for x in ["一半以上", "大多数", "超过一半"]):
-            return 2
-        if any(x in t for x in ["几乎每天", "每天", "天天"]):
-            return 3
+        # Frequency: only score if text matches current item's symptoms
+        if _item_symptom_match:
+            if any(x in t for x in ["好几天", "几天", "偶尔"]):
+                return 1
+            if any(x in t for x in ["一半以上", "大多数", "超过一半"]):
+                return 2
+            if any(x in t for x in ["几乎每天", "每天", "天天"]):
+                return 3
 
     if scale_name == "PCL-5":
         if any(x in t for x in ["完全没有", "没有"]):
@@ -608,31 +623,45 @@ class ConversationPipeline:
             }
         return None
 
-    def restore_active_scale(self, scale_name: str, item: int):
-        """Restore active scale after relaxation interruption."""
+    def restore_active_scale(self, scale_name: str, item: int) -> Optional[str]:
+        """Restore active scale after relaxation interruption.
+
+        Returns the natural question phrasing for the resumed item, or None
+        if scale is already complete.
+        """
         # Find the actual next unanswered item (item might already be scored)
         next_item = self._next_unanswered_item(scale_name, after_item=item - 1)
         if next_item is None:
-            # All items answered — scale is complete
             logger.warning(f"[ScaleDebug] restore skipped: {scale_name} already complete")
-            return
+            return None
         self._active_scale = scale_name
         self._active_scale_q = next_item
         self._active_scale_waiting_answer = False
         self._scale_soft_paused = False
         self._scale_pause_turns = 0
         self._scale_resume_item = None
+        natural = NATURAL_SCALE_QUESTIONS.get((scale_name, next_item), "")
         logger.warning(f"[ScaleDebug] restore active scale after relaxation: {scale_name} Q{next_item}")
+        return natural
 
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
+
+        Checks administered_scales ∪ scale_answers.keys() ∪ active_scale
+        to ensure active scale even without scores is included.
 
         Each entry: {scale_name, total, answered, remaining_questions,
                      remaining_nums}.
         """
         from services.scales import SCALES
+        # Build candidate set: all scales that have been touched
+        candidates = set(self._administered_scales)
+        candidates.update(self._scale_answers.keys())
+        if self._active_scale:
+            candidates.add(self._active_scale)
+
         incomplete = []
-        for scale_name in self._administered_scales:
+        for scale_name in candidates:
             scale_def = SCALES.get(scale_name)
             if not scale_def:
                 continue
@@ -698,14 +727,26 @@ class ConversationPipeline:
                     "answered": score is not None,
                 })
 
+            # For incomplete scales, don't report severity
+            if completed:
+                severity = score_summary["severity"]
+                total_score_label = "总分"
+            else:
+                severity = "未完成，暂不判定"
+                total_score_label = "当前累计分"
+
+            missing_items = [i for i in range(1, total_items + 1) if i not in answers]
+
             results[scale_name] = {
                 "scale_name": scale_def["name"],
                 "completed": completed,
                 "answered": len(answers),
                 "total_items": total_items,
                 "total_score": score_summary["total"],
+                "total_score_label": total_score_label,
                 "max_score": score_summary["max_score"],
-                "severity": score_summary["severity"],
+                "severity": severity,
+                "missing_items": missing_items,
                 "items": items,
             }
 
@@ -1042,6 +1083,18 @@ class ConversationPipeline:
             if hint:
                 system_suffix += hint
 
+        # --- Deterministic scale trigger fallback ---
+        # If agent returned none/pause/low-confidence but user text has clear
+        # symptom keywords, force-start the appropriate scale.
+        if not self._active_scale and allow_new_scale and not _waiting_for_answer:
+            _detected = self._deterministic_scale_trigger(result.user_text)
+            if _detected:
+                scale_name, item = _detected
+                self._active_scale = scale_name
+                self._active_scale_q = item
+                self._active_scale_waiting_answer = False
+                logger.warning(f"[ScaleTriggerHard] {scale_name} Q{item} from deterministic fallback")
+
         # Scale pause countdown
         if self._scale_pause_turns > 0:
             self._scale_pause_turns -= 1
@@ -1065,6 +1118,36 @@ class ConversationPipeline:
                 final_suffix += "\n" + config.extra_system_suffix
             else:
                 final_suffix = config.extra_system_suffix
+
+        # --- Pre-LLM positive_pending check ---
+        # If active scale item has positive symptoms but no frequency,
+        # inject mandatory frequency follow-up BEFORE LLM generates.
+        if self._active_scale and self._active_scale_waiting_answer:
+            answered = self._scale_answers.get(self._active_scale, {})
+            if self._active_scale_q not in answered:
+                _pre_positive = self._is_positive_pending_frequency(
+                    self._active_scale, self._active_scale_q, result.user_text
+                )
+                if _pre_positive:
+                    _item_hint = NATURAL_SCALE_QUESTIONS.get(
+                        (self._active_scale, self._active_scale_q), ""
+                    )
+                    freq_hint = f"""
+【必须追问频率】用户已明确表达存在症状，但缺少频率信息。
+当前量表：{self._active_scale}
+当前题：Q{self._active_scale_q}
+当前维度：{_item_hint}
+请自然追问最近两周频率。只能问这一件事。
+不要说量表、评分、PHQ。不能结束，不能推荐放松。
+"""
+                    if final_suffix:
+                        final_suffix += "\n" + freq_hint
+                    else:
+                        final_suffix = freq_hint
+                    logger.warning(
+                        f"[ScaleDebug] pre-LLM positive_pending: {self._active_scale} "
+                        f"Q{self._active_scale_q}, injecting frequency hint"
+                    )
 
         # --- LLM stream + Agent classification (concurrent) ---
         # Start LLM immediately with RAG/scale context; agent runs in parallel.
@@ -1590,6 +1673,29 @@ class ConversationPipeline:
         self._active_scale_waiting_answer = False
         logger.warning(f"[ScaleDebug] advance {scale_name} to Q{next_item}")
 
+    def _deterministic_scale_trigger(self, text: str) -> Optional[tuple]:
+        """Hard fallback: if agent fails but text has clear symptoms, force-start scale.
+
+        Returns (scale_name, item) or None.
+        """
+        t = (text or "").strip()
+        if not t:
+            return None
+
+        # PHQ-9 Q2: depressed mood
+        if any(x in t for x in ["心情不好", "不开心", "低落", "沮丧", "难受", "绝望"]):
+            return ("PHQ-9", 2)
+
+        # PHQ-9 Q1: anhedonia
+        if any(x in t for x in ["没兴趣", "没意思", "提不起劲", "做什么都没劲"]):
+            return ("PHQ-9", 1)
+
+        # GAD-7 Q1: anxiety
+        if any(x in t for x in ["焦虑", "紧张", "心慌", "担心", "不安"]):
+            return ("GAD-7", 1)
+
+        return None
+
     def _is_positive_pending_frequency(self, scale_name: str, item: int, text: str) -> bool:
         """Check if user confirmed symptom exists but didn't provide frequency.
 
@@ -1737,10 +1843,20 @@ class ConversationPipeline:
                 recent = [m["content"] for m in self.llm.conversation_history[-6:]
                           if m.get("role") == "user"]
                 if recent:
-                    rag_text = "\n".join(recent[-3:] + [text])
+                    # Deduplicate repeated greetings
+                    cleaned_recent = []
+                    for r in recent[-3:]:
+                        normalized = r.strip("。！？!?,， ").lower()
+                        if normalized in {"你好", "你好呀", "嗨", "哈喽"}:
+                            if not any(c.strip("。！？!?,， ").lower() == normalized for c in cleaned_recent):
+                                cleaned_recent.append(r)
+                        else:
+                            cleaned_recent.append(r)
+                    rag_text = "\n".join(cleaned_recent + [text])
             rag_suffix = self.rag.get_system_suffix(rag_text)
-            # Truncate RAG — tighter when active scale to reduce agent truncation
-            max_rag = 500 if self._active_scale else 1200
+            # Truncate RAG — tighter when active scale or positive_pending
+            _rag_active = self._active_scale or (self._active_scale_waiting_answer and self._is_positive_pending_frequency(self._active_scale, self._active_scale_q, text))
+            max_rag = 200 if _rag_active else 1200
             if rag_suffix and len(rag_suffix) > max_rag:
                 rag_suffix = rag_suffix[:max_rag] + "\n【知识库已截断】"
             logger.warning(f"[RagDebug] user_text={text!r} rag_text={rag_text!r} "
