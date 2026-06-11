@@ -967,14 +967,25 @@ class ConversationPipeline:
         # If we're waiting for an answer on current item, agent can't change it
         _waiting_for_answer = self._active_scale and self._active_scale_waiting_answer
 
+        # Check if current item is in positive_pending_frequency state
+        _positive_pending_active = False
+        if self._active_scale and self._active_scale_waiting_answer:
+            answered = self._scale_answers.get(self._active_scale, {})
+            if self._active_scale_q not in answered:
+                _positive_pending_active = self._is_positive_pending_frequency(
+                    self._active_scale, self._active_scale_q, result.user_text
+                )
+
         if agent_route and agent_route.get("confidence", 0) >= SCALE_ROUTE_CONFIDENCE:
             scale_action = agent_route.get("scale_action", "none")
             suggested_scale = agent_route.get("scale")
             probe_hint = agent_route.get("probe_hint", "")
 
             if scale_action == "pause":
-                # Soft pause — don't clear active scale, just pause probing
-                if self._active_scale:
+                # Don't pause during positive_pending_frequency — must ask for frequency
+                if _positive_pending_active:
+                    logger.warning(f"[ScaleDebug] ignore agent pause during positive_pending: {self._active_scale} Q{self._active_scale_q}")
+                elif self._active_scale:
                     self._soft_pause_scale(reason=agent_route.get("reason", "agent_pause"))
                 else:
                     self._scale_pause_turns = 2
@@ -990,10 +1001,16 @@ class ConversationPipeline:
                     else:
                         self._active_scale_q = self._next_unanswered_item(suggested_scale)
                     self._active_scale_waiting_answer = False
-                    logger.warning(
-                        f"[ScaleDebug] agent start: {suggested_scale} Q{self._active_scale_q}, "
-                        f"confidence={agent_route.get('confidence')}, "
-                        f"reason={agent_route.get('reason', '')[:60]}"
+                    # Log specific trigger reason
+                    if suggested_scale == "PHQ-9" and self._active_scale_q == 2:
+                        logger.warning(f"[ScaleTrigger] depressed mood detected, start PHQ-9 Q2")
+                    elif suggested_scale == "PHQ-9" and self._active_scale_q == 1:
+                        logger.warning(f"[ScaleTrigger] anhedonia detected, start PHQ-9 Q1")
+                    else:
+                        logger.warning(
+                            f"[ScaleDebug] agent start: {suggested_scale} Q{self._active_scale_q}, "
+                            f"confidence={agent_route.get('confidence')}, "
+                            f"reason={agent_route.get('reason', '')[:60]}"
                     )
                     # Build scale context hint with item core info
                     hint = self._build_scale_context_hint(suggested_scale, self._active_scale_q, agent_route)
@@ -1239,16 +1256,21 @@ class ConversationPipeline:
                         self._active_scale, current_q, result.user_text
                     )
                     if _strong or _positive_pending:
-                        # Symptoms confirmed — ask for frequency specifically
+                        # Symptoms confirmed — MUST ask for frequency
                         _item_hint = NATURAL_SCALE_QUESTIONS.get((self._active_scale, current_q), "")
                         system_suffix += f"""
-【隐性症状采样】用户已明确表达存在症状，但缺少频率信息。
+【必须追问频率】用户已明确表达存在症状，但缺少频率信息。
+当前量表：{self._active_scale}
+当前题：Q{current_q}
 当前维度：{_item_hint}
-不要再问"有没有这个症状"。先承接情感，然后追问频率。
+不要再问"有没有这个症状"。
+请自然追问最近两周频率。
 示例："这种感觉最近是偶尔几天，还是大多数时间都会有？"
-不要说量表、评分、PHQ。不要跳过情感承接直接问。
+只能问这一件事。不能结束，不能推荐放松，不能泛泛咨询。
 """
-                        logger.warning(f"[ScaleDebug] {self._active_scale} Q{current_q} positive_pending_frequency")
+                        # Protect from agent pause during positive_pending
+                        self._active_scale_waiting_answer = True
+                        logger.warning(f"[ScaleDebug] {self._active_scale} Q{current_q} positive_pending_frequency; force frequency follow-up")
                     else:
                         hint = self._build_scale_context_hint(self._active_scale, current_q, {})
                         if hint:
@@ -1463,14 +1485,16 @@ class ConversationPipeline:
 """
 
     def _next_unanswered_item(self, scale_name: str, after_item: int = 0):
-        """Get the next unanswered question number after after_item, or None if complete.
+        """Get the next unanswered question number, or None if complete.
 
-        Advances forward only — never goes back to earlier items.
+        Scans from 1 to find all gaps — ensures Q1 gets back-filled
+        even if Q2 was answered first.
         """
         from services.scales import SCALES
         total = len(SCALES.get(scale_name, {}).get("questions", []))
         answered = self._scale_answers.get(scale_name, {})
-        for i in range(after_item + 1, total + 1):
+        # Always scan from 1 to find gaps (back-fill Q1 if Q2 answered first)
+        for i in range(1, total + 1):
             if i not in answered:
                 return i
         return None

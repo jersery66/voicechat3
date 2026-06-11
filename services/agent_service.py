@@ -712,6 +712,9 @@ class AgentService:
 - "好久了""每天吧""没有"等短句要结合上下文，不能单独当噪声
 - 前2轮建立关系，第3轮后可以隐性采样
 - 用户焦虑/紧张/失眠/疲惫时 recommend_relaxation=true
+- 用户明确表达"心情不好/不开心/难受/沮丧/低落/没意思/提不起劲"时，必须scale_action=start scale=PHQ-9
+- 低落/不开心→item=2；没兴趣/没意思/提不起劲→item=1
+- 不要因为"只是表达情绪"就输出scale_action=none
 
 示例1：用户说"对，我心情不好"，上下文有持续低落
 {"scale_action":"start","scale":"PHQ-9","item":2,"recommend_relaxation":false,"relaxation_type":null,"risk_level":0,"immediate_crisis":false,"confidence":0.78,"reason":"持续低落情绪"}
