@@ -750,8 +750,9 @@ AGENT_SUMMARY_SYSTEM_MESSAGE = """你是一个对话摘要压缩器。将心理�
 
 摘要应该简洁（150字以内），用第三人称描述，供后续对话参考。"""
 
-AGENT_TIMEOUT = 6            # 意图分类超时（秒）
+AGENT_TIMEOUT = 3            # 意图分类超时（秒）
 AGENT_REPORT_TIMEOUT = 60    # 报告生成超时（秒）
+AGENT_ROUTE_ENABLED = False  # 临时禁用 AgentRoute，直接走主 LLM
 
 # ============== Media Scene Mapping ==============
 # 情绪 → 影音场景映射（优先放松训练，影音仅在主动提出时推荐）

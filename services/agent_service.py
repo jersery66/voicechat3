@@ -69,6 +69,8 @@ class AgentService:
         self.client = OpenAI(
             base_url=AGENT_MODEL_SERVER,
             api_key=AGENT_API_KEY,
+            timeout=3.0,
+            max_retries=0,
         )
         self.model = AGENT_MODEL
         self._available: Optional[bool] = None

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.logger import get_logger
 from services.metrics import get_metrics
-from config import MIN_ROUNDS_BEFORE_SCALE, SCALE_ROUTE_CONFIDENCE, RELAX_ROUTE_CONFIDENCE
+from config import MIN_ROUNDS_BEFORE_SCALE, SCALE_ROUTE_CONFIDENCE, RELAX_ROUTE_CONFIDENCE, AGENT_ROUTE_ENABLED
 
 logger = get_logger(__name__)
 
@@ -932,7 +932,9 @@ class ConversationPipeline:
 
         # --- Agent unified routing (3B model decides scale/relaxation/crisis) ---
         agent_route = None
-        if self.agent and self.agent.is_available():
+        if not AGENT_ROUTE_ENABLED:
+            logger.warning("[AgentRoute] skipped: AGENT_ROUTE_ENABLED=False")
+        elif self.agent and self.agent.is_available():
             try:
                 relax_done = self._get_relaxation_done()
                 agent_route = self.agent.route_conversation_actions(
