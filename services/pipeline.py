@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.logger import get_logger
 from services.metrics import get_metrics
-from config import MIN_ROUNDS_BEFORE_SCALE, SCALE_ROUTE_CONFIDENCE, RELAX_ROUTE_CONFIDENCE, AGENT_ROUTE_ENABLED
+from config import MIN_ROUNDS_BEFORE_SCALE, SCALE_ROUTE_CONFIDENCE, RELAX_ROUTE_CONFIDENCE, AGENT_ROUTE_ENABLED, AGENT_ROUTE_COOLDOWN_ROUNDS
 
 logger = get_logger(__name__)
 
@@ -111,15 +111,15 @@ def infer_scale_score_from_text(text: str, scale_name: str, item: int = None) ->
 # Keys are (scale_name, question_number).  Used by the programmatic question
 # branch so the TTS reads like a casual follow-up rather than a questionnaire.
 NATURAL_SCALE_QUESTIONS = {
-    ("PHQ-9", 1): "这阵子做事情的时候，兴趣和劲头怎么样？",
-    ("PHQ-9", 2): "心情这块儿呢，会不会经常低落、沮丧，或者觉得没希望？",
-    ("PHQ-9", 3): "睡眠怎么样，入睡、睡踏实，或者睡太多这几种情况有没有？",
-    ("PHQ-9", 4): "白天精力怎么样，会不会总觉得累、没力气？",
-    ("PHQ-9", 5): "吃饭这块儿有没有变化，比如吃不下，或者吃得比平时多？",
-    ("PHQ-9", 6): "有没有常觉得自己不够好，或者让家里人失望了？",
-    ("PHQ-9", 7): "注意力怎么样，看东西或者做点事的时候，会不会很难集中？",
-    ("PHQ-9", 8): "最近动作、说话有没有明显变慢，或者反过来坐不住、烦躁得厉害？",
-    ("PHQ-9", 9): "有没有出现过不想活，或者伤害自己的念头？",
+    ("PHQ-9", 1): "这段时间，你平时会觉得一些原本还能做的事，现在也提不起劲吗？",
+    ("PHQ-9", 2): "这种不好受的状态，是偶尔冒出来，还是这两周里经常在？",
+    ("PHQ-9", 3): "最近睡眠怎么样？是比较难睡着、容易醒，还是反而睡得特别多？",
+    ("PHQ-9", 4): "白天的精神头怎么样？会不会经常觉得没力气、撑着过一天？",
+    ("PHQ-9", 5): "吃饭这块最近有变化吗？比如没胃口，或者比平时吃得多很多。",
+    ("PHQ-9", 6): "你会不会有时候对自己特别不满意，或者觉得自己挺失败的？",
+    ("PHQ-9", 7): "最近做事或者聊天的时候，注意力会不会比较难集中？",
+    ("PHQ-9", 8): "这段时间别人有没有说你反应变慢了，或者你自己感觉坐立不安、停不下来？",
+    ("PHQ-9", 9): "有时候人难受到一定程度，会冒出不想撑下去的念头。你最近有没有出现过类似想法？",
     ("GAD-7", 1): "这阵子紧张、焦虑、心里发急的情况多不多？",
     ("GAD-7", 2): "担心一起来的时候，能不能停下来？",
     ("GAD-7", 3): "会不会很多事都忍不住担心？",
@@ -584,6 +584,24 @@ class ConversationPipeline:
         self._pending_relaxation_after_scale: Optional[str] = None  # hold relaxation until scale done
         self._relaxation_candidate: Optional[str] = None  # agent-proposed candidate for current turn
         self._crisis_lock_turns: int = 0            # turns to block all scales after crisis
+        self._agent_route_cooldown: int = 0         # cooldown after agent route failure
+
+        # Flow state for natural conversation
+        self.scale_active: bool = False
+        self.scale_name: Optional[str] = None
+        self.scale_current_item: int = 0
+        self.scale_completed: bool = False
+        self.scale_refused_rounds: int = 0
+        self.scale_defer_until_round: int = 0
+        self.last_scale_ask_round: int = -999
+        self.consecutive_scale_asks: int = 0
+
+        self.relaxation_recommended: bool = False
+        self.relaxation_active: bool = False
+        self.relaxation_completed: bool = False
+
+        self.exit_requested: bool = False
+        self.finish_mode: bool = False
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -608,8 +626,22 @@ class ConversationPipeline:
         self._scale_queue.clear()
         self._scale_pause_turns = 0
         self._crisis_lock_turns = 0
+        self._agent_route_cooldown = 0
         self._scale_soft_paused = False
         self._scale_resume_item = 1
+        self.scale_active = False
+        self.scale_name = None
+        self.scale_current_item = 0
+        self.scale_completed = False
+        self.scale_refused_rounds = 0
+        self.scale_defer_until_round = 0
+        self.last_scale_ask_round = -999
+        self.consecutive_scale_asks = 0
+        self.relaxation_recommended = False
+        self.relaxation_active = False
+        self.relaxation_completed = False
+        self.exit_requested = False
+        self.finish_mode = False
         self._post_scale_relaxation_done = False
         self._relaxation_recommended_this_session.clear()
 
@@ -931,9 +963,20 @@ class ConversationPipeline:
         current_rounds = self.report.get_round_count() if self.report else 0
 
         # --- Agent unified routing (3B model decides scale/relaxation/crisis) ---
+        _AGENT_FALLBACK = {
+            "scale_action": "none", "scale": None, "item": None,
+            "probe_hint": "", "recommend_relaxation": False,
+            "relaxation_type": None, "recommend_game": False,
+            "game_type": None, "recommend_media": False,
+            "media_type": None, "exit_intent": False,
+            "risk_level": 0, "confidence": 0.0, "reason": "agent fallback",
+        }
         agent_route = None
         if not AGENT_ROUTE_ENABLED:
             logger.warning("[AgentRoute] skipped: AGENT_ROUTE_ENABLED=False")
+        elif self._agent_route_cooldown > 0:
+            self._agent_route_cooldown -= 1
+            logger.warning(f"[AgentRoute] cooldown remaining={self._agent_route_cooldown}")
         elif self.agent and self.agent.is_available():
             try:
                 relax_done = self._get_relaxation_done()
@@ -945,21 +988,20 @@ class ConversationPipeline:
                     collected_scales=self._scale_answers,
                     relaxation_done=relax_done,
                 )
+                self._agent_route_cooldown = 0  # reset cooldown on success
                 logger.warning(
                     f"[AgentRoute] user={result.user_text!r} "
-                    f"scale_action={agent_route.get('scale_action')} "
+                    f"action={agent_route.get('scale_action')} "
                     f"scale={agent_route.get('scale')} "
                     f"item={agent_route.get('item')} "
-                    f"probe_hint={agent_route.get('probe_hint', '')[:80]} "
-                    f"recommend_relaxation={agent_route.get('recommend_relaxation')} "
-                    f"relaxation_type={agent_route.get('relaxation_type')} "
                     f"confidence={agent_route.get('confidence')} "
                     f"risk={agent_route.get('risk_level')} "
-                    f"reason={agent_route.get('reason', '')[:100]}"
+                    f"reason={agent_route.get('reason', '')[:60]}"
                 )
             except Exception as e:
                 logger.warning(f"[AgentRoute] failed: {e}")
-                agent_route = None
+                self._agent_route_cooldown = AGENT_ROUTE_COOLDOWN_ROUNDS
+                agent_route = _AGENT_FALLBACK
 
         # Hard safety: crisis keywords always take priority (not dependent on agent)
         if self.agent:
