@@ -690,39 +690,35 @@ class AgentService:
 
 字段必须完整，类型如下：
 {
-  "scale_action": "none" 或 "start" 或 "continue" 或 "pause",
+  "action": "chat|start_scale|continue_scale|recommend_relaxation|recommend_game|recommend_media|exit",
   "scale": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
-  "item": null 或 1-9 的整数,
-  "recommend_relaxation": true 或 false,
-  "relaxation_type": null 或 "breathing" 或 "muscle" 或 "meditation" 或 "game",
-  "risk_level": 0-10 的整数,
-  "immediate_crisis": true 或 false,
-  "confidence": 0.0-1.0 的小数,
-  "reason": "12字以内原因"
+  "target_item": null 或 "Q1"-"Q9",
+  "intervention_type": null 或 "breathing" 或 "muscle_relaxation" 或 "mindfulness" 或 "game" 或 "media",
+  "urgency": 0-10,
+  "risk_level": 0-10,
+  "confidence": 0.0-1.0,
+  "reason": "15字以内"
 }
 
-要求：只输出单行JSON，不要换行。reason不超过12字。题目文本由系统自动补齐，不要输出。
+要求：只输出单行JSON，不要换行。不要输出题目文本。
 
 规则：
-- 用户明确表达症状时 scale_action="start"
-- 已采样但需继续时 scale_action="continue"
-- 用户抗拒/换话题时 scale_action="pause"
-- 否则 scale_action="none"
-- 抑郁/低落/没兴趣/没意思→PHQ-9，焦虑/紧张/担心/心慌→GAD-7，创伤/噩梦→PCL-5
-- item: PHQ-9选1-9(1兴趣下降,2低落,3睡眠,4疲倦,5食欲,6自责,7注意力,8迟缓/激越,9自伤)
-- item: GAD-7选1-7(1紧张,2不可控担忧,3过度担忧,4放松困难,5坐立不安,6易怒,7恐惧预期)
-- "好久了""每天吧""没有"等短句要结合上下文，不能单独当噪声
+- 普通聊天：action="chat"
+- 用户明确表达症状时：action="start_scale"
+- 已采样但需继续时：action="continue_scale"
+- 用户焦虑/紧张/失眠/疲惫时：action="recommend_relaxation"
+- 用户想玩/无聊时：action="recommend_game"
+- 用户想看视频/听歌时：action="recommend_media"
+- 用户明确想退出时：action="exit"
+- 抑郁/低落/没兴趣→scale="PHQ-9"，焦虑/紧张/担心→scale="GAD-7"，创伤/噩梦→scale="PCL-5"
 - 前2轮建立关系，第3轮后可以隐性采样
-- 用户焦虑/紧张/失眠/疲惫时 recommend_relaxation=true
-- 用户明确表达"心情不好/不开心/难受/沮丧/低落/没意思/提不起劲"时，必须scale_action=start scale=PHQ-9
-- 低落/不开心→item=2；没兴趣/没意思/提不起劲→item=1
-- 不要因为"只是表达情绪"就输出scale_action=none
+- 不要因为"只是表达情绪"就输出start_scale
 
-示例1：用户说"对，我心情不好"，上下文有持续低落
-{"scale_action":"start","scale":"PHQ-9","item":2,"recommend_relaxation":false,"relaxation_type":null,"risk_level":0,"immediate_crisis":false,"confidence":0.78,"reason":"持续低落情绪"}
+示例1：用户说"对，我心情不好"
+{"action":"start_scale","scale":"PHQ-9","target_item":"Q2","intervention_type":null,"urgency":3,"risk_level":0,"confidence":0.78,"reason":"持续低落情绪"}
 
 示例2：用户说"睡不好，很焦虑"
-{"scale_action":"start","scale":"GAD-7","item":1,"recommend_relaxation":true,"relaxation_type":"breathing","risk_level":0,"immediate_crisis":false,"confidence":0.82,"reason":"焦虑伴睡不好"}"""
+{"action":"recommend_relaxation","scale":null,"target_item":null,"intervention_type":"breathing","urgency":2,"risk_level":0,"confidence":0.82,"reason":"焦虑伴睡不好"}"""
 
         timeout = timeout or AGENT_TIMEOUT
         try:
