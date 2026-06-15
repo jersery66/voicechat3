@@ -440,9 +440,10 @@ class MainWindow(QMainWindow):
                     ack_text = f"好，那我们继续把刚才没问完的几个问题补完。{natural_q}"
                 else:
                     ack_text = "好，那我们继续把刚才没问完的几个问题补完。"
-                self.chat_panel.add_system_message(ack_text, as_ai=True)
-                self._play_tts_async(ack_text)
-                self.processing_queue.put(("status", "继续量表采样..."))
+                # Thread-safe UI updates
+                self._emit_ai_message(ack_text)
+                self._emit_tts(ack_text)
+                self._emit_status("继续量表采样...")
                 self._scale_interrupted_by_relaxation = False
                 self._resume_scale_after_relaxation = None
                 return
