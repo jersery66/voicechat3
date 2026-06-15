@@ -1110,9 +1110,14 @@ class ConversationPipeline:
                 logger.warning(f"[ScaleDebug] agent continue: {self._active_scale} Q{self._active_scale_q}")
 
             # Relaxation: agent proposes candidate, only set after spoken_text sync
+            # Skip if any relaxation already recommended this session
             self._relaxation_candidate = None
-            if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE:
+            if (agent_route.get("recommend_relaxation")
+                and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE
+                and not self._relaxation_recommended_this_session):
                 self._relaxation_candidate = agent_route.get("relaxation_type") or "breathing"
+                # Mark as recommended to prevent duplicate recommendations
+                self._relaxation_recommended_this_session.add(self._relaxation_candidate)
                 logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
                 # Inject hint so LLM naturally mentions relaxation in its reply
                 _relax_hint = {
