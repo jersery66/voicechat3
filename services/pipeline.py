@@ -1735,13 +1735,21 @@ class ConversationPipeline:
         if not t:
             return None
 
+        # PHQ-9 Q1: anhedonia
+        if any(x in t for x in ["没兴趣", "没意思", "提不起劲", "做什么都没劲"]):
+            return ("PHQ-9", 1)
+
         # PHQ-9 Q2: depressed mood
         if any(x in t for x in ["心情不好", "不开心", "低落", "沮丧", "难受", "绝望"]):
             return ("PHQ-9", 2)
 
-        # PHQ-9 Q1: anhedonia
-        if any(x in t for x in ["没兴趣", "没意思", "提不起劲", "做什么都没劲"]):
-            return ("PHQ-9", 1)
+        # PHQ-9 Q3: sleep problems
+        if any(x in t for x in ["睡不着", "失眠", "睡不好", "早醒", "睡太多", "入睡困难"]):
+            return ("PHQ-9", 3)
+
+        # PHQ-9 Q4: fatigue
+        if any(x in t for x in ["累", "没力气", "没劲", "疲惫", "乏力", "没精神"]):
+            return ("PHQ-9", 4)
 
         # GAD-7 Q1: anxiety
         if any(x in t for x in ["焦虑", "紧张", "心慌", "担心", "不安"]):
