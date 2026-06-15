@@ -581,8 +581,10 @@ class ConversationPipeline:
         self._scale_resume_item: int = 1            # item to resume after soft pause
         self._post_scale_relaxation_done: bool = False  # True after post-scale relaxation recommended
         self._relaxation_recommended_this_session: set = set()  # track which types recommended
+        self._game_recommended_this_session: bool = False  # track if game was recommended
         self._pending_relaxation_after_scale: Optional[str] = None  # hold relaxation until scale done
         self._relaxation_candidate: Optional[str] = None  # agent-proposed candidate for current turn
+        self._game_candidate: bool = False  # agent-proposed game for current turn
         self._crisis_lock_turns: int = 0            # turns to block all scales after crisis
         self._agent_route_cooldown: int = 0         # cooldown after agent route failure
 
@@ -1130,6 +1132,16 @@ class ConversationPipeline:
                 _hint = _relax_hint.get(self._relaxation_candidate, "你可以试试旁边的放松训练。")
                 system_suffix += f"\n【建议放松】{_hint} 把这句话自然地融入你的回复里，不要原样照搬。"
 
+            # Game recommendation: inject hint so LLM naturally mentions it
+            self._game_candidate = False
+            if (agent_route.get("recommend_game")
+                and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE
+                and not self._game_recommended_this_session):
+                self._game_candidate = True
+                self._game_recommended_this_session = True
+                logger.warning("[GameDebug] agent game candidate: True")
+                system_suffix += "\n【建议游戏】你可以试试旁边的小游戏，换换心情。把这句话自然地融入你的回复里，不要原样照搬。"
+
         elif self._active_scale:
             # Agent unavailable — keep active scale alive with item core context
             next_item = self._next_unanswered_item(self._active_scale, after_item=self._active_scale_q - 1)
@@ -1287,6 +1299,12 @@ class ConversationPipeline:
                 result.relaxation_rec = self._relaxation_candidate
                 logger.warning(f"[RelaxDebug] relaxation from agent: {self._relaxation_candidate}")
         self._relaxation_candidate = None
+
+        # Game: agent recommended game and hint was injected
+        if self._game_candidate and result.intent != "entertainment":
+            result.intent = "entertainment"
+            logger.warning("[GameDebug] game recommendation from agent")
+        self._game_candidate = False
         result.scale_tags = parse_scale_tags(result.full_response)
         if result.scale_tags:
             logger.warning(f"[ScaleDebug] SCALE tags parsed from LLM: {result.scale_tags}")
