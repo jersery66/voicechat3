@@ -1920,7 +1920,7 @@ class ConversationPipeline:
         recent = self.llm.conversation_history[-max_turns * 2:]
         lines = []
         for msg in recent:
-            role = "来访者" if msg["role"] == "user" else "薇薇老师"
+            role = "来访者" if msg["role"] == "user" else "小薇"
             content = msg.get("content", "")[:150]
             lines.append(f"{role}: {content}")
         return "\n".join(lines)

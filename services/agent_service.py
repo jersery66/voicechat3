@@ -455,7 +455,7 @@ class AgentService:
         # Format conversation for the prompt
         formatted = []
         for msg in messages[-20:]:  # Only last 20 turns to keep prompt short
-            role = "来访者" if msg["role"] == "user" else "薇薇老师"
+            role = "来访者" if msg["role"] == "user" else "小薇"
             formatted.append(f"{role}: {msg['content'][:200]}")
         conversation_text = "\n".join(formatted)
 
@@ -483,11 +483,11 @@ class AgentService:
         """Generate a unique opening greeting."""
         timeout = timeout or 15.0
         prompt = (
-            "你是薇薇老师，一位温暖、亲切的心理咨询师。请生成一句简短的欢迎问候语，"
+            "你是小薇，一位温暖、亲切的心理咨询师。请生成一句简短的欢迎问候语，"
             "用于首次见面时对来访者说。要求：\n"
             "1. 口语化、有温度，像老朋友打招呼\n"
             "2. 不超过30个字\n"
-            "3. 不要重复以下已有句式：'你好啊我是薇薇老师'、'来了啊我是薇薇老师'、'咱们又见面了'\n"
+            "3. 不要重复以下已有句式：'你好啊我是小薇'、'来了啊我是小薇'、'咱们又见面了'\n"
             "4. 可以提到聊天、放松、倾诉等，但不要提具体技术\n"
             "只输出问候语本身，不要输出任何其他内容。"
         )
@@ -511,7 +511,7 @@ class AgentService:
         timeout = timeout or 15.0
         relax_name = {"breathing": "呼吸放松", "muscle": "肌肉放松", "meditation": "冥想"}.get(relaxation_type, "放松训练")
         prompt = (
-            f"你是薇薇老师。来访者刚完成了{relax_name}训练，"
+            f"你是小薇。来访者刚完成了{relax_name}训练，"
             "请生成一句简短的关心问候，问问他们感觉怎么样。要求：\n"
             "1. 口语化、有温度，不超过25个字\n"
             "2. 可以用[breath]标记表示深呼吸\n"
@@ -536,7 +536,7 @@ class AgentService:
         """Generate a unique fill-info prompt."""
         timeout = timeout or 15.0
         prompt = (
-            "你是薇薇老师。请生成一句简短的话，引导来访者填写基本信息。要求：\n"
+            "你是小薇。请生成一句简短的话，引导来访者填写基本信息。要求：\n"
             "1. 口语化、亲切，不超过30个字\n"
             "2. 提到'左边'或'基本信息'或'确认'\n"
             "3. 只输出这句话本身，不要输出其他内容。"

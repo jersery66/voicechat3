@@ -86,7 +86,7 @@ Orchestrated by `services/pipeline.py` (`ConversationPipeline`). Accepts `Pipeli
 - **Report-first exit**: Exit path stops TTS, skips long farewell, generates report immediately. End-session path plays farewell TTS in background while reports generate in parallel.
 - **Session lifecycle**: `_prepare_next_subject()` for cleanup (no new session). `_start_new_session()` only when next subject confirms info.
 - **Empty stream retry**: If LLM returns empty stream, retries once non-streaming without stop sequences.
-- **Stop sequences**: Only `["User:", "Visitor:", "用户:", "来访者:", "Human:"]`. No "Assistant:" or "薇薇老师:" (would cut off generation start).
+- **Stop sequences**: Only `["User:", "Visitor:", "用户:", "来访者:", "Human:"]`. No "Assistant:" or "小薇:" (would cut off generation start).
 - **Crisis detection**: Quick keyword check runs BEFORE programmatic scale branch. Negative emotions only for LLM crisis reassessment (not "happy").
 - **RAG truncation**: `rag_suffix` capped at 1200 chars.
 - **Pre-compiled regexes**: `_RE_REC_TAG`, `_RE_END_TAG`, `_RE_SCALE_TAG` (case-insensitive), `_RE_THINK`, etc.

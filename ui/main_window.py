@@ -1308,7 +1308,7 @@ class MainWindow(QMainWindow):
                     generated = self.agent_service.generate_greeting(timeout=5.0)
                 elif self.llm_service:
                     generated = self.llm_service.generate_short_text(
-                        "你是薇薇老师，一位温暖亲切的心理咨询师。请生成一句简短欢迎问候语（不超过30字），口语化有温度像老朋友打招呼。只输出问候语本身。",
+                        "你是小薇，一位温暖亲切的心理咨询师。请生成一句简短欢迎问候语（不超过30字），口语化有温度像老朋友打招呼。只输出问候语本身。",
                         max_tokens=60
                     )
             except Exception as e:
@@ -1345,7 +1345,7 @@ class MainWindow(QMainWindow):
                     generated = self.agent_service.generate_post_relaxation_greeting(relax_type, timeout=5.0)
                 elif self.llm_service:
                     generated = self.llm_service.generate_short_text(
-                        f"你是薇薇老师。来访者刚完成{relax_name}训练，生成一句简短关心问候（不超过25字）。只输出问候语本身。",
+                        f"你是小薇。来访者刚完成{relax_name}训练，生成一句简短关心问候（不超过25字）。只输出问候语本身。",
                         max_tokens=50
                     )
             except Exception as e:
@@ -1378,7 +1378,7 @@ class MainWindow(QMainWindow):
                     generated = self.agent_service.generate_fill_info_prompt(timeout=5.0)
                 elif self.llm_service:
                     generated = self.llm_service.generate_short_text(
-                        "你是薇薇老师。生成一句简短的话引导来访者填写左边的基本信息并点确认（不超过30字）。只输出这句话本身。",
+                        "你是小薇。生成一句简短的话引导来访者填写左边的基本信息并点确认（不超过30字）。只输出这句话本身。",
                         max_tokens=50
                     )
             except Exception as e:

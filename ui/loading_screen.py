@@ -60,7 +60,7 @@ class LoadingScreen(QWidget):
         layout.addSpacing(8)
 
         # Title
-        self.title_label = QLabel("薇薇老师")
+        self.title_label = QLabel("小薇")
         self.title_label.setObjectName("loadingTitle")
         self.title_label.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
         self.title_label.setAlignment(Qt.AlignCenter)
