@@ -306,8 +306,10 @@ def correct_asr_text(raw_text: str, recent_context: str = "") -> tuple:
             corrections.append(f"{wrong}→{right}")
 
     # Context-aware corrections
-    # "没有什么事" + positive emotion → don't "correct" but note it
-    # This is handled in scoring logic, not here
+    # Single "又" in short response → likely "有" (yes/have)
+    if corrected.strip() == "又":
+        corrected = "有"
+        corrections.append("又→有")
 
     if corrections:
         logger.warning(f"[ASRCorrect] raw={raw_text!r} corrected={corrected!r} fixes={corrections}")
