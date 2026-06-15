@@ -1079,6 +1079,7 @@ class ConversationPipeline:
                 # Agent recommends starting a new scale
                 if suggested_scale:
                     self._active_scale = suggested_scale
+                    self._administered_scales.add(suggested_scale)  # Track for incomplete check
                     # Use agent's item suggestion if available
                     route_item = agent_route.get("item")
                     if isinstance(route_item, int) and route_item > 0:
@@ -1149,6 +1150,7 @@ class ConversationPipeline:
             if _detected:
                 scale_name, item = _detected
                 self._active_scale = scale_name
+                self._administered_scales.add(scale_name)  # Track for incomplete check
                 self._active_scale_q = item
                 self._active_scale_waiting_answer = False
                 logger.warning(f"[ScaleTriggerHard] {scale_name} Q{item} from deterministic fallback")
