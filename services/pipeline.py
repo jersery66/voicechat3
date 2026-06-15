@@ -1114,6 +1114,15 @@ class ConversationPipeline:
             if agent_route.get("recommend_relaxation") and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE:
                 self._relaxation_candidate = agent_route.get("relaxation_type") or "breathing"
                 logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
+                # Inject hint so LLM naturally mentions relaxation in its reply
+                _relax_hint = {
+                    "breathing": "你可以试试旁边的呼吸放松训练，跟着做几分钟，身体会松一些。",
+                    "muscle": "你可以试试旁边的肌肉放松训练，让身体缓一缓。",
+                    "meditation": "你可以试试旁边的冥想训练，静一静对睡眠也有帮助。",
+                    "game": "你可以试试旁边的小游戏，换换心情。",
+                }
+                _hint = _relax_hint.get(self._relaxation_candidate, "你可以试试旁边的放松训练。")
+                system_suffix += f"\n【建议放松】{_hint} 把这句话自然地融入你的回复里，不要原样照搬。"
 
         elif self._active_scale:
             # Agent unavailable — keep active scale alive with item core context
@@ -1256,27 +1265,20 @@ class ConversationPipeline:
                     f"user={result.user_text!r}, raw_end={raw_end_type}"
                 )
             result.end_type = None
-        # Relaxation sync: only highlight if spoken_text actually mentions it
+        # Relaxation: LLM REC tag takes priority, otherwise use agent candidate
         llm_rec = detect_tag(result.full_response, REC_TAGS)
         if llm_rec:
-            # LLM explicitly output REC tag — use it
             result.relaxation_rec = llm_rec
         elif self._relaxation_candidate:
-            # Agent proposed candidate — check if spoken reply mentions it
             if self._active_scale and not result.scale_completed:
-                # During active scale: hold for later, don't highlight now
+                # During active scale: hold for later
                 self._pending_relaxation_after_scale = self._relaxation_candidate
                 result.relaxation_rec = None
                 logger.warning(f"[RelaxDebug] hold relaxation until scale done: {self._relaxation_candidate}")
-            elif self._reply_mentions_relaxation(result.spoken_text, self._relaxation_candidate):
-                result.relaxation_rec = self._relaxation_candidate
-                logger.warning(f"[RelaxDebug] relaxation synced with reply: {self._relaxation_candidate}")
             else:
-                result.relaxation_rec = None
-                logger.warning(
-                    f"[RelaxDebug] suppress unsynced: candidate={self._relaxation_candidate}, "
-                    f"spoken={result.spoken_text[:60]!r}"
-                )
+                # Agent recommended + hint injected → trust the recommendation
+                result.relaxation_rec = self._relaxation_candidate
+                logger.warning(f"[RelaxDebug] relaxation from agent: {self._relaxation_candidate}")
         self._relaxation_candidate = None
         result.scale_tags = parse_scale_tags(result.full_response)
         if result.scale_tags:
