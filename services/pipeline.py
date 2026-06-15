@@ -1727,7 +1727,7 @@ class ConversationPipeline:
         logger.warning(f"[ScaleDebug] advance {scale_name} to Q{next_item}")
 
     def _deterministic_scale_trigger(self, text: str) -> Optional[tuple]:
-        """Hard fallback: if agent fails but text has clear symptoms, force-start scale.
+        """Hard fallback: any symptom keyword from any scale item triggers that scale.
 
         Returns (scale_name, item) or None.
         """
@@ -1735,25 +1735,50 @@ class ConversationPipeline:
         if not t:
             return None
 
-        # PHQ-9 Q1: anhedonia
-        if any(x in t for x in ["没兴趣", "没意思", "提不起劲", "做什么都没劲"]):
-            return ("PHQ-9", 1)
+        # PHQ-9: any symptom from any item → start PHQ-9
+        phq9_symptoms = {
+            1: ["没兴趣", "没意思", "提不起劲", "做什么都没劲", "不想做", "无聊"],
+            2: ["心情不好", "不开心", "低落", "沮丧", "难受", "绝望", "悲伤", "想哭"],
+            3: ["睡不着", "失眠", "睡不好", "早醒", "睡太多", "入睡困难", "半夜醒"],
+            4: ["累", "没力气", "没劲", "疲惫", "乏力", "没精神", "撑不住"],
+            5: ["没胃口", "吃不下", "吃太多", "食欲不好", "不想吃"],
+            6: ["觉得自己很糟", "失败", "自责", "不够好", "让家人失望", "没用"],
+            7: ["注意力", "集中不了", "看不进去", "专注不了", "分心"],
+            8: ["坐不住", "坐立不安", "烦躁", "急躁", "动作变慢", "说话变慢"],
+            9: ["不想活", "伤害自己", "自杀", "自残", "死了算了", "想死"],
+        }
+        for item, keywords in phq9_symptoms.items():
+            if any(kw in t for kw in keywords):
+                return ("PHQ-9", item)
 
-        # PHQ-9 Q2: depressed mood
-        if any(x in t for x in ["心情不好", "不开心", "低落", "沮丧", "难受", "绝望"]):
-            return ("PHQ-9", 2)
+        # GAD-7: any symptom from any item → start GAD-7
+        gad7_symptoms = {
+            1: ["紧张", "焦虑", "急切", "心慌", "不安"],
+            2: ["停不下来", "控制不了担心", "控制不住"],
+            3: ["担心", "担忧", "操心", "放心不下"],
+            4: ["放松不了", "放松不下来", "静不下来"],
+            5: ["坐不住", "坐立不安", "动来动去"],
+            6: ["烦", "急躁", "容易生气", "不耐烦"],
+            7: ["害怕", "恐惧", "觉得要出事", "总觉得不好"],
+        }
+        for item, keywords in gad7_symptoms.items():
+            if any(kw in t for kw in keywords):
+                return ("GAD-7", item)
 
-        # PHQ-9 Q3: sleep problems
-        if any(x in t for x in ["睡不着", "失眠", "睡不好", "早醒", "睡太多", "入睡困难"]):
-            return ("PHQ-9", 3)
-
-        # PHQ-9 Q4: fatigue
-        if any(x in t for x in ["累", "没力气", "没劲", "疲惫", "乏力", "没精神"]):
-            return ("PHQ-9", 4)
-
-        # GAD-7 Q1: anxiety
-        if any(x in t for x in ["焦虑", "紧张", "心慌", "担心", "不安"]):
-            return ("GAD-7", 1)
+        # PCL-5: any symptom from any item → start PCL-5
+        pcl5_symptoms = {
+            1: ["回忆", "闪回", "想起来", "反复想起"],
+            2: ["噩梦", "做噩梦", "梦到"],
+            3: ["避免", "不想提", "不去想", "回避"],
+            4: ["避开", "不去", "躲开"],
+            5: ["很坏", "很危险", "没希望", "世界很危险"],
+            6: ["责怪", "自责", "怪自己", "怪别人"],
+            7: ["警觉", "易受惊吓", "紧张", "害怕"],
+            8: ["注意力", "集中不了", "分心"],
+        }
+        for item, keywords in pcl5_symptoms.items():
+            if any(kw in t for kw in keywords):
+                return ("PCL-5", item)
 
         return None
 
