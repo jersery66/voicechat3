@@ -1586,26 +1586,37 @@ class MainWindow(QMainWindow):
     def _end_session_continue_chat(self):
         """User chose to continue — enter force-complete scales mode."""
         self._force_complete_scales = True
+        self._session_ending = False
+        self._end_request_in_progress = False
+
         incomplete = []
         if self.pipeline and hasattr(self.pipeline, "get_incomplete_scales"):
             try:
                 incomplete = self.pipeline.get_incomplete_scales()
             except Exception:
                 pass
+
         if incomplete:
             first = incomplete[0]
             scale_name = first["scale_name"]
             remaining = first.get("remaining_nums", [])
             if remaining:
-                self.chat_panel.add_system_message(
-                    f"好，那我们再聊一会儿，把刚才没问完的问题慢慢补上。"
-                )
+                msg = "好，那我们再聊一会儿，把刚才没问完的问题慢慢补上。"
             else:
-                self.chat_panel.add_system_message("好，咱们继续聊。")
+                msg = "好，咱们继续聊。"
         else:
-            self.chat_panel.add_system_message("好，咱们继续聊。")
-        self._play_tts_async("好，那咱们继续。")
-        self.orchestrator.transition_to(SessionState.CHATTING)
+            msg = "好，咱们继续聊。"
+
+        # Transition to CHATTING (handle already-in-CHATTING gracefully)
+        try:
+            self.orchestrator.transition_to(SessionState.CHATTING)
+        except Exception:
+            pass  # already in CHATTING
+
+        self.chat_panel.add_system_message(msg)
+        self._play_tts_async(msg)
+        self.control_panel.set_buttons_enabled(True)
+        self.control_panel.set_status("继续对话中...")
 
     def _should_soft_recommend_relaxation(self, result):
         """Check if relaxation should be softly recommended based on emotion/symptoms."""
