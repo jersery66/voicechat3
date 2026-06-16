@@ -1493,15 +1493,23 @@ class MainWindow(QMainWindow):
         # If scale was interrupted by relaxation and not yet resumed, block end
         if self._scale_interrupted_by_relaxation and not self._post_relaxation_feedback_consumed:
             if source != "direct_end_confirmed":
-                self.chat_panel.add_system_message(
-                    "还剩几个问题没补完，补完后报告会更完整。我们再问几个很短的问题就结束。"
-                )
-                # Restore scale so next user message goes through feedback handler
+                # Restore scale and ask the question directly
                 if self._resume_scale_after_relaxation and self.pipeline:
                     self.pipeline.restore_active_scale(
                         self._resume_scale_after_relaxation["scale_name"],
                         self._resume_scale_after_relaxation["item"]
                     )
+                    self._scale_interrupted_by_relaxation = False
+                    self._resume_scale_after_relaxation = None
+
+                    natural_q = self.pipeline.get_active_scale_question_text()
+                    if natural_q:
+                        msg = f"还剩几个问题没补完，我们先把这个问完。{natural_q}"
+                    else:
+                        msg = "还剩几个问题没补完，我们再问几个很短的问题就结束。"
+                    self.chat_panel.add_system_message(msg)
+                    self._play_tts_async(msg)
+                    self.control_panel.set_status("继续量表采样...")
                 self._end_request_in_progress = False
                 return
 
