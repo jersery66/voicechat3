@@ -2041,6 +2041,14 @@ class ConversationPipeline:
             parts = full_response.split('|||', 1)
             analysis_text = parts[0].strip()
             spoken_text = parts[1].strip()
+            # If LLM duplicated output, take only the first spoken segment
+            # (before any second 【 analysis tag or |||)
+            if '|||' in spoken_text:
+                spoken_text = spoken_text.split('|||', 1)[0].strip()
+            # Also truncate if duplicate analysis tags appear in spoken text
+            for _tag in ['【情绪识别】', '【状态评估】', '【变革话语】', '【策略选择】']:
+                if _tag in spoken_text:
+                    spoken_text = spoken_text.split(_tag)[0].strip()
         else:
             spoken_text = full_response.strip()
             if not found_separator:
