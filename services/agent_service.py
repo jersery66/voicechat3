@@ -747,18 +747,49 @@ class AgentService:
 
             result = self._parse_json_loose(content)
 
-            # Ensure all required fields exist with defaults
-            result.setdefault("scale_action", "none")
-            result.setdefault("scale", None)
-            result.setdefault("item", None)
-            result.setdefault("probe_hint", "")
-            result.setdefault("recommend_relaxation", False)
-            result.setdefault("relaxation_type", None)
-            result.setdefault("risk_level", 0)
-            result.setdefault("immediate_crisis", False)
-            result.setdefault("confidence", 0.0)
-            result.setdefault("reason", "")
-            return result
+            # Map new agent output format to old pipeline format
+            raw_action = result.get("action") or result.get("scale_action") or "chat"
+
+            # Convert action names
+            if raw_action == "start_scale":
+                scale_action = "start"
+            elif raw_action == "continue_scale":
+                scale_action = "continue"
+            elif raw_action == "chat":
+                scale_action = "none"
+            else:
+                scale_action = raw_action
+
+            # Map item field
+            item = result.get("target_item") or result.get("item")
+            if isinstance(item, str) and item.startswith("Q"):
+                try:
+                    item = int(item[1:])
+                except ValueError:
+                    item = None
+
+            # Build normalized result
+            normalized = {
+                "action": raw_action,
+                "scale_action": scale_action,
+                "scale": result.get("scale"),
+                "target_item": result.get("target_item"),
+                "item": item,
+                "intervention_type": result.get("intervention_type"),
+                "probe_hint": result.get("probe_hint", ""),
+                "recommend_relaxation": result.get("recommend_relaxation", False),
+                "relaxation_type": result.get("relaxation_type"),
+                "recommend_game": result.get("recommend_game", False),
+                "game_type": result.get("game_type"),
+                "recommend_media": result.get("recommend_media", False),
+                "media_type": result.get("media_type"),
+                "exit_intent": result.get("exit_intent", False),
+                "risk_level": result.get("risk_level", 0),
+                "immediate_crisis": result.get("immediate_crisis", False),
+                "confidence": result.get("confidence", 0.0),
+                "reason": result.get("reason", ""),
+            }
+            return normalized
         except Exception as e:
             logger.warning(f"Route conversation actions failed: {e}")
             # Fallback: return no-action

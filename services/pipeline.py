@@ -1159,12 +1159,15 @@ class ConversationPipeline:
         # --- Deterministic scale trigger fallback ---
         # If agent returned none/pause/low-confidence but user text has clear
         # symptom keywords, force-start the appropriate scale.
-        if not self._active_scale and allow_new_scale and not _waiting_for_answer:
+        from config import ENABLE_SCALE_HARD_TRIGGER
+        if not ENABLE_SCALE_HARD_TRIGGER:
+            pass  # hard trigger disabled, let agent control scales
+        elif not self._active_scale and allow_new_scale and not _waiting_for_answer:
             _detected = self._deterministic_scale_trigger(result.user_text)
             if _detected:
                 scale_name, item = _detected
                 self._active_scale = scale_name
-                self._administered_scales.add(scale_name)  # Track for incomplete check
+                self._administered_scales.add(scale_name)
                 self._active_scale_q = item
                 self._active_scale_waiting_answer = False
                 logger.warning(f"[ScaleTriggerHard] {scale_name} Q{item} from deterministic fallback")
@@ -1235,6 +1238,13 @@ class ConversationPipeline:
             with metrics.timer("llm.stream"):
                 result.full_response, result.analysis_text, result.spoken_text = \
                     self._stream_llm(result.user_text, final_suffix, emit)
+
+            # Log raw LLM response before post-processing
+            logger.warning(
+                f"[PipelineReplyRaw] user={result.user_text!r} "
+                f"raw={result.full_response[:800]!r}"
+            )
+
         except RuntimeError as e:
             if "LLM_NO_FINAL_CONTENT" in str(e):
                 logger.warning(f"[Pipeline] LLM thinking-only, no content, asking retry")
@@ -1436,11 +1446,21 @@ class ConversationPipeline:
         # Refresh final_suffix after all scale hints are added
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
-        logger.info(
-            f"[Pipeline] End type: {result.end_type} "
-            f"| Relaxation rec: {result.relaxation_rec} "
-            f"| Scale tags: {result.scale_tags} "
-            f"| Spoken text length: {len(result.spoken_text)}"
+        # Log pipeline output for debugging
+        logger.warning(
+            f"[PipelineReplyFinal] user={result.user_text!r} "
+            f"spoken={result.spoken_text[:500]!r} "
+            f"end_type={result.end_type} "
+            f"relaxation={result.relaxation_rec} "
+            f"scale_tags={result.scale_tags}"
+        )
+        logger.warning(
+            f"[ScaleState] active={self._active_scale} "
+            f"item={self._active_scale_q} "
+            f"waiting={self._active_scale_waiting_answer} "
+            f"completed={self._scale_pause_turns} "
+            f"defer={self._scale_pause_turns} "
+            f"tags={result.scale_tags}"
         )
 
         # --- Auto-end on time/round limit ---

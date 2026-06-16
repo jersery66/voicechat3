@@ -764,6 +764,7 @@ AGENT_TIMEOUT = 3            # 意图分类超时（秒）
 AGENT_REPORT_TIMEOUT = 60    # 报告生成超时（秒）
 AGENT_ROUTE_ENABLED = True   # 启用 AgentRoute
 AGENT_ROUTE_COOLDOWN_ROUNDS = 1  # Agent route 失败后冷却轮数
+ENABLE_SCALE_HARD_TRIGGER = False  # 临时关闭硬触发，让 agent 控制量表
 
 # ============== Media Scene Mapping ==============
 # 情绪 → 影音场景映射（优先放松训练，影音仅在主动提出时推荐）

@@ -236,7 +236,10 @@ class LLMService:
                     self.conversation_history.pop()
                 raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
-            yield full_response
+        # Log raw LLM output for debugging
+        logger.warning(f"[LLMRawFull] len={len(full_response)} text={full_response[:1000]!r}")
+
+        yield full_response
 
         # Add assistant response to history — only spoken text, no analysis
         self.conversation_history.append({
