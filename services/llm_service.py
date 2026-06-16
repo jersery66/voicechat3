@@ -239,7 +239,8 @@ class LLMService:
         # Log raw LLM output for debugging
         logger.warning(f"[LLMRawFull] len={len(full_response)} text={full_response[:1000]!r}")
 
-        yield full_response
+        # Note: do NOT yield full_response again — chunks were already yielded
+        # in the stream loop above. Yielding here would duplicate the content.
 
         # Add assistant response to history — only spoken text, no analysis
         self.conversation_history.append({

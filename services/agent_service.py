@@ -703,22 +703,30 @@ class AgentService:
 要求：只输出单行JSON，不要换行。不要输出题目文本。
 
 规则：
-- 普通聊天：action="chat"
-- 用户明确表达症状时：action="start_scale"
+- 普通聊天且无症状：action="chat"
+- 用户表达任何症状时：action="start_scale"（必须触发！）
 - 已采样但需继续时：action="continue_scale"
-- 用户焦虑/紧张/失眠/疲惫时：action="recommend_relaxation"
+- 用户焦虑/紧张/失眠/疲惫且已采样过量表后：action="recommend_relaxation"
 - 用户想玩/无聊时：action="recommend_game"
-- 用户想看视频/听歌时：action="recommend_media"
 - 用户明确想退出时：action="exit"
-- 抑郁/低落/没兴趣→scale="PHQ-9"，焦虑/紧张/担心→scale="GAD-7"，创伤/噩梦→scale="PCL-5"
-- 前2轮建立关系，第3轮后可以隐性采样
-- 不要因为"只是表达情绪"就输出start_scale
 
-示例1：用户说"对，我心情不好"
-{"action":"start_scale","scale":"PHQ-9","target_item":"Q2","intervention_type":null,"urgency":3,"risk_level":0,"confidence":0.78,"reason":"持续低落情绪"}
+症状→量表映射（必须严格遵守）：
+- 心情不好/低落/沮丧/没意思/没兴趣/难受/想哭→PHQ-9, item=2
+- 睡不好/失眠/睡不着/早醒→PHQ-9, item=3（不是relaxation！）
+- 累/没力气/疲惫/没精神→PHQ-9, item=4
+- 焦虑/紧张/担心/心慌→GAD-7, item=1
+- 创伤/噩梦/闪回→PCL-5, item=1
 
-示例2：用户说"睡不好，很焦虑"
-{"action":"recommend_relaxation","scale":null,"target_item":null,"intervention_type":"breathing","urgency":2,"risk_level":0,"confidence":0.82,"reason":"焦虑伴睡不好"}"""
+重要：用户说"睡不好"时必须start_scale PHQ-9 Q3，不是recommend_relaxation！
+
+示例1：用户说"我心情不好"
+{"action":"start_scale","scale":"PHQ-9","target_item":"Q2","intervention_type":null,"urgency":3,"risk_level":0,"confidence":0.78,"reason":"低落情绪"}
+
+示例2：用户说"我最近睡不好"
+{"action":"start_scale","scale":"PHQ-9","target_item":"Q3","intervention_type":null,"urgency":2,"risk_level":0,"confidence":0.75,"reason":"睡眠问题"}
+
+示例3：用户说"睡不好，很焦虑"（已有PHQ-9在进行）
+{"action":"start_scale","scale":"GAD-7","target_item":"Q1","intervention_type":null,"urgency":2,"risk_level":0,"confidence":0.8,"reason":"焦虑伴失眠"}"""
 
         timeout = timeout or AGENT_TIMEOUT
         try:
