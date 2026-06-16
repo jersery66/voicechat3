@@ -659,6 +659,18 @@ class ConversationPipeline:
             }
         return None
 
+    def get_active_scale_question_text(self) -> Optional[str]:
+        """Get the natural question text for the current active scale item."""
+        if not self._active_scale or not self._active_scale_q:
+            return None
+        from services.scales import SCALES
+        scale_def = SCALES.get(self._active_scale)
+        if not scale_def:
+            return None
+        q_text = scale_def["questions"][self._active_scale_q - 1] if self._active_scale_q <= len(scale_def["questions"]) else ""
+        natural = NATURAL_SCALE_QUESTIONS.get((self._active_scale, self._active_scale_q), q_text)
+        return natural
+
     def restore_active_scale(self, scale_name: str, item: int) -> Optional[str]:
         """Restore active scale after relaxation interruption.
 
