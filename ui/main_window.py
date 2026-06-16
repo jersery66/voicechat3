@@ -1589,6 +1589,12 @@ class MainWindow(QMainWindow):
         self._session_ending = False
         self._end_request_in_progress = False
 
+        # Transition to CHATTING (handle already-in-CHATTING gracefully)
+        try:
+            self.orchestrator.transition_to(SessionState.CHATTING)
+        except Exception:
+            pass  # already in CHATTING
+
         incomplete = []
         if self.pipeline and hasattr(self.pipeline, "get_incomplete_scales"):
             try:
@@ -1597,21 +1603,27 @@ class MainWindow(QMainWindow):
                 pass
 
         if incomplete:
+            # Force-resume the first incomplete scale and ask directly
             first = incomplete[0]
             scale_name = first["scale_name"]
             remaining = first.get("remaining_nums", [])
             if remaining:
-                msg = "好，那我们再聊一会儿，把刚才没问完的问题慢慢补上。"
+                # Restore the scale and get the question phrasing
+                self.pipeline.force_resume_incomplete_scale()
+                natural_q = self.pipeline.get_active_scale_question_text()
+                if natural_q:
+                    msg = f"好，那我们继续把剩下的补完。{natural_q}"
+                else:
+                    msg = "好，那我们再聊一会儿，把刚才没问完的问题慢慢补上。"
+                self.chat_panel.add_system_message(msg)
+                self._play_tts_async(msg)
+                self.control_panel.set_buttons_enabled(True)
+                self.control_panel.set_status("继续补完量表...")
+                return
             else:
                 msg = "好，咱们继续聊。"
         else:
             msg = "好，咱们继续聊。"
-
-        # Transition to CHATTING (handle already-in-CHATTING gracefully)
-        try:
-            self.orchestrator.transition_to(SessionState.CHATTING)
-        except Exception:
-            pass  # already in CHATTING
 
         self.chat_panel.add_system_message(msg)
         self._play_tts_async(msg)
