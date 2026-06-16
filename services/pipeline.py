@@ -680,6 +680,30 @@ class ConversationPipeline:
         logger.warning(f"[ScaleDebug] restore active scale after relaxation: {scale_name} Q{next_item}")
         return natural
 
+    def force_resume_incomplete_scale(self) -> Optional[Dict[str, Any]]:
+        """Force-resume the first incomplete scale for forced completion mode.
+
+        Returns {scale_name, item} or None if no incomplete scales.
+        """
+        incomplete = self.get_incomplete_scales()
+        if not incomplete:
+            return None
+        first = incomplete[0]
+        scale_name = first["scale_name"]
+        remaining = first.get("remaining_nums", [])
+        if not remaining:
+            return None
+        self._active_scale = scale_name
+        self._active_scale_q = remaining[0]
+        self._active_scale_waiting_answer = False
+        self._scale_soft_paused = False
+        self._scale_pause_turns = 0
+        logger.warning(
+            f"[ScaleDebug] force resume: {scale_name} Q{remaining[0]}, "
+            f"answered={first['answered']}/{first['total']}"
+        )
+        return {"scale_name": scale_name, "item": remaining[0]}
+
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
 
