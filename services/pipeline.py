@@ -2039,14 +2039,29 @@ class ConversationPipeline:
 
         if '|||' in full_response:
             parts = full_response.split('|||', 1)
-            analysis_text = parts[0].strip()
-            spoken_text = parts[1].strip()
+            left = parts[0].strip()
+            right = parts[1].strip()
+
+            # Detect reversed format: if left side has no analysis tags but right does,
+            # the LLM output is spoken|||analysis instead of analysis|||spoken
+            _analysis_tags = ['【情绪识别】', '【状态评估】', '【变革话语】', '【策略选择】']
+            left_has_analysis = any(t in left for t in _analysis_tags)
+            right_has_analysis = any(t in right for t in _analysis_tags)
+
+            if not left_has_analysis and right_has_analysis:
+                # Reversed format: spoken on left, analysis on right
+                analysis_text = right
+                spoken_text = left
+            else:
+                # Normal format: analysis on left, spoken on right
+                analysis_text = left
+                spoken_text = right
+
             # If LLM duplicated output, take only the first spoken segment
-            # (before any second 【 analysis tag or |||)
             if '|||' in spoken_text:
                 spoken_text = spoken_text.split('|||', 1)[0].strip()
             # Also truncate if duplicate analysis tags appear in spoken text
-            for _tag in ['【情绪识别】', '【状态评估】', '【变革话语】', '【策略选择】']:
+            for _tag in _analysis_tags:
                 if _tag in spoken_text:
                     spoken_text = spoken_text.split(_tag)[0].strip()
         else:
