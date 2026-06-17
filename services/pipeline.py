@@ -497,6 +497,62 @@ def is_user_explicit_end_text(text: str) -> bool:
     return any(x in t for x in explicit_end)
 
 
+def score_symptom_signal(text: str, existing_score: int = 0) -> tuple:
+    """Score cumulative symptom signals from user text.
+
+    Returns (delta, reasons) where delta is the score change and reasons
+    is a list of why the score changed.
+    """
+    t = (text or "").strip()
+    if not t:
+        return 0, []
+
+    delta = 0
+    reasons = []
+
+    # 1. Explicit low-mood words (+1)
+    low_mood = ["不开心", "难受", "失落", "低落", "烦", "痛苦", "压抑", "孤单", "没意思",
+                "不高兴", "心情不好", "情绪不好", "心里不舒服", "心里难受"]
+    if any(w in t for w in low_mood):
+        delta += 1
+        reasons.append("低落情绪")
+
+    # 2. Unexplained low mood (+2)
+    unexplained = ["没有原因", "不知道为什么", "说不上来", "莫名其妙", "没什么事", "没有为什么"]
+    if any(w in t for w in unexplained) and any(w in t for w in ["不开心", "难受", "不好", "烦"]):
+        delta += 2
+        reasons.append("无因低落")
+
+    # 3. Duration/frequency words (+1)
+    duration = ["最近", "一直", "总是", "经常", "每天", "大多数时候", "很久了", "好长时间", "好几周", "好几个月"]
+    if any(w in t for w in duration):
+        delta += 1
+        reasons.append("持续性")
+
+    # 4. PHQ-related symptoms (+2)
+    phq_symptoms = ["睡不着", "睡不好", "失眠", "没兴趣", "做什么都没意思", "很累",
+                    "没力气", "吃不下", "吃太多", "注意力集中不了", "觉得自己没用",
+                    "拖累家人", "想死", "不想活", "坐不住", "烦躁"]
+    if any(w in t for w in phq_symptoms):
+        delta += 2
+        reasons.append("PHQ症状")
+
+    # 5. Evasive answers (+1 only if already have some signal)
+    evasive = ["不想说", "不想聊", "没有", "不知道", "算了", "不晓得", "说不清"]
+    if existing_score >= 1 and any(w in t for w in evasive):
+        delta += 1
+        reasons.append("回避")
+
+    # 6. Rehab context with emotional content (+1)
+    rehab = ["戒毒", "吸毒", "戒毒所", "强制"]
+    rehab_emotion = ["孤独", "无助", "低落", "睡不好", "没兴趣", "难受"]
+    if any(w in t for w in rehab) and any(w in t for w in rehab_emotion):
+        delta += 1
+        reasons.append("戒毒+情绪")
+
+    return delta, reasons
+
+
 def is_scale_interruption_text(text: str) -> bool:
     """Check if user is interrupting/resisting scale questioning.
 
@@ -610,6 +666,12 @@ class ConversationPipeline:
         self.pending_scale_resume: bool = False  # True after relaxation, need to resume scale
         self.last_bot_asked_scale: Optional[str] = None
         self.last_bot_asked_item: int = 0
+
+        # Cumulative symptom signal for scale triggering
+        self.symptom_signal_score: int = 0
+        self.symptom_signal_turns: int = 0
+        self.last_scale_trigger_round: int = -999
+        self.scale_trigger_cooldown: int = 3
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -654,6 +716,9 @@ class ConversationPipeline:
         self.pending_scale_resume = False
         self.last_bot_asked_scale = None
         self.last_bot_asked_item = 0
+        self.symptom_signal_score = 0
+        self.symptom_signal_turns = 0
+        self.last_scale_trigger_round = -999
         self._post_scale_relaxation_done = False
         self._relaxation_recommended_this_session.clear()
 
@@ -1215,6 +1280,39 @@ class ConversationPipeline:
                 self._active_scale_q = item
                 self._active_scale_waiting_answer = False
                 logger.warning(f"[ScaleTriggerHard] {scale_name} Q{item} from deterministic fallback")
+
+        # --- Cumulative symptom signal scoring ---
+        # Only when no active scale and not in cooldown
+        if not self._active_scale and not _waiting_for_answer:
+            delta, reasons = score_symptom_signal(result.user_text, self.symptom_signal_score)
+            if delta > 0:
+                self.symptom_signal_score += delta
+                self.symptom_signal_turns += 1
+            logger.warning(
+                f"[ScaleTriggerScore] user={result.user_text!r} "
+                f"delta={delta} total={self.symptom_signal_score} reasons={reasons}"
+            )
+
+            # Trigger PHQ-9 if score reaches threshold
+            if (self.symptom_signal_score >= 3
+                and allow_new_scale
+                and current_rounds > self.last_scale_trigger_round + self.scale_trigger_cooldown):
+                self._active_scale = "PHQ-9"
+                self._active_scale_q = self._next_unanswered_item("PHQ-9") or 1
+                self._active_scale_waiting_answer = False
+                self._administered_scales.add("PHQ-9")
+                self.last_scale_trigger_round = current_rounds
+                logger.warning(
+                    f"[ScaleTrigger] PHQ-9 by accumulated symptom score: "
+                    f"total={self.symptom_signal_score}, item={self._active_scale_q}"
+                )
+                # Reset signal after trigger
+                self.symptom_signal_score = 0
+                self.symptom_signal_turns = 0
+                # Add subtle hint for LLM
+                hint = self._build_scale_context_hint("PHQ-9", self._active_scale_q, {})
+                if hint:
+                    system_suffix += hint
 
         # Scale pause countdown
         if self._scale_pause_turns > 0:
