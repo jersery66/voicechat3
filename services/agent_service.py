@@ -776,22 +776,23 @@ class AgentService:
                 except ValueError:
                     item = None
 
-            # Build normalized result
+            # Build normalized result — derive booleans from action field
+            intervention = result.get("intervention_type")
             normalized = {
                 "action": raw_action,
                 "scale_action": scale_action,
                 "scale": result.get("scale"),
                 "target_item": result.get("target_item"),
                 "item": item,
-                "intervention_type": result.get("intervention_type"),
+                "intervention_type": intervention,
                 "probe_hint": result.get("probe_hint", ""),
-                "recommend_relaxation": result.get("recommend_relaxation", False),
-                "relaxation_type": result.get("relaxation_type"),
-                "recommend_game": result.get("recommend_game", False),
-                "game_type": result.get("game_type"),
-                "recommend_media": result.get("recommend_media", False),
-                "media_type": result.get("media_type"),
-                "exit_intent": result.get("exit_intent", False),
+                "recommend_relaxation": raw_action == "recommend_relaxation",
+                "relaxation_type": intervention if raw_action == "recommend_relaxation" else None,
+                "recommend_game": raw_action == "recommend_game",
+                "game_type": intervention if raw_action == "recommend_game" else None,
+                "recommend_media": raw_action == "recommend_media",
+                "media_type": intervention if raw_action == "recommend_media" else None,
+                "exit_intent": raw_action == "exit",
                 "risk_level": result.get("risk_level", 0),
                 "immediate_crisis": result.get("immediate_crisis", False),
                 "confidence": result.get("confidence", 0.0),

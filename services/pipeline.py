@@ -1391,7 +1391,7 @@ class ConversationPipeline:
                     detected_item = detect_phq_item_from_text(result.user_text)
                     if detected_item and detected_item != self._active_scale_q and detected_item not in answered:
                         # User is talking about a different symptom — score that instead
-                        inferred = infer_scale_score_from_text(result.user_text, self._active_scale)
+                        inferred = infer_scale_score_from_text(result.user_text, self._active_scale, self._active_scale_q)
                         if inferred is not None:
                             self._scale_answers.setdefault(self._active_scale, {})[detected_item] = inferred
                             logger.warning(
@@ -1401,7 +1401,7 @@ class ConversationPipeline:
 
                 # Still try to score the current question
                 if self._active_scale_q not in self._scale_answers.get(self._active_scale, {}):
-                    inferred = infer_scale_score_from_text(result.user_text, self._active_scale)
+                    inferred = infer_scale_score_from_text(result.user_text, self._active_scale, self._active_scale_q)
                     if inferred is not None:
                         self._scale_answers.setdefault(self._active_scale, {})[self._active_scale_q] = inferred
                         logger.warning(
@@ -1432,8 +1432,10 @@ class ConversationPipeline:
                         result.all_scales_completed = True
                         logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
                         # Post-scale relaxation recommendation
+                        # Use pending candidate if available, otherwise choose based on scores
                         if not self._post_scale_relaxation_done:
-                            rec_type = self._choose_post_scale_relaxation(completed_name)
+                            rec_type = self._pending_relaxation_after_scale or self._choose_post_scale_relaxation(completed_name)
+                            self._pending_relaxation_after_scale = None
                             if rec_type:
                                 result.relaxation_rec = rec_type
                                 self._post_scale_relaxation_done = True
@@ -1494,8 +1496,7 @@ class ConversationPipeline:
             f"[ScaleState] active={self._active_scale} "
             f"item={self._active_scale_q} "
             f"waiting={self._active_scale_waiting_answer} "
-            f"completed={self._scale_pause_turns} "
-            f"defer={self._scale_pause_turns} "
+            f"pause={self._scale_pause_turns} "
             f"tags={result.scale_tags}"
         )
 
@@ -1967,9 +1968,7 @@ class ConversationPipeline:
 
     def _get_relaxation_done(self) -> bool:
         """Check if relaxation training was completed this session."""
-        if hasattr(self, '_relaxation_done'):
-            return self._relaxation_done
-        return False
+        return bool(self._relaxation_recommended_this_session)
 
     def _get_recent_dialogue_text(self, max_turns: int = 6) -> str:
         """Get recent dialogue text for agent context."""
