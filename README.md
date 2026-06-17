@@ -80,14 +80,25 @@
 
 ```text
 📝 原始条目：入睡困难、睡不安稳或睡得太多
-💬 自然问法：睡眠怎么样，入睡、睡踏实，或者睡太多这几种情况有没有？
+💬 自然问法：最近睡眠怎么样？是比较难睡着、容易醒，还是反而睡得特别多？
 ```
+
+🎯 **量表触发机制**：系统使用累计症状信号评分，每轮根据用户表达为三个量表独立加分：
+
+| 信号 | 加分 | 示例 |
+|------|------|------|
+| 低落情绪词 | PHQ-9 +1 | 不开心/难受/低落/痛苦 |
+| 无因低落 | PHQ-9 +2 | "没有原因就是不开心" |
+| 持续性词 | 所有量表 +1 | 最近/一直/经常/很久了 |
+| 焦虑词 | GAD-7 +2 | 焦虑/紧张/担心/心慌 |
+| 创伤词 | PCL-5 +2 | 噩梦/创伤/闪回 |
+
+当某个量表累计分 ≥ 3 时，系统自然进入该量表的采样。
 
 后台完成：
 
-* ⏰ 前若干轮优先建立关系，不立即进入量表；
+* ⏰ 前若干轮优先建立关系，通过累计信号判断何时启动量表；
 * 🔄 已开始的量表继续完成，不被新量表打断；
-* 📋 多个量表触发时进入队列；
 * 🔢 用户回答如"一半以上的天数"可自动推断分值；
 * 📝 每道题记录题号、原始条目、分数、选项标签；
 * 📊 量表完成后计算总分、严重程度、完成状态；
@@ -97,7 +108,14 @@
 
 #### 🧘 2.4 放松训练推荐
 
-根据对话内容、情绪状态或量表完成情况，自动推荐：
+系统根据对话内容、情绪状态自动推荐放松训练。推荐规则：
+
+* ⏰ **一个对话最多推荐一次**放松训练；
+* 🚫 **量表答题期间不推荐**（`waiting_scale_answer=True` 时禁止）；
+* 🔄 放松训练可在量表间隙插入，但必须等当前题完成后；
+* 📋 放松结束后系统主动恢复量表，继续补问未完成的问题。
+
+支持的放松方式：
 
 * 🌬️ 呼吸放松；
 * 💪 渐进式肌肉放松；
@@ -144,22 +162,22 @@
 ```mermaid
 flowchart TD
     A[🎤 用户语音 / 文本输入] --> B[📝 STT 转写 FunASR]
-    B --> C[⚙️ ConversationPipeline]
-    C --> D[🧠 意图识别 Agent]
-    C --> E[😊 情绪识别 Agent]
-    C --> F[🛡️ 危机关键词检测]
+    B --> B2[🔤 ASR 纠错]
+    B2 --> C[⚙️ ConversationPipeline]
+    C --> D[🧠 统一路由 Agent]
+    D -->|chat / start_scale / continue_scale / recommend_relaxation| E[📊 累计症状评分]
+    E -->|PHQ-9 / GAD-7 / PCL-5 达到阈值| F[📋 量表采样]
+    C --> G[🛡️ 危机关键词检测]
     C --> C2[📚 RAG 专家知识库]
     C2 --> H[💬 LLM 流式生成 Ollama]
-    D --> H
-    E --> H
     F --> H
-    H --> I[🏷️ 标签解析]
+    G --> H
+    H --> I[🏷️ 标签解析 + 内部标签过滤]
     I --> J{🔀 路由决策}
     J -->|普通回复| K[🔊 TTS VoxCPM2 播放]
-    J -->|量表追问| L[📋 无感量表模块]
     J -->|放松推荐| M[🧘 放松训练 / 视频 / 游戏]
     J -->|会话结束| N[📄 报告生成]
-    L --> O[📊 结构化量表结果]
+    F --> O[📊 结构化量表结果]
     O --> N
     N --> P[💾 JSON + PDF 报告]
 ```
@@ -270,7 +288,7 @@ pip install -r requirements-dev.txt
 
 ```bash
 # 推荐模型（根据显存选择）
-ollama pull qwen3.6:35b      # 推荐，约 20GB 显存
+ollama pull qwen2.5:72b      # 推荐，约 40GB 显存
 ollama pull qwen2.5:14b      # 备选，约 10GB 显存
 ollama pull qwen2.5:8b       # 轻量，约 6GB 显存
 ```
@@ -346,7 +364,7 @@ $env:VOICE_PROMPT_TEXT="参考音频对应的文本"
 $env:FUNASR_MODEL_PATH="D:\models\Fun-ASR-Nano-2512"
 
 # （可选）指定 Ollama 模型
-$env:OLLAMA_MODEL="qwen3.6:35b"
+$env:OLLAMA_MODEL="qwen2.5:72b"
 ```
 
 > 💡 也可以创建一个 `start.ps1` 或 `start.bat` 脚本，把这些环境变量写进去，一键启动。
@@ -544,11 +562,22 @@ Built-in PHQ-9, GAD-7, and PCL-5 short form — administered as natural conversa
 💬 Natural phrasing: How's your sleep been — trouble falling asleep, waking up a lot, or sleeping more than usual?
 ```
 
+🎯 **Scale triggering**: The system uses cumulative symptom signal scoring. Each turn independently scores three scales based on user input:
+
+| Signal | Score | Example |
+|--------|-------|---------|
+| Low mood words | PHQ-9 +1 | unhappy/sad/depressed |
+| Unexplained sadness | PHQ-9 +2 | "no reason, just unhappy" |
+| Duration words | All scales +1 | recently/always/for a long time |
+| Anxiety words | GAD-7 +2 | anxious/worried/nervous |
+| Trauma words | PCL-5 +2 | nightmare/trauma/flashback |
+
+When any scale reaches ≥ 3, the system naturally transitions into that scale's assessment.
+
 Backend handles:
 
-* ⏰ Rapport-building in early rounds before starting any scale;
+* ⏰ Rapport-building in early rounds, cumulative signal-based scale triggering;
 * 🔄 Active scales continue to completion without interruption;
-* 📋 Multiple scales queued when triggered simultaneously;
 * 🔢 Automatic score inference from responses like "more than half the days";
 * 📝 Per-item recording of question number, original text, score, and label;
 * 📊 Total score, severity level, and completion status computed on completion;
@@ -558,7 +587,14 @@ Backend handles:
 
 #### 🧘 2.4 Relaxation Training Recommendation
 
-Automatically recommends relaxation based on conversation content, emotional state, or scale completion:
+The system automatically recommends relaxation training based on conversation content and emotional state. Rules:
+
+* ⏰ **At most one relaxation** per conversation session;
+* 🚫 **Not recommended during active scale** (when `waiting_scale_answer=True`);
+* 🔄 Can be inserted between scale items, but must wait for current item to complete;
+* 📋 After relaxation ends, system resumes scale and continues asking remaining items.
+
+Supported relaxation types:
 
 * 🌬️ Breathing exercises;
 * 💪 Progressive muscle relaxation;
@@ -731,7 +767,7 @@ Visit [ollama.com](https://ollama.com) to download and install Ollama.
 
 ```bash
 # Recommended models (choose based on GPU memory)
-ollama pull qwen3.6:35b      # Recommended, ~20GB VRAM
+ollama pull qwen2.5:72b      # Recommended, ~40GB VRAM
 ollama pull qwen2.5:14b      # Alternative, ~10GB VRAM
 ollama pull qwen2.5:8b       # Lightweight, ~6GB VRAM
 ```
@@ -807,7 +843,7 @@ $env:VOICE_PROMPT_TEXT="Reference audio text"
 $env:FUNASR_MODEL_PATH="D:\models\Fun-ASR-Nano-2512"
 
 # (Optional) Specify Ollama model
-$env:OLLAMA_MODEL="qwen3.6:35b"
+$env:OLLAMA_MODEL="qwen2.5:72b"
 ```
 
 > 💡 Create a `start.ps1` or `start.bat` script with these variables for one-click launch.
