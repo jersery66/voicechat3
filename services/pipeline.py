@@ -603,9 +603,13 @@ class ConversationPipeline:
         self.relaxation_recommended: bool = False
         self.relaxation_active: bool = False
         self.relaxation_completed: bool = False
+        self.relaxation_used: bool = False  # True after any relaxation this session
 
         self.exit_requested: bool = False
         self.finish_mode: bool = False
+        self.pending_scale_resume: bool = False  # True after relaxation, need to resume scale
+        self.last_bot_asked_scale: Optional[str] = None
+        self.last_bot_asked_item: int = 0
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -644,8 +648,12 @@ class ConversationPipeline:
         self.relaxation_recommended = False
         self.relaxation_active = False
         self.relaxation_completed = False
+        self.relaxation_used = False
         self.exit_requested = False
         self.finish_mode = False
+        self.pending_scale_resume = False
+        self.last_bot_asked_scale = None
+        self.last_bot_asked_item = 0
         self._post_scale_relaxation_done = False
         self._relaxation_recommended_this_session.clear()
 
@@ -1151,14 +1159,14 @@ class ConversationPipeline:
                 logger.warning(f"[ScaleDebug] agent continue: {self._active_scale} Q{self._active_scale_q}")
 
             # Relaxation: agent proposes candidate, only set after spoken_text sync
-            # Skip if any relaxation already recommended this session
+            # Skip if: already used this session, or waiting for scale answer
             self._relaxation_candidate = None
             if (agent_route.get("recommend_relaxation")
                 and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE
-                and not self._relaxation_recommended_this_session):
+                and not self.relaxation_used
+                and not self._active_scale_waiting_answer):
                 self._relaxation_candidate = agent_route.get("relaxation_type") or "breathing"
-                # Mark as recommended to prevent duplicate recommendations
-                self._relaxation_recommended_this_session.add(self._relaxation_candidate)
+                logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
                 logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
                 # Inject hint so LLM naturally mentions relaxation in its reply
                 _relax_hint = {
@@ -1333,9 +1341,12 @@ class ConversationPipeline:
                 )
             result.end_type = None
         # Relaxation: LLM REC tag takes priority, otherwise use agent candidate
+        # Only allow if not already used this session and not waiting for scale answer
         llm_rec = detect_tag(result.full_response, REC_TAGS)
-        if llm_rec:
+        if llm_rec and not self.relaxation_used and not self._active_scale_waiting_answer:
             result.relaxation_rec = llm_rec
+            self.relaxation_used = True
+            logger.warning(f"[RelaxDebug] relaxation from LLM tag: {llm_rec}")
         elif self._relaxation_candidate:
             if self._active_scale and not result.scale_completed:
                 # During active scale: hold for later
@@ -1345,6 +1356,7 @@ class ConversationPipeline:
             else:
                 # Agent recommended + hint injected → trust the recommendation
                 result.relaxation_rec = self._relaxation_candidate
+                self.relaxation_used = True
                 logger.warning(f"[RelaxDebug] relaxation from agent: {self._relaxation_candidate}")
         self._relaxation_candidate = None
 
