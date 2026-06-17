@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-**小薇 (WeiWei Teacher)** — an AI psychological counseling voice system for mandatory drug rehabilitation centers. Conducts real-time voice conversations using Motivational Interviewing (MI) techniques, monitors emotional states, triggers relaxation training videos, and generates clinical assessment reports.
+**小薇 (Heart Doctor)** — an AI psychological counseling voice system for mandatory drug rehabilitation centers. Conducts real-time voice conversations using Motivational Interviewing (MI) techniques, monitors emotional states, triggers relaxation training, and generates clinical assessment reports.
 
 **Language**: Python 100%. **Platform**: Windows with NVIDIA GPU (12GB+ VRAM recommended).
 
@@ -20,7 +20,7 @@ python main.py                # Main entry (PySide6 UI)
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests/ -v    # 66 unit tests (no external deps required)
+python -m pytest tests/ -v    # 72 unit tests (no external deps required)
 ```
 
 ### Config Health Check
@@ -34,54 +34,65 @@ python scripts/check_config.py   # Validates Ollama, model paths, knowledge base
 ### Conversation Pipeline
 
 ```
-Microphone → STTService (FunASR) → RAGService (intent routing + knowledge lookup)
-  → LLMService (Ollama streaming, qwen2.5:72b) → Response split on "|||"
-  → ReportService (emotion tracking, session lifecycle) → TTSService (CosyVoice3 streaming + voice cloning)
-  → DataManager (save audio/text) → VideoService (relaxation videos) → ReportGenerator (PDF)
+Microphone → STTService (FunASR) → ASR correction
+  → AgentService (unified routing: chat/start_scale/continue_scale/recommend_relaxation)
+  → Symptom signal scoring (cumulative per-scale: PHQ-9, GAD-7, PCL-5)
+  → RAGService (knowledge lookup, truncated 500-1200 chars)
+  → LLMService (Ollama streaming, qwen2.5:72b, num_predict=1024)
+  → Response split on "|||" (handles reversed format)
+  → Tag detection (END/REC/SCALE) + internal tag leak protection
+  → Scale sync with spoken_text
+  → TTSService (VoxCPM2, play lock, non-blocking)
+  → DataManager (save) → ReportGenerator (PDF with scale tables)
 ```
 
 ### Key Files
 
 - **`main.py`** — PySide6 application entry point. Runs config health check, then loads models and launches the main window.
-- **`config.py`** — All configuration: model paths, Ollama settings, 140+ line system prompt with MI rules, audio params, UI dimensions, session limits, crisis hotlines.
-- **`services/`** — Core service layer, each module uses singleton pattern (`_service = None` + `get_service()`).
-- **`services/_ollama_pool.py`** — Shared `ollama.Client` singleton pool (avoids repeated handshakes across llm_service and report_service).
-- **`services/error_monitor.py`** — WARNING+ log aggregation to `logs/errors.jsonl` with in-memory ring buffer.
-- **`services/metrics.py`** — Performance metrics with `@measure()` decorator and `Metrics.timer()` context manager.
-- **`services/logger.py`** — Unified logging configuration.
-- **`data/data_manager.py`** — Hierarchical storage: user profiles, session data, reports organized by date/subject ID. Uses `_read_json`/`_write_json` abstractions.
-- **`knowledge_base/*.json`** — Clinical psychology knowledge entries in `{keywords, title, content}` format.
-- **`ui/`** — PySide6 UI (frosted glass theme, left-right split layout). Main application UI.
-- **`scripts/check_config.py`** — Pre-launch health check (Ollama, model paths, knowledge base, data directory).
-- **`tests/`** — Unit tests (pytest): pipeline tag detection, RAG scoring, data manager, report service.
+- **`config.py`** — All configuration: model paths, system prompt, thresholds, crisis hotlines, `AGENT_ROUTE_ENABLED`, `ENABLE_SCALE_HARD_TRIGGER`.
+- **`services/pipeline.py`** — Unified pipeline. `ConversationPipeline.execute()` orchestrates everything. Key patterns: cumulative symptom scoring, agent routing, scale state machine, relaxation sync, ASR correction, internal tag leak protection.
+- **`services/llm_service.py`** — Ollama streaming chat. `_history_visible_text()` keeps conversation history clean. `LLMRawFull` logging for debugging. Thinking mode support with `reasoning_buffer`.
+- **`services/agent_service.py`** — 3B model wrapper (OpenAI SDK). `route_conversation_actions()` returns unified JSON: `{action, scale, item, confidence, reason}`. Field mapping handles new (`action`) and old (`scale_action`) formats. `_parse_json_loose()` handles ```json fences.
+- **`services/scales.py`** — Scale definitions (PHQ-9, GAD-7, PCL-5). `ScaleManager` with unified keyword lists (`DEPRESSION_KW`, `ANXIETY_KW`, `TRAUMA_KW`).
+- **`services/report_service.py`** — Session lifecycle, round counting, time limits. `time_limit_prompt_shown` + `continued_after_time_limit` prevent repeated dialogs.
+- **`services/report_generator.py`** — PDF generation with scale results tables (section 三、量表评估结果).
+- **`services/tts_service_voxcpm.py`** — VoxCPM2 TTS with `_play_lock` (threading.Lock) preventing concurrent playback.
+- **`services/rag_service.py`** — Weighted keyword matching. RAG truncated to 500 chars during active scale, 1200 otherwise.
+- **`services/session_orchestrator.py`** — Session state machine: IDLE→CHATTING→RELAXATION_RECOMMENDED→VIDEO_PLAYING→POST_RELAXATION→SESSION_ENDING→SESSION_ENDED.
+- **`data/data_manager.py`** — Hierarchical storage by date/subject ID.
+- **`ui/main_window.py`** — Main window. Key methods: `_run_pipeline()`, `_post_pipeline_routing()`, `_handle_session_end()`, `_request_end_with_readiness_check()`, `_on_session_finished()`.
+- **`ui/dialogs.py`** — `EndSessionDecisionDialog` (4 states), `CrisisDialog`, `ContinueOrEndDialog`.
+- **`ui/chat_panel.py`** — WeChat-style layout (top spacer, messages pinned to bottom). `_on_scroll_range_changed` for auto-scroll.
+- **`knowledge_base/*.json`** — Clinical psychology entries `{keywords, title, content}`.
 
 ### Critical Patterns
 
-- **`|||` delimiter**: LLM responses split at `|||` — left side is clinical analysis (never shown/voiced), right side is the spoken reply played via TTS.
-- **Session end detection**: Regex tags embedded in LLM output (`[END_GOAL_ACHIEVED]`, `[END_TIME_LIMIT]`, `[END_SAFETY]`, etc.) trigger session termination and report generation.
-- **Relaxation triggers**: Tags like `[REC_BREATHING]`, `[REC_MUSCLE]`, `[REC_MEDITATION]` in LLM output cause fullscreen video playback via Pygame.
-- **CosyVoice tags in TTS**: Native tags `[breath]` and `[laughter]` are embedded in text and processed by CosyVoice3 during synthesis. Tags are stripped from UI display text.
-- **Streaming pipeline**: LLM streams chunk-by-chunk; TTS uses producer-consumer with 5-chunk pre-buffering before audio playback starts.
-- **Streaming exception recovery**: If LLM streaming fails mid-response, partial output is persisted to conversation history so UI and context stay consistent.
-- **Agent service recheck**: 3B model availability is cached for 60s, then re-probed — temporary failures don't permanently disable the agent.
-- **Pre-compiled regexes**: All tag-stripping patterns in `pipeline.py` are compiled once at module level (`_RE_REC_TAG`, `_RE_END_TAG`, etc.) for hot-path performance.
-- **Ollama client pool**: `services/_ollama_pool.py` provides a process-wide singleton `ollama.Client` per host, shared by llm_service and report_service.
-- **Drug-term correction**: `stt_service.py` corrects common ASR errors for drug-related terms (e.g., "西毒"→"吸毒", "冰读"→"冰毒").
-
-### External Dependencies (not in requirements.txt)
-
-- **Ollama** server at `http://localhost:11434` with `qwen2.5:72b` (or other model, configurable in `config.py`)
-- **CosyVoice3** model files at `../CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B-2512/`
-- **FunASR** model files at `../qwen/CosyVoice/pretrained_models/Fun-ASR-Nano-2512/`
+- **`|||` delimiter**: LLM output split at `|||` — left = analysis, right = spoken. Handles reversed format (spoken|||analysis) automatically.
+- **Unified Agent routing**: `route_conversation_actions()` returns `{action, scale, item, confidence, reason}`. Actions: `chat/start_scale/continue_scale/recommend_relaxation/recommend_game/exit`.
+- **Cumulative symptom scoring**: `score_symptom_signals()` returns per-scale deltas (PHQ-9/GAD-7/PCL-5). Threshold ≥3 triggers scale. Agent timeout doesn't block.
+- **Scale control ownership**: Agent decides WHEN to enter scale. Pipeline controls WHICH item. LLM generates natural questions from `NATURAL_SCALE_QUESTIONS` + `SCALE_ITEM_CORES`.
+- **Relaxation rules**: Once per session (`relaxation_used`), not during `waiting_scale_answer`, only between items.
+- **Scale scoring**: `[SCALE:PHQ-9:Q1:S2]` tags (case-insensitive). `infer_scale_score_from_text()` with item-aware matching. `_score_short_scale_answer()` for "经常/没有/嗯".
+- **ASR correction**: `correct_asr_text()` fixes common errors (进场→经常, 又→有 for single-char).
+- **Internal tag leak protection**: `_FORBIDDEN_INTERNAL_TERMS` strips "高防御/情感反映/具体化开放式提问/PHQ-9" from spoken output.
+- **TTS play lock**: `_play_lock` prevents concurrent `generate_and_play`.
+- **Report-first exit**: Exit stops TTS, skips farewell, generates report. End-session plays farewell AFTER report/PDF.
+- **Session lifecycle**: `_prepare_next_subject()` for cleanup. `_start_new_session()` only when next subject confirms.
+- **LLM duplicate output**: `|||` split handles reversed format. Duplicate analysis tags truncated.
+- **Stop sequences**: Only `["User:", "Visitor:", "用户:", "来访者:", "Human:"]`.
 
 ## Key Configuration
 
 All tunable parameters live in `config.py`:
-- `OLLAMA_MODEL`, `OLLAMA_BASE_URL` — LLM backend selection
-- System prompt (lines ~143-268) — MI counseling rules, OARS technique constraints, crisis protocols, CosyVoice tag specs
-- `MAX_CONVERSATION_TURNS`, `SESSION_TIME_LIMIT_MINUTES` — session boundaries
-- `CRISIS_HOTLINES` — emergency contact numbers
-- Audio params: `SAMPLE_RATE`, `AUDIO_CHANNELS`, `TTS_*` settings
+- `OLLAMA_MODEL`, `OLLAMA_HOST` — LLM backend
+- `AGENT_ROUTE_ENABLED` — enable/disable AgentRoute
+- `AGENT_TIMEOUT` — agent call timeout (3s)
+- `ENABLE_SCALE_HARD_TRIGGER` — deterministic trigger (disabled)
+- `MIN_ROUNDS_BEFORE_SCALE` — rounds before scale (5)
+- `MIN_ROUNDS_FOR_RELAXATION` — rounds before relaxation (8)
+- `MAX_CONVERSATION_MINUTES` — hard time limit (45)
+- `CRISIS_HOTLINES` — emergency contacts
+- `SYSTEM_PROMPT` — MI counseling rules, output format, ASR tolerance
 
 ## Knowledge Base Format
 
@@ -91,3 +102,12 @@ JSON entries in `knowledge_base/` follow:
 ```
 
 RAG service performs weighted keyword matching against these entries, injecting relevant context into the LLM system prompt.
+
+## Development Rules
+
+- Run `python -m pytest tests/ -v` after changes
+- Agent only decides WHEN to enter scale; Pipeline controls WHICH item
+- Relaxation: once per session, not during waiting_scale_answer
+- Never expose clinical jargon to participant-facing UI
+- TTS must never block pipeline return
+- Auto-push to GitHub after every task (use `-c http.proxy="" -c https.proxy=""`)
