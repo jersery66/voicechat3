@@ -233,8 +233,8 @@ def correct_asr_text(raw_text: str, recent_context: str = "") -> tuple:
 
 
 def get_end_type_enum(string_name: str):
-    """Convert string end type name to EndType enum. Lazy import to avoid circular deps."""
-    from services.report_service import EndType
+    """Convert string end type name to EndType enum."""
+    from core.types import EndType
     _map = {
         'goal_achieved': EndType.GOAL_ACHIEVED,
         'time_limit': EndType.TIME_LIMIT,

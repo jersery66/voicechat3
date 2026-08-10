@@ -23,14 +23,10 @@ from services.logger import get_logger
 logger = get_logger(__name__)
 
 
-class EndType(Enum):
-    """Session end types"""
-    NONE = "NONE"                      # 未结束
-    GOAL_ACHIEVED = "GOAL_ACHIEVED"    # 目标达成
-    TIME_LIMIT = "TIME_LIMIT"          # 时间/轮次限制
-    SAFETY = "SAFETY"                  # 安全边界（危机干预）
-    INVALID = "INVALID"                # 无效对话
-    QUIT = "QUIT"                      # 用户主动退出
+# EndType now lives in core.types (pure domain layer) so dependency-free
+# modules can use it. Re-exported here for backward compatibility:
+# `from services.report_service import EndType` keeps working.
+from core.types import EndType  # noqa: F401  (re-exported for backward compatibility)
 
 
 class ReportService:
