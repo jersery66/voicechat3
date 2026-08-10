@@ -1,7 +1,7 @@
 # Voice Chat Application Configuration
 
 import os
-import glob as _glob
+import fnmatch as _fnmatch
 
 # Application root (this file's directory)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +35,48 @@ def _find_dir(base, *candidates):
     return None
 
 
+def _iter_dirs_bounded(base, max_depth=4, max_dirs=20000):
+    """Yield directory paths under base up to max_depth levels.
+
+    Never follows symlinks/junctions (avoids infinite recursion on cyclic
+    links) and stops after scanning max_dirs directories (bounds import time
+    on very large trees such as PROGRAM_ROOT).
+    """
+    base = os.path.abspath(base)
+    base_depth = base.rstrip(os.sep).count(os.sep)
+    scanned = 0
+    for root, dirs, _files in os.walk(base, followlinks=False):
+        depth = root.rstrip(os.sep).count(os.sep) - base_depth
+        if depth >= max_depth:
+            dirs[:] = []
+            continue
+        for d in list(dirs):
+            scanned += 1
+            if scanned > max_dirs:
+                return
+            yield os.path.join(root, d)
+
+
+def _find_model_dir(base, name_patterns, marker_names, max_depth=4):
+    """Depth-bounded search for a model directory.
+
+    Returns the first directory under base whose basename matches any of
+    name_patterns (fnmatch semantics) and which contains at least one of
+    marker_names. Returns None on any error — import must never crash.
+    """
+    if not base or not os.path.isdir(base):
+        return None
+    try:
+        for d in _iter_dirs_bounded(base, max_depth=max_depth):
+            name = os.path.basename(d)
+            if any(_fnmatch.fnmatch(name, pat) for pat in name_patterns):
+                if any(os.path.exists(os.path.join(d, m)) for m in marker_names):
+                    return d
+    except OSError:
+        pass
+    return None
+
+
 def _detect_funasr():
     """Search for FunASR model in common locations."""
     env_path = os.environ.get("FUNASR_MODEL_PATH")
@@ -60,19 +102,11 @@ def _detect_funasr():
         os.path.join(PROGRAM_ROOT, "CosyVoice"),
         os.path.join(PROGRAM_ROOT, "QWEN", "CosyVoice"),
     ]
-    patterns = [
-        os.path.join("**", "Fun-ASR-Nano-2512"),
-        os.path.join("**", "FunASR*"),
-        os.path.join("**", "funasr*"),
-    ]
+    name_patterns = ["Fun-ASR-Nano-2512", "FunASR*", "funasr*"]
     for base in search_bases:
-        if not os.path.isdir(base):
-            continue
-        for pat in patterns:
-            matches = _glob.glob(os.path.join(base, pat), recursive=True)
-            for m in matches:
-                if os.path.isdir(m) and (os.path.exists(os.path.join(m, "model.pt")) or os.path.exists(os.path.join(m, "model.py"))):
-                    return m
+        found = _find_model_dir(base, name_patterns, ("model.pt", "model.py"), max_depth=4)
+        if found:
+            return found
     return None
 
 
@@ -127,13 +161,9 @@ def _detect_voxcpm():
             return candidate
 
     for base in [APP_MODELS_ROOT, OFFLINE_MODELS_ROOT, PROGRAM_ROOT]:
-        if not os.path.isdir(base):
-            continue
-        for pat in [os.path.join("**", "VoxCPM2"), os.path.join("**", "voxcpm*")]:
-            matches = _glob.glob(os.path.join(base, pat), recursive=True)
-            for m in matches:
-                if os.path.isdir(m) and os.path.exists(os.path.join(m, "config.json")):
-                    return m
+        found = _find_model_dir(base, ["VoxCPM2", "voxcpm*"], ("config.json",), max_depth=4)
+        if found:
+            return found
     return None
 
 
@@ -188,7 +218,11 @@ def _detect_ollama_model():
     """
     try:
         import ollama
-        client = ollama.Client(host=OLLAMA_HOST)
+        try:
+            client = ollama.Client(host=OLLAMA_HOST, timeout=5)
+        except TypeError:
+            # Older ollama SDK versions do not accept a timeout kwarg.
+            client = ollama.Client(host=OLLAMA_HOST)
         raw = client.list()
         model_list = raw.get("models", []) if isinstance(raw, dict) else []
         names = []
@@ -217,12 +251,32 @@ def _detect_ollama_model():
 
 
 # --- Run detection ---
-_FUNASR_DETECTED = _detect_funasr()
-_COSYVOICE_BASE_DETECTED, _COSYVOICE_MODEL_DETECTED = _detect_cosyvoice()
-_VOXCPM_DETECTED = _detect_voxcpm()
-_VOICE_PROMPT_DETECTED = _detect_voice_prompt()
-_VOICE_PROMPT_TEXT_DETECTED = _detect_voice_prompt_text()
-_OLLAMA_DETECTED = _detect_ollama_model()
+# Each probe is individually guarded: model auto-detection must never crash
+# the import of this module (the app degrades gracefully instead).
+try:
+    _FUNASR_DETECTED = _detect_funasr()
+except Exception:
+    _FUNASR_DETECTED = None
+try:
+    _COSYVOICE_BASE_DETECTED, _COSYVOICE_MODEL_DETECTED = _detect_cosyvoice()
+except Exception:
+    _COSYVOICE_BASE_DETECTED, _COSYVOICE_MODEL_DETECTED = None, None
+try:
+    _VOXCPM_DETECTED = _detect_voxcpm()
+except Exception:
+    _VOXCPM_DETECTED = None
+try:
+    _VOICE_PROMPT_DETECTED = _detect_voice_prompt()
+except Exception:
+    _VOICE_PROMPT_DETECTED = None
+try:
+    _VOICE_PROMPT_TEXT_DETECTED = _detect_voice_prompt_text()
+except Exception:
+    _VOICE_PROMPT_TEXT_DETECTED = None
+try:
+    _OLLAMA_DETECTED = _detect_ollama_model()
+except Exception:
+    _OLLAMA_DETECTED = None
 
 
 # ============== Paths (auto-detected with fallbacks) ==============
