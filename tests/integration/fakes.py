@@ -136,6 +136,11 @@ class FakeData:
     def set_user_id(self, subject_id):
         self.subject_id = subject_id
 
+    def start_new_session(self):
+        self.user_messages.clear()
+        self.assistant_messages.clear()
+        return None
+
     def save_user_message(self, audio, text):
         self.user_messages.append({"text": text})
         return None, None
