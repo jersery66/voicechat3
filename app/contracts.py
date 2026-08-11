@@ -99,6 +99,10 @@ class EndSessionCommand(Command):
     # Relaxation type suggested by the AI reply tags; used only when the end
     # flow forces one last relaxation. None -> engine default ("breathing").
     relaxation_hint: Optional[RelaxationKind] = None
+    # If the AI reply already carried a relaxation recommendation tag, the
+    # end flow must NOT force another one (legacy parity: the recommendation
+    # already happened inside the reply).
+    ai_relaxation_tag: Optional[str] = None
 
 
 class PlayRelaxationCommand(Command):
@@ -116,6 +120,11 @@ class RelaxationFinishedCommand(Command):
 class ContinueChatCommand(Command):
     """After relaxation, user chose to keep chatting."""
     kind: Literal["continue_chat"] = "continue_chat"
+
+
+class AcknowledgeTimeLimitCommand(Command):
+    """User chose 'continue chatting' in the time-limit dialog."""
+    kind: Literal["acknowledge_time_limit"] = "acknowledge_time_limit"
 
 
 class PlayGameCommand(Command):
@@ -156,6 +165,7 @@ AnyCommand = (
     | PlayRelaxationCommand
     | RelaxationFinishedCommand
     | ContinueChatCommand
+    | AcknowledgeTimeLimitCommand
     | PlayGameCommand
     | SelectMediaCommand
     | ConfirmUserInfoCommand

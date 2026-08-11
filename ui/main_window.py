@@ -98,6 +98,31 @@ class MainWindow(QMainWindow):
         self._dark_mode = False
         self.orchestrator = SessionOrchestrator()
         self.session_end_controller = SessionEndController()
+
+        # Refactor shadow mode: mirror lifecycle decisions into the new
+        # app.engine.SessionEngine for validation. LEGACY stays authoritative;
+        # engine events are only logged. Never crashes the app: any failure
+        # here disables shadow mode silently.
+        self.session_engine = None
+        try:
+            from config import SESSION_ENGINE_SHADOW
+            if SESSION_ENGINE_SHADOW:
+                from app.engine import SessionEngine
+                self.session_engine = SessionEngine(
+                    emit=lambda ev: logger.info(
+                        f"[EngineShadow] event {ev.kind}: "
+                        f"{ev.model_dump(mode='json', exclude={'ts'})}"
+                    )
+                )
+                self.session_engine.start()
+                app = QApplication.instance()
+                if app is not None:
+                    app.aboutToQuit.connect(self.session_engine.shutdown)
+                logger.info("[EngineShadow] SessionEngine shadow mode enabled")
+        except Exception as e:
+            logger.warning(f"[EngineShadow] disabled due to init error: {e}")
+            self.session_engine = None
+
         self.user_info = {}
         self.current_user_id = None
         self.info_confirmed = False
@@ -918,8 +943,31 @@ class MainWindow(QMainWindow):
         if self.orchestrator.state not in (SessionState.IDLE, SessionState.SESSION_ENDED):
             self.orchestrator.transition_to(SessionState.SESSION_ENDED)
 
+    def _engine_submit(self, command):
+        """Shadow-mode forward of a lifecycle command to SessionEngine.
+
+        Legacy flow remains authoritative; this only validates the engine
+        mirror in parallel. Any failure is logged and swallowed so shadow
+        mode can never break the running session.
+        """
+        engine = getattr(self, "session_engine", None)
+        if engine is None:
+            return
+        try:
+            engine.submit(command)
+        except Exception as e:
+            logger.warning(f"[EngineShadow] submit failed: {e}")
+
     def _start_new_session(self):
         self.chat_panel.clear_chat()
+        # Shadow-mode mirror of the session start (legacy stays authoritative)
+        try:
+            from app.contracts import StartSessionCommand, SubjectInfo
+            self._engine_submit(StartSessionCommand(
+                subject=SubjectInfo(subject_id=str(self.current_user_id or "unknown"))
+            ))
+        except Exception as e:
+            logger.warning(f"[EngineShadow] start_session forward failed: {e}")
         self.session_emotions = []
         self._scale_tags = {}
         self._session_ending = False
@@ -1080,6 +1128,13 @@ class MainWindow(QMainWindow):
         if not self.orchestrator.can_play_video():
             return
 
+        # Shadow-mode mirror (legacy stays authoritative)
+        try:
+            from app.contracts import PlayRelaxationCommand
+            self._engine_submit(PlayRelaxationCommand(relaxation=relaxation_type))
+        except Exception as e:
+            logger.warning(f"[EngineShadow] play_relaxation forward failed: {e}")
+
         # Record scale state before relaxation interrupts it
         if self.pipeline:
             active_state = self.pipeline.get_active_scale_state()
@@ -1107,6 +1162,14 @@ class MainWindow(QMainWindow):
 
     def _on_video_finished(self, relaxation_type):
         """视频播放完成：记录放松，回到正常聊天。不弹结束框。"""
+        # Shadow-mode mirror (legacy stays authoritative). Legacy records the
+        # relaxation after the video regardless of how it exited, so forward
+        # completed=True; a deferred end request resumes inside the engine.
+        try:
+            from app.contracts import RelaxationFinishedCommand
+            self._engine_submit(RelaxationFinishedCommand(completed=True))
+        except Exception as e:
+            logger.warning(f"[EngineShadow] relaxation_finished forward failed: {e}")
         # Record relaxation AFTER video finishes
         relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
         if relax_name:
@@ -1217,6 +1280,13 @@ class MainWindow(QMainWindow):
 
     def _on_timeout_continue(self):
         """User chose to continue after time limit."""
+        # Shadow-mode mirror: engine must never re-ask the time limit this
+        # session (legacy continued_after_time_limit parity).
+        try:
+            from app.contracts import AcknowledgeTimeLimitCommand
+            self._engine_submit(AcknowledgeTimeLimitCommand())
+        except Exception as e:
+            logger.warning(f"[EngineShadow] acknowledge_time_limit forward failed: {e}")
         if self.report_service:
             self.report_service.continued_after_time_limit = True
             self.report_service.time_limit_prompt_shown = True
@@ -1908,6 +1978,21 @@ class MainWindow(QMainWindow):
 
     def _handle_session_end(self, end_type, relaxation_tag=None, allow_force_relaxation=True):
         """Handle session end using orchestrator decision logic."""
+        # Shadow-mode mirror of the end request (legacy stays authoritative).
+        # Forwarded BEFORE the legacy guards consume _user_explicit_end so the
+        # engine sees the same effective inputs as the legacy decision.
+        try:
+            from app.contracts import EndSessionCommand
+            self._engine_submit(EndSessionCommand(
+                end_type=end_type,
+                allow_force_relaxation=bool(
+                    allow_force_relaxation and not self._user_explicit_end
+                ),
+                ai_relaxation_tag=relaxation_tag,
+                source="legacy_end_flow",
+            ))
+        except Exception as e:
+            logger.warning(f"[EngineShadow] end_session forward failed: {e}")
         if self._session_ending:
             logger.info("[EndFlow] _handle_session_end ignored: already ending")
             return

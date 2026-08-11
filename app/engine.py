@@ -88,6 +88,7 @@ class SessionEngine:
             "play_relaxation": self._handle_play_relaxation,
             "relaxation_finished": self._handle_relaxation_finished,
             "continue_chat": self._handle_continue_chat,
+            "acknowledge_time_limit": self._handle_acknowledge_time_limit,
         }
 
     # ==================== lifecycle ====================
@@ -213,6 +214,9 @@ class SessionEngine:
         force_allowed = (
             command.allow_force_relaxation
             and command.end_type not in _NO_FORCE_END_TYPES
+            # legacy gate: if the AI reply already recommended a relaxation,
+            # do not force another one
+            and not command.ai_relaxation_tag
             # legacy gate: ANY played relaxation (completed or not) blocks
             # the forced recommendation — read the FSM context, not a local flag
             and not self._orchestrator.ctx.current_relaxation_type
@@ -286,6 +290,12 @@ class SessionEngine:
         """User chose to keep chatting after relaxation."""
         self._orchestrator.transition_to(SessionState.CHATTING)
         self._emit_state()
+
+    def _handle_acknowledge_time_limit(self, command) -> None:
+        """User chose 'continue chatting' in the time-limit dialog:
+        the ask must never fire again this session (legacy
+        continued_after_time_limit parity)."""
+        self.acknowledge_time_limit_continue()
 
     # ==================== time-limit decisions (legacy single-shot) ====================
 

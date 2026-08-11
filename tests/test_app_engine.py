@@ -7,6 +7,7 @@ import pytest
 from core.types import EndType
 from core.session_fsm import SessionState
 from app.contracts import (
+    AcknowledgeTimeLimitCommand,
     ContinueChatCommand,
     ContinueOrEndAskEvent,
     EndSessionCommand,
@@ -260,3 +261,20 @@ class TestThreadedMode:
         engine.submit(StartSessionCommand(subject=SubjectInfo(subject_id="SZ")))
         time.sleep(0.2)
         assert engine.state == SessionState.IDLE  # never processed
+
+
+class TestLegacyParityGates:
+    def test_ai_relaxation_tag_blocks_force(self, engine, events):
+        """Legacy parity: if the AI reply already carried a relaxation tag,
+        the end flow must not force another relaxation."""
+        start(engine)
+        engine.process_command(EndSessionCommand(
+            end_type=EndType.GOAL_ACHIEVED, ai_relaxation_tag="呼吸"))
+        assert any(isinstance(e, SessionEndingEvent) for e in events)
+        assert not any(isinstance(e, RelaxationRecommendedEvent) for e in events)
+
+    def test_acknowledge_time_limit_command_suppresses_ask(self, engine):
+        start(engine)
+        assert engine.should_emit_time_limit_ask(45.1, 45) is True
+        engine.process_command(AcknowledgeTimeLimitCommand())
+        assert engine.should_emit_time_limit_ask(46.0, 45) is False

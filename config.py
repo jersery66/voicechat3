@@ -692,6 +692,13 @@ MAX_CONVERSATION_ROUNDS = 15        # Maximum conversation rounds before soft li
 MAX_CONVERSATION_MINUTES = 45       # Maximum session duration in minutes
 TIME_WARNING_MINUTES = 40           # Show warning at this point (5 min before limit)
 
+# ============== Refactor: SessionEngine Shadow Mode ==============
+# When enabled, MainWindow mirrors every lifecycle decision into the new
+# app.engine.SessionEngine for validation. The LEGACY flow stays fully
+# authoritative; engine decisions are only logged ([EngineShadow] prefix).
+# Disable with VOICECHAT_ENGINE_SHADOW=0.
+SESSION_ENGINE_SHADOW = os.environ.get("VOICECHAT_ENGINE_SHADOW", "1") == "1"
+
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen3:8b")
