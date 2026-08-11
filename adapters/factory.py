@@ -2,14 +2,23 @@
 #
 # Lazy imports on purpose: importing this module must never pull heavy
 # dependencies (torch/funasr/pygame). Each builder imports its concrete
-# service only when called, and returns the existing singleton so legacy
-# code and the new engine share one instance per backend.
+# service only when called.
+#
+# INSTANCE SHARING — honest status (verified by review):
+#   - agent / rag builders return module singletons that MainWindow ALSO
+#     obtains via the same getters -> shared instance.
+#   - llm / stt / tts / storage / report: legacy MainWindow constructs its
+#     own instances directly (load_models), so these getters currently
+#     return DIFFERENT objects than the legacy ones. Before authoritative
+#     engine wiring, MainWindow must be switched to these builders so both
+#     sides share one instance per backend (otherwise: two conversation
+#     histories, two session dirs, two round counters).
 #
 # Backend selection knobs will land here (e.g. VOICECHAT_TTS_BACKEND to
 # choose VoxCPM vs CosyVoice) — today each slot has a single production
 # implementation, matching legacy behavior exactly.
 
-from typing import Optional
+import os
 
 
 def build_llm_backend():
@@ -39,12 +48,18 @@ def build_stt_backend():
     return get_stt_service()
 
 
-def build_video_backend():
+def build_video_backend(base_dir: str = None):
+    """VideoPlayTool requires base_dir (legacy passes the app directory)."""
+    if base_dir is None:
+        from config import APP_ROOT
+        base_dir = APP_ROOT
     from services.tools.video_tool import VideoPlayTool
-    return VideoPlayTool()
+    return VideoPlayTool(base_dir)
 
 
-def build_storage_backend(data_root: Optional[str] = None):
+def build_storage_backend():
+    """DataManager uses config.DATA_ROOT; the singleton takes no root
+    argument (a per-root instance would silently diverge from legacy)."""
     from data.data_manager import get_data_manager
     return get_data_manager()
 

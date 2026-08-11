@@ -7,7 +7,7 @@
 | 环境变量 | 默认 | 含义 |
 |---|---|---|
 | `VOICECHAT_ENGINE_SHADOW` | `1`（开） | 引擎并行镜像生命周期决策，仅记日志 |
-| `VOICECHAT_SESSION_ENGINE_AUTHORITATIVE` | `0`（关） | 引擎决策驱动会话（legacy 退居兜底） |
+| `VOICECHAT_SESSION_ENGINE_AUTHORITATIVE` | `0`（关） | 预留开关：目标是引擎决策驱动会话。**当前无代码消费此开关**，设 1 无任何行为变化（见下方"尚未实现"节） |
 
 对应 `config.SESSION_ENGINE_SHADOW` / `config.SESSION_ENGINE_AUTHORITATIVE`。
 
@@ -16,7 +16,7 @@
 1. 部署机按 `docs/refactor/02_smoke_checklist.md` 跑完全部场景，**应用行为与重构前零差异**；
 2. `[EngineShadow]` 日志中引擎状态序列与 legacy 实际流程逐一比对一致（开始/结束/放松/视频/超时五类事件）；
 3. 无 `[EngineShadow] submit failed` / `disabled due to init error` 记录；
-4. 本机测试全绿（`pytest tests/`，当前基线 205 passed）。
+4. 本机测试全绿（`pytest tests/`，当前基线 225 passed）。
 
 ## 切换步骤
 

@@ -1,14 +1,16 @@
 """Adapter conformance tests.
 
 Two directions:
-1. The integration fakes must satisfy every Protocol (guarantees the fake
-   layer cannot drift from the contract).
-2. The REAL production classes must structurally satisfy the Protocols
-   (attribute-level check via runtime_checkable). Constructors are called
-   with minimal args and no network/model access happens.
+1. The integration fakes must satisfy every Protocol via isinstance
+   (runtime_checkable) — guarantees the fake layer cannot drift from the
+   contract.
+2. The REAL production classes must expose every protocol method
+   (class-level getattr check; all current services define methods at
+   class level). Signatures are a review-checked invariant — see the
+   Phase-2 stage-3 review notes.
+3. Factory smoke: builders that need no GPU/audio are actually CALLED so
+   constructor mistakes (missing required args) cannot hide.
 """
-
-import pytest
 
 from adapters.protocols import (
     AgentBackend,
@@ -26,7 +28,9 @@ from tests.integration.fakes import (
     FakeLLM,
     FakeRAG,
     FakeReport,
+    FakeSTT,
     FakeTTS,
+    FakeVideo,
 )
 
 
@@ -43,6 +47,12 @@ class TestFakesConform:
     def test_fake_tts(self):
         assert isinstance(FakeTTS(), TTSBackend)
 
+    def test_fake_stt(self):
+        assert isinstance(FakeSTT(), STTBackend)
+
+    def test_fake_video(self):
+        assert isinstance(FakeVideo(), VideoBackend)
+
     def test_fake_data(self):
         assert isinstance(FakeData(), StorageBackend)
 
@@ -51,23 +61,26 @@ class TestFakesConform:
 
 
 class TestRealServicesConform:
-    """Structural checks on production classes. No heavy loading: model
-    init happens in load_model()/first use, not in these constructors."""
+    """Class-level surface checks on production classes. No heavy loading:
+    model init happens in load_model()/first use, not here."""
 
     def test_llm_service(self):
         from services.llm_service import LLMService
-        svc = LLMService.__new__(LLMService)  # skip ctor side effects
-        # verify the protocol surface exists on the class itself
         for name in ("chat", "reset_conversation", "set_history_context"):
             assert callable(getattr(LLMService, name, None)), name
-        assert "conversation_history" in LLMService.__init__.__code__.co_names or True
-        _ = svc  # noqa
+        # conversation_history is an instance attribute set in __init__;
+        # verify __init__ actually assigns it.
+        import inspect
+        src = inspect.getsource(LLMService.__init__)
+        assert "conversation_history" in src
 
     def test_agent_service(self):
         from services.agent_service import AgentService
         for name in ("is_available", "route_conversation_actions",
                      "classify_intent", "detect_emotion",
-                     "assess_crisis_risk", "_keyword_crisis_risk"):
+                     "assess_crisis_risk", "_keyword_crisis_risk",
+                     "generate_greeting", "generate_post_relaxation_greeting",
+                     "generate_fill_info_prompt"):
             assert callable(getattr(AgentService, name, None)), name
 
     def test_rag_service(self):
@@ -81,12 +94,14 @@ class TestRealServicesConform:
 
     def test_stt_service(self):
         from services.stt_service import STTService
-        for name in ("transcribe", "start_recording", "stop_recording"):
+        for name in ("transcribe", "start_recording", "stop_recording",
+                     "is_vad_triggered"):
             assert callable(getattr(STTService, name, None)), name
 
     def test_video_tool(self):
         from services.tools.video_tool import VideoPlayTool
         assert callable(getattr(VideoPlayTool, "execute", None))
+        assert isinstance(getattr(VideoPlayTool, "FILE_MAP", None), dict)
 
     def test_data_manager(self):
         from data.data_manager import DataManager
@@ -96,17 +111,33 @@ class TestRealServicesConform:
 
     def test_report_service(self):
         from services.report_service import ReportService
-        for name in ("increment_round", "get_round_count",
+        for name in ("start_session", "increment_round", "get_round_count",
                      "should_warn_time_limit", "is_over_limit"):
             assert callable(getattr(ReportService, name, None)), name
 
 
-class TestFactoryImports:
-    """The factory module itself must stay import-light (no heavy deps at
-    import time); builders are checked lazily."""
+class TestFactorySmoke:
+    """Actually call builders that need no GPU/audio/network. This catches
+    constructor mistakes (e.g. missing required args) that pure attribute
+    checks miss."""
 
-    def test_factory_module_imports_without_heavy_deps(self):
-        import importlib
-        mod = importlib.import_module("adapters.factory")
-        assert hasattr(mod, "build_llm_backend")
-        assert hasattr(mod, "build_tts_backend")
+    def test_build_video_backend_default_base_dir(self):
+        from adapters.factory import build_video_backend
+        tool = build_video_backend()
+        assert callable(getattr(tool, "execute", None))
+        assert isinstance(getattr(tool, "FILE_MAP", None), dict)
+
+    def test_build_video_backend_custom_base_dir(self):
+        from adapters.factory import build_video_backend
+        tool = build_video_backend(base_dir=".")
+        assert tool.base_dir == "."
+
+    def test_build_storage_backend_returns_singleton(self):
+        from adapters.factory import build_storage_backend
+        from data.data_manager import get_data_manager
+        assert build_storage_backend() is get_data_manager()
+
+    def test_build_report_backend_returns_singleton(self):
+        from adapters.factory import build_report_backend
+        from services.report_service import get_report_service
+        assert build_report_backend() is get_report_service()

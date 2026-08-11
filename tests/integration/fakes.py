@@ -37,8 +37,10 @@ class FakeLLM:
             yield full[i:i + 8]
         self.conversation_history.append({"role": "assistant", "content": full})
 
-    def reset_conversation(self):
+    def reset_conversation(self, clear_context: bool = False):
         self.conversation_history = []
+        if clear_context:
+            self.history_context = ""
 
     def set_history_context(self, context: str):
         self.history_context = context
@@ -60,9 +62,10 @@ class FakeAgent:
     def is_available(self) -> bool:
         return self.available
 
-    def route_conversation_actions(self, user_text="", recent_history="",
+    def route_conversation_actions(self, user_text, recent_history="",
                                    current_round=0, active_scale=None,
-                                   collected_scales=None, relaxation_done=False):
+                                   collected_scales=None, relaxation_done=False,
+                                   timeout=None):
         call = {
             "user_text": user_text, "current_round": current_round,
             "active_scale": active_scale, "collected_scales": collected_scales,
@@ -85,8 +88,18 @@ class FakeAgent:
     def _keyword_crisis_risk(self, text: str):
         return dict(self.crisis_keyword_result)
 
-    def assess_crisis_risk(self, text: str, use_llm: bool = False):
+    def assess_crisis_risk(self, text: str, use_llm: bool = True):
         return dict(self.crisis_llm_result)
+
+    # Lifecycle greeting generation (protocol parity)
+    def generate_greeting(self, *args, **kwargs) -> str:
+        return "你好，我是薇薇老师。"
+
+    def generate_post_relaxation_greeting(self, *args, **kwargs) -> str:
+        return "做完感觉怎么样？"
+
+    def generate_fill_info_prompt(self, *args, **kwargs) -> str:
+        return "麻烦先填一下基本信息。"
 
 
 class FakeRAG:
@@ -112,6 +125,10 @@ class FakeReport:
         self.round_count = start_round
         self.over_limit = False
 
+    def start_session(self):
+        self.round_count = 0
+        self.over_limit = False
+
     def increment_round(self):
         self.round_count += 1
 
@@ -126,28 +143,74 @@ class FakeReport:
 
 
 class FakeData:
-    """Records save calls, writes nothing."""
+    """Records save calls, writes nothing.
+
+    start_new_session mirrors REAL DataManager semantics: it opens a new
+    session scope and returns a folder name, but NEVER deletes previously
+    recorded messages (cross-session history must survive)."""
 
     def __init__(self):
         self.user_messages: List[Dict[str, Any]] = []
         self.assistant_messages: List[Dict[str, Any]] = []
         self.subject_id: Optional[str] = None
+        self.session_count: int = 0
 
-    def set_user_id(self, subject_id):
-        self.subject_id = subject_id
+    def set_user_id(self, user_id):
+        self.subject_id = user_id
 
     def start_new_session(self):
-        self.user_messages.clear()
-        self.assistant_messages.clear()
-        return None
+        self.session_count += 1
+        folder = f"{self.subject_id or 'default_subject'}"
+        if self.session_count > 1:
+            folder += f"_{self.session_count}"
+        return folder
 
     def save_user_message(self, audio, text):
         self.user_messages.append({"text": text})
         return None, None
 
-    def save_assistant_message(self, audio, text, sample_rate=None):
+    def save_assistant_message(self, audio, text, sample_rate=48000):
         self.assistant_messages.append({"text": text})
         return None, None
+
+
+class FakeSTT:
+    """Scripted transcription backend."""
+
+    def __init__(self, transcript: str = ""):
+        self.transcript = transcript
+        self.recording = False
+        self.vad_triggered = False
+
+    def transcribe(self, audio):
+        return self.transcript
+
+    def start_recording(self):
+        self.recording = True
+
+    def stop_recording(self):
+        self.recording = False
+        return None
+
+    def is_vad_triggered(self) -> bool:
+        return self.vad_triggered
+
+
+class FakeVideo:
+    """Records relaxation video playback requests."""
+
+    FILE_MAP = {
+        "breathing": "breathing_exercise.mp4",
+        "muscle": "muscle_relaxation.mp4",
+        "meditation": "meditation.mp4",
+    }
+
+    def __init__(self):
+        self.played: List[Optional[str]] = []
+
+    def execute(self, relaxation_type=None, filename=None):
+        self.played.append(relaxation_type)
+        return None
 
 
 class FakeTTS:
