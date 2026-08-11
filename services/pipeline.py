@@ -53,6 +53,10 @@ from core.scoring import (  # noqa: F401  (re-exported for backward compatibilit
     is_scale_interruption_text,
 )
 
+# Scale state container (core.scale_fsm). The pipeline delegates all
+# scale-related fields to it via properties below — call sites unchanged.
+from core.scale_fsm import ScaleState, delegate_property
+
 
 # Natural-language versions of scale questions for conversational delivery.
 # Keys are (scale_name, question_number).  Used by the programmatic question
@@ -336,6 +340,36 @@ class ConversationPipeline:
     No Qt dependency.
     """
 
+    # ---- Scale state delegation (core.scale_fsm.ScaleState) ----
+    # All scale-related fields live in self._scale_state; these properties
+    # keep the legacy attribute names working so existing call sites and
+    # log statements remain byte-for-byte unchanged.
+    _administered_scales = delegate_property("administered")
+    _scale_answers = delegate_property("answers")
+    _active_scale = delegate_property("active_scale")
+    _active_scale_q = delegate_property("active_item")
+    _active_scale_waiting_answer = delegate_property("waiting_answer")
+    _scale_queue = delegate_property("queue")
+    _scale_pause_turns = delegate_property("pause_turns")
+    _scale_soft_paused = delegate_property("soft_paused")
+    _scale_resume_item = delegate_property("resume_item")
+    _crisis_lock_turns = delegate_property("crisis_lock_turns")
+    scale_active = delegate_property("scale_active")
+    scale_name = delegate_property("scale_name")
+    scale_current_item = delegate_property("scale_current_item")
+    scale_completed = delegate_property("scale_completed")
+    scale_refused_rounds = delegate_property("scale_refused_rounds")
+    scale_defer_until_round = delegate_property("scale_defer_until_round")
+    last_scale_ask_round = delegate_property("last_scale_ask_round")
+    consecutive_scale_asks = delegate_property("consecutive_scale_asks")
+    symptom_scores = delegate_property("symptom_scores")
+    symptom_turns = delegate_property("symptom_turns")
+    last_scale_trigger_round = delegate_property("last_scale_trigger_round")
+    scale_trigger_cooldown = delegate_property("scale_trigger_cooldown")
+    pending_scale_resume = delegate_property("pending_scale_resume")
+    last_bot_asked_scale = delegate_property("last_bot_asked_scale")
+    last_bot_asked_item = delegate_property("last_bot_asked_item")
+
     def __init__(self, stt_service, llm_service, tts_service,
                  rag_service, agent_service, report_service, data_manager,
                  session_emotions: list, emotion_tracker=None):
@@ -348,33 +382,17 @@ class ConversationPipeline:
         self.data = data_manager
         self.session_emotions = session_emotions
         self.emotion_tracker = emotion_tracker
-        self._administered_scales: set = set()
-        self._scale_answers: Dict[str, Dict[int, int]] = {}  # {scale_name: {q_num: score}}
-        self._active_scale: Optional[str] = None   # currently in-progress scale name
-        self._active_scale_q: int = 1              # current question number
-        self._active_scale_waiting_answer: bool = False  # True = asked, waiting for user reply
-        self._scale_queue: List[str] = []           # scales queued while one is active
-        self._scale_pause_turns: int = 0            # turns to pause before next scale item
-        self._scale_soft_paused: bool = False       # True when scale is temporarily paused
-        self._scale_resume_item: int = 1            # item to resume after soft pause
+        # All scale-related mutable state lives in this single container
+        # (core.scale_fsm.ScaleState). Legacy attribute names are exposed
+        # via delegate properties declared on the class below.
+        self._scale_state = ScaleState()
         self._post_scale_relaxation_done: bool = False  # True after post-scale relaxation recommended
         self._relaxation_recommended_this_session: set = set()  # track which types recommended
         self._game_recommended_this_session: bool = False  # track if game was recommended
         self._pending_relaxation_after_scale: Optional[str] = None  # hold relaxation until scale done
         self._relaxation_candidate: Optional[str] = None  # agent-proposed candidate for current turn
         self._game_candidate: bool = False  # agent-proposed game for current turn
-        self._crisis_lock_turns: int = 0            # turns to block all scales after crisis
         self._agent_route_cooldown: int = 0         # cooldown after agent route failure
-
-        # Flow state for natural conversation
-        self.scale_active: bool = False
-        self.scale_name: Optional[str] = None
-        self.scale_current_item: int = 0
-        self.scale_completed: bool = False
-        self.scale_refused_rounds: int = 0
-        self.scale_defer_until_round: int = 0
-        self.last_scale_ask_round: int = -999
-        self.consecutive_scale_asks: int = 0
 
         self.relaxation_recommended: bool = False
         self.relaxation_active: bool = False
@@ -383,15 +401,7 @@ class ConversationPipeline:
 
         self.exit_requested: bool = False
         self.finish_mode: bool = False
-        self.pending_scale_resume: bool = False  # True after relaxation, need to resume scale
-        self.last_bot_asked_scale: Optional[str] = None
-        self.last_bot_asked_item: int = 0
 
-        # Cumulative symptom signals per scale (independent scoring)
-        self.symptom_scores: Dict[str, int] = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
-        self.symptom_turns: int = 0
-        self.last_scale_trigger_round: int = -999
-        self.scale_trigger_cooldown: int = 3
         # Shared executor for parallel intent / emotion / crisis classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -408,37 +418,16 @@ class ConversationPipeline:
 
     def reset_session(self):
         """Reset per-session state (scale tracking). Call on new session."""
-        self._administered_scales.clear()
-        self._scale_answers.clear()
-        self._active_scale = None
-        self._active_scale_q = 1
-        self._active_scale_waiting_answer = False
-        self._scale_queue.clear()
-        self._scale_pause_turns = 0
-        self._crisis_lock_turns = 0
+        # All scale-related fields reset via the state container
+        # (exact legacy semantics preserved in ScaleState.reset()).
+        self._scale_state.reset()
         self._agent_route_cooldown = 0
-        self._scale_soft_paused = False
-        self._scale_resume_item = 1
-        self.scale_active = False
-        self.scale_name = None
-        self.scale_current_item = 0
-        self.scale_completed = False
-        self.scale_refused_rounds = 0
-        self.scale_defer_until_round = 0
-        self.last_scale_ask_round = -999
-        self.consecutive_scale_asks = 0
         self.relaxation_recommended = False
         self.relaxation_active = False
         self.relaxation_completed = False
         self.relaxation_used = False
         self.exit_requested = False
         self.finish_mode = False
-        self.pending_scale_resume = False
-        self.last_bot_asked_scale = None
-        self.last_bot_asked_item = 0
-        self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
-        self.symptom_turns = 0
-        self.last_scale_trigger_round = -999
         self._post_scale_relaxation_done = False
         self._relaxation_recommended_this_session.clear()
 
