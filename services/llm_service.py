@@ -275,9 +275,11 @@ class LLMService:
             left_is_analysis = any(m in left for m in _analysis_markers)
             right_is_analysis = any(m in right for m in _analysis_markers)
             if left_is_analysis and not right_is_analysis:
-                text = right
+                text = right          # 正常格式 分析|||口语
+            elif right_is_analysis and not left_is_analysis:
+                text = left           # 反转格式 口语|||分析
             else:
-                # Usual / ambiguous case: spoken is on the right
+                # 两侧都无法确定（ambiguous）：默认取右侧（常规格式）
                 text = right
         # Strip control tags and leaked internal strategy terms
         text = re.sub(r'<think>[\s\S]*?</think>', '', text)

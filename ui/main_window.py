@@ -2008,7 +2008,13 @@ class MainWindow(QMainWindow):
                     relaxation_tag = "呼吸"
 
         if allow_force_relaxation:
-            action, data = self.orchestrator.evaluate_session_end(end_type, relaxation_tag)
+            # Feed the pipeline's own "已做过放松" flag so the FSM honors the
+            # "at most once per session" rule even when relaxation was driven
+            # outside the FSM (completes the M10 fix in core/session_fsm.py).
+            action, data = self.orchestrator.evaluate_session_end(
+                end_type, relaxation_tag,
+                relaxation_used=getattr(self.pipeline, "relaxation_used", False),
+            )
         else:
             self.orchestrator.transition_to(SessionState.SESSION_ENDING)
             action, data = "generate_reports", {}
