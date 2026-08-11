@@ -146,7 +146,14 @@ class ReportGenerationTool:
         mgr = get_scale_manager()
         results = []
         for scale_name, answers in scale_tags.items():
-            score_list = [answers.get(i + 1, 0) for i in range(len(answers))]
+            # Map by REAL question number, not positional index. `answers` is
+            # {q_num: score}; sort by q_num so non-contiguous / out-of-order
+            # keys do not misalign with the scale's item order.
+            try:
+                sorted_qnums = sorted(answers.keys(), key=lambda k: int(k))
+            except (ValueError, TypeError):
+                sorted_qnums = sorted(answers.keys())
+            score_list = [answers[q] for q in sorted_qnums]
             score_result = mgr.score_scale(scale_name, score_list)
             score_result["scale_name"] = scale_name
             score_result["raw_answers"] = answers

@@ -2,6 +2,7 @@
 # Generates professional psychological assessment reports in PDF format
 
 import os
+import re
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -9,6 +10,17 @@ from typing import Dict, Any, Optional
 from services.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Safe character whitelist for subject ids used in report filenames.
+_SUBJECT_ID_SAFE = re.compile(r'[^A-Za-z0-9_\-]')
+
+
+def _safe_subject_id(subject_id: str) -> str:
+    """Sanitize a subject id so it can only ever produce a filename within
+    the report output directory (no path separators, no reserved names)."""
+    cleaned = (subject_id or "").strip()
+    cleaned = _SUBJECT_ID_SAFE.sub('_', cleaned)[:64]
+    return cleaned or "unknown"
 
 try:
     from reportlab.lib import colors
@@ -53,7 +65,14 @@ class PDFReportGenerator:
         for path in font_paths:
             if path and os.path.exists(path):
                 try:
-                    pdfmetrics.registerFont(TTFont(self.font_name, path))
+                    # .ttc collections need an explicit subfont index (0 = first
+                    # face, typically the Regular weight); reportlab raises
+                    # "Font file is a collection" without it.
+                    if path.lower().endswith(".ttc"):
+                        pdfmetrics.registerFont(
+                            TTFont(self.font_name, path, subfontIndex=0))
+                    else:
+                        pdfmetrics.registerFont(TTFont(self.font_name, path))
                     self.font_registered = True
                     logger.info(f"PDF字体已注册: {path}")
                     return
@@ -153,7 +172,7 @@ class PDFReportGenerator:
             
             # Generate filename
             date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            subject_id = report_data.get("subject_id", "unknown")
+            subject_id = _safe_subject_id(report_data.get("subject_id", "unknown"))
             filename = f"assessment_report_{subject_id}_{date_str}.pdf"
             filepath = os.path.join(output_path, filename)
             
@@ -397,11 +416,17 @@ class PDFReportGenerator:
             if scale_results:
                 story.append(Paragraph("三、量表评估结果", styles["heading"]))
                 for scale_key, scale in scale_results.items():
+                    # Guard against missing / zero / None scores so we never
+                    # render "None / 0" or divide by zero downstream.
+                    total_score = scale.get('total_score') or 0
+                    max_score = scale.get('max_score') or 0
+                    severity = scale.get('severity') or '未分类'
+                    completed = bool(scale.get('completed'))
                     title = (
-                        f"{scale_key}：总分 {scale.get('total_score', 0)} / "
-                        f"{scale.get('max_score', 0)}，"
-                        f"严重程度：{scale.get('severity', '未分类')}，"
-                        f"完成状态：{'已完成' if scale.get('completed') else '未完成'}"
+                        f"{scale_key}：总分 {total_score} / "
+                        f"{max_score}，"
+                        f"严重程度：{severity}，"
+                        f"完成状态：{'已完成' if completed else '未完成'}"
                     )
                     story.append(Paragraph(title, styles["body"]))
                     story.append(Spacer(1, 4))

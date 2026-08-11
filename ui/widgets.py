@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QSizePolicy
 )
 from PySide6.QtCore import (
-    Qt, QPropertyAnimation, QEasingCurve, QTimer, Signal,
+    Qt, QTimer, Signal,
     Property, QPoint, QSize, QParallelAnimationGroup
 )
 from PySide6.QtGui import (
@@ -56,30 +56,6 @@ class FrostedPanel(QFrame):
             self._bg_color = (255, 255, 255)
             self._border_alpha = 0.3
         self._rebuild_style()
-
-
-class AnimatedButton(QPushButton):
-    """Button with press animation effect."""
-
-    def __init__(self, text="", parent=None):
-        super().__init__(text, parent)
-        self.setCursor(Qt.PointingHandCursor)
-        self._press_anim = None
-
-    def mousePressEvent(self, event):
-        self._animate_press()
-        super().mousePressEvent(event)
-
-    def _animate_press(self):
-        self._press_anim = QPropertyAnimation(self, b"geometry")
-        self._press_anim.setDuration(80)
-        geo = self.geometry()
-        shrink = 2
-        self._press_anim.setStartValue(geo)
-        self._press_anim.setKeyValueAt(0.5, geo.adjusted(shrink, shrink, -shrink, -shrink))
-        self._press_anim.setEndValue(geo)
-        self._press_anim.setEasingCurve(QEasingCurve.OutQuad)
-        self._press_anim.start()
 
 
 class BlinkButton(QPushButton):
@@ -316,7 +292,17 @@ class MessageBubble(QFrame):
         self.text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.text_label.setFont(QFont("Microsoft YaHei", 11))
 
+        self._apply_style()
+        layout.addWidget(self.text_label)
+
+    def _apply_style(self):
+        """Apply colors based on the current class-level dark mode.
+
+        Extracted so :meth:`refresh_style` can re-run it after a theme switch
+        without rebuilding the whole widget.
+        """
         dark = self._dark_mode
+        layout = self.layout()
         if self._is_system:
             self.text_label.setAlignment(Qt.AlignCenter)
             self.text_label.setStyleSheet("""
@@ -325,7 +311,8 @@ class MessageBubble(QFrame):
                 padding: 6px 12px;
                 background: transparent;
             """)
-            layout.setAlignment(Qt.AlignCenter)
+            if layout is not None:
+                layout.setAlignment(Qt.AlignCenter)
         elif self._is_user:
             self.setStyleSheet(f"""
                 background-color: {'#2d5a27' if dark else '#DCF8C6'};
@@ -350,7 +337,9 @@ class MessageBubble(QFrame):
                 background: transparent;
             """)
 
-        layout.addWidget(self.text_label)
+    def refresh_style(self):
+        """Re-apply styling after a theme (dark mode) switch."""
+        self._apply_style()
 
     def set_text(self, text):
         self._full_text = text

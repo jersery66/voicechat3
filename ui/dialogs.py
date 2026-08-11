@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QGroupBox
+    QFrame
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -29,100 +29,6 @@ class BaseDialog(QDialog):
                 font-size: 12px;
             }
         """)
-
-
-class SessionEndDialog(BaseDialog):
-    """Dialog shown when a session ends."""
-
-    def __init__(self, parent=None, end_type="", feedback="", relaxation_rec="",
-                 report_path=None, play_audio=True):
-        super().__init__(parent, "会话结束")
-        self.setMinimumSize(450, 350)
-        self._report_path = report_path
-        self._setup_ui(end_type, feedback, relaxation_rec)
-
-    def _setup_ui(self, end_type, feedback, relaxation_rec):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        # Title
-        title = QLabel("会话已结束")
-        title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: #2d5a27;")
-        layout.addWidget(title)
-
-        # End type
-        type_label = QLabel(f"结束类型: {end_type}")
-        type_label.setAlignment(Qt.AlignCenter)
-        type_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
-        layout.addWidget(type_label)
-
-        # Feedback
-        if feedback:
-            feedback_group = QGroupBox("会话反馈")
-            feedback_group.setStyleSheet("""
-                QGroupBox {
-                    font-weight: bold; color: #2d5a27;
-                    border: 1px solid #d0d0d0; border-radius: 8px;
-                    margin-top: 8px; padding-top: 16px;
-                }
-                QGroupBox::title {
-                    subcontrol-origin: margin;
-                    left: 12px; padding: 0 6px;
-                }
-            """)
-            fb_layout = QVBoxLayout(feedback_group)
-            fb_label = QLabel(feedback)
-            fb_label.setWordWrap(True)
-            fb_label.setStyleSheet("color: #2c3e50; font-size: 12px;")
-            fb_layout.addWidget(fb_label)
-            layout.addWidget(feedback_group)
-
-        # Relaxation recommendation
-        if relaxation_rec:
-            rec_label = QLabel(f"放松建议: {relaxation_rec}")
-            rec_label.setWordWrap(True)
-            rec_label.setStyleSheet("color: #8b7355; font-size: 12px; font-style: italic;")
-            layout.addWidget(rec_label)
-
-        # Report path
-        if report_path:
-            rp_label = QLabel(f"报告已保存: {report_path}")
-            rp_label.setWordWrap(True)
-            rp_label.setStyleSheet("color: #1565C0; font-size: 11px;")
-            layout.addWidget(rp_label)
-
-        layout.addStretch()
-
-        # Buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        btn_new = QPushButton("开始新会话")
-        btn_new.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50; color: white;
-                border: 1px solid #388E3C; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #388E3C; }
-        """)
-        btn_new.clicked.connect(self.accept)
-        btn_layout.addWidget(btn_new)
-
-        btn_close = QPushButton("关闭")
-        btn_close.setStyleSheet("""
-            QPushButton {
-                background-color: #f0f0f0; color: #2c3e50;
-                border: 1px solid #d0d0d0;
-            }
-            QPushButton:hover { background-color: #e0e0e0; }
-        """)
-        btn_close.clicked.connect(self.reject)
-        btn_layout.addWidget(btn_close)
-
-        layout.addLayout(btn_layout)
 
 
 class CrisisDialog(BaseDialog):
@@ -249,14 +155,20 @@ class CrisisDialog(BaseDialog):
 
 
 class ContinueOrEndDialog(BaseDialog):
-    """Dialog asking user to continue or end the session."""
+    """Dialog asking user to continue or end the session.
+
+    Builds the final layout exactly once in __init__ — the `timeout` flag only
+    switches the title/text, never rebuilding children asynchronously (which
+    previously left old/!new widgets briefly co-existing via deleteLater()).
+    """
 
     continue_chosen = Signal()
     end_chosen = Signal()
 
-    def __init__(self, parent=None):
-        super().__init__(parent, "继续或结束")
+    def __init__(self, parent=None, timeout=False):
+        super().__init__(parent, "会话时间提醒" if timeout else "继续或结束")
         self.setMinimumSize(380, 200)
+        self._timeout = timeout
         self._setup_ui()
 
     def _setup_ui(self):
@@ -264,14 +176,24 @@ class ContinueOrEndDialog(BaseDialog):
         layout.setSpacing(16)
         layout.setContentsMargins(24, 24, 24, 24)
 
-        title = QLabel("放松训练已完成")
+        if self._timeout:
+            title_text = "对话时间提醒"
+            title_color = "#5d4037;"
+            msg_text = "我们的对话已进行约45分钟。请问您想继续聊，还是今天就到这里？"
+        else:
+            title_text = "放松训练已完成"
+            title_color = "#2d5a27;"
+            msg_text = "请问您想要继续对话，还是会话到此结束？"
+
+        title = QLabel(title_text)
         title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: #2d5a27;")
+        title.setStyleSheet(f"color: {title_color};")
         layout.addWidget(title)
 
-        msg = QLabel("请问您想要继续对话，还是会话到此结束？")
+        msg = QLabel(msg_text)
         msg.setAlignment(Qt.AlignCenter)
+        msg.setWordWrap(True)
         msg.setStyleSheet("color: #2c3e50; font-size: 12px;")
         layout.addWidget(msg)
 
@@ -311,65 +233,6 @@ class ContinueOrEndDialog(BaseDialog):
     def _on_end(self):
         self.end_chosen.emit()
         self.accept()
-
-    def _setup_ui_for_timeout(self):
-        """Rebuild UI for timeout ask-continue scenario."""
-        for child in self.findChildren(QLabel):
-            child.deleteLater()
-        for child in self.findChildren(QPushButton):
-            child.deleteLater()
-
-        layout = self.layout()
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.layout():
-                item.layout().deleteLater()
-            elif item.widget():
-                item.widget().deleteLater()
-
-        layout.setSpacing(16)
-        layout.setContentsMargins(24, 24, 24, 24)
-
-        title = QLabel("对话时间提醒")
-        title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: #5d4037;")
-        layout.addWidget(title)
-
-        msg = QLabel("我们的对话已进行约45分钟。请问您想继续聊，还是今天就到这里？")
-        msg.setAlignment(Qt.AlignCenter)
-        msg.setWordWrap(True)
-        msg.setStyleSheet("color: #2c3e50; font-size: 12px;")
-        layout.addWidget(msg)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(20)
-
-        btn_continue = QPushButton("继续对话")
-        btn_continue.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50; color: white;
-                border: 1px solid #388E3C; font-weight: bold;
-                padding: 10px 24px; font-size: 13px;
-            }
-            QPushButton:hover { background-color: #388E3C; }
-        """)
-        btn_continue.clicked.connect(self._on_continue)
-        btn_layout.addWidget(btn_continue)
-
-        btn_end = QPushButton("结束会话")
-        btn_end.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800; color: white;
-                border: 1px solid #F57C00; font-weight: bold;
-                padding: 10px 24px; font-size: 13px;
-            }
-            QPushButton:hover { background-color: #F57C00; }
-        """)
-        btn_end.clicked.connect(self._on_end)
-        btn_layout.addWidget(btn_end)
-
-        layout.addLayout(btn_layout)
 
 
 class WarningDialog(BaseDialog):

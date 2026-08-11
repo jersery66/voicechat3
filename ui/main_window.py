@@ -28,14 +28,13 @@ from config import (
     APP_NAME, CRISIS_HOTLINES, GREETING_MESSAGE, GREETING_VARIANTS,
     POST_RELAXATION_MESSAGE, FILL_INFO_PROMPT, TRANSITION_PROMPT,
     SUGGESTIONS_PROMPT, CONTINUE_CHAT_MESSAGE, MIN_ROUNDS_FOR_RELAXATION,
-    POST_RELAXATION_TIMEOUT, TIMEOUT_END_MESSAGE
 )
 
 from .control_panel import ControlPanel
 from .chat_panel import ChatPanel
 from .loading_screen import LoadingScreen
 from .dialogs import (
-    SessionEndDialog, CrisisDialog, ContinueOrEndDialog,
+    CrisisDialog, ContinueOrEndDialog,
     WarningDialog, EndSessionDecisionDialog
 )
 from .styles import get_style
@@ -214,6 +213,11 @@ class MainWindow(QMainWindow):
         self._dark_mode = not self._dark_mode
         self.setStyleSheet(get_style(dark=self._dark_mode))
         MessageBubble.set_dark_mode(self._dark_mode)
+        # Re-apply styling to already-created bubbles so old messages recolor.
+        for msg in self.chat_panel._messages:
+            bubble = msg.get("bubble")
+            if bubble is not None:
+                bubble.refresh_style()
         for panel in [self.control_panel, self.chat_panel]:
             if hasattr(panel, 'set_theme'):
                 panel.set_theme(self._dark_mode)
@@ -544,15 +548,18 @@ class MainWindow(QMainWindow):
                 self.processing_queue.put(("set_buttons_state", "normal"))
 
     def _post_pipeline_routing(self, result):
-        """Route pipeline result to appropriate actions."""
+        """Route pipeline result to appropriate actions.
+
+        Runs on the pipeline worker thread — only put state to the GUI thread
+        via the processing queue. Never create/exec a QDialog here; that must
+        happen on the GUI thread to avoid "parent in a different thread" crashes.
+        """
         if result.end_type:
             et = get_end_type_enum(result.end_type)
-            # Safety can proceed directly
-            if et == EndType.SAFETY:
-                self._handle_session_end(et, result.relaxation_rec)
-                return
-            # Other END types: use unified readiness check
-            self._request_end_with_readiness_check(et, source="model_end_tag")
+            # Hand off the end request to the GUI thread (consistent with the
+            # "auto_end_session" path). SAFETY is handled directly on the GUI
+            # thread; other END tags go through the unified readiness check.
+            self.processing_queue.put(("end_session_request", (et, result.relaxation_rec)))
             return
 
         if result.relaxation_rec:
@@ -624,10 +631,12 @@ class MainWindow(QMainWindow):
                             last["text"] = content
                             self.chat_panel._scroll_to_bottom()
 
-                elif msg_type == "session_end":
-                    end_type, feedback, relaxation_rec, audio_data = content[:4]
-                    play_audio = content[4] if len(content) > 4 else True
-                    self._show_session_end_dialog(end_type, feedback, relaxation_rec, audio_data, play_audio)
+                elif msg_type == "end_session_request":
+                    et, relaxation_rec = content
+                    if et == EndType.SAFETY:
+                        self._handle_session_end(et, relaxation_rec)
+                    else:
+                        self._request_end_with_readiness_check(et, source="model_end_tag")
 
                 elif msg_type == "show_crisis":
                     self._show_crisis_dialog(content)
@@ -999,17 +1008,6 @@ class MainWindow(QMainWindow):
         if self.report_service:
             self.report_service.start_session()
 
-    def _show_session_end_dialog(self, end_type, feedback, relaxation_rec, audio_data, play_audio=True):
-        self.orchestrator.transition_to(SessionState.SESSION_ENDED)
-        report_path = getattr(self, '_interim_pdf_path', None)
-        dialog = SessionEndDialog(
-            self, end_type, feedback, relaxation_rec,
-            report_path=report_path, play_audio=play_audio
-        )
-        if dialog.exec():
-            self._prepare_next_subject()
-            self._play_opening_greeting()
-
     def _show_crisis_dialog(self, risk_data=None):
         risk_level = risk_data.get("risk_level", 0) if risk_data else 0
         indicators = risk_data.get("indicators", []) if risk_data else []
@@ -1059,39 +1057,13 @@ class MainWindow(QMainWindow):
         self.processing_queue.put(("highlight_relax_delayed", (tag, 500)))
         self.control_panel.set_status("建议完成放松训练")
 
-    def _start_post_relaxation_timeout(self):
-        """启动放松后超时定时器（60秒无操作自动结束）"""
-        self._post_relaxation_timer = QTimer(self)
-        self._post_relaxation_timer.setSingleShot(True)
-        self._post_relaxation_timer.timeout.connect(self._on_post_relaxation_timeout_trigger)
-        self._post_relaxation_timer.start(POST_RELAXATION_TIMEOUT * 1000)
-
-    def _on_post_relaxation_timeout_trigger(self):
-        """超时定时器触发：关闭弹窗，标记超时"""
-        self.orchestrator.ctx.post_relaxation_timed_out = True
-        if hasattr(self, '_post_relaxation_dialog') and self._post_relaxation_dialog:
-            self._post_relaxation_dialog.close()
-
-    def _on_post_relaxation_timeout(self):
-        """放松后超时：回到正常聊天，不自动结束。"""
-        if self.orchestrator.state != SessionState.POST_RELAXATION:
-            return
-        # Just return to chat — relaxation is a mid-session intervention, not pre-end
-        self.orchestrator.transition_to(SessionState.CHATTING)
-        self.control_panel.set_status("继续对话中...")
-
     def _cancel_post_relaxation_timer(self):
-        """取消放松后超时定时器（用户做出选择或关闭弹窗时调用）"""
+        """取消放松后超时定时器（用户做出选择或关闭弹窗时调用）。
+
+        保留为安全空操作：当前放松后不自动结束，定时器不再创建。
+        """
         if hasattr(self, '_post_relaxation_timer') and self._post_relaxation_timer.isActive():
             self._post_relaxation_timer.stop()
-
-    def _safe_play_farewell_tts(self, text):
-        """Play farewell TTS without blocking report generation."""
-        try:
-            if self.tts_service and text:
-                self.tts_service.generate_and_play(text)
-        except Exception as e:
-            logger.warning(f"Farewell TTS failed: {e}")
 
     def _play_tts_then_auto_end(self, text, end_type):
         """Play a short auto-end notice, then enter the full session-end flow."""
@@ -1266,9 +1238,7 @@ class MainWindow(QMainWindow):
         self._timeout_dialog_open = True
         try:
             from ui.dialogs import ContinueOrEndDialog
-            dialog = ContinueOrEndDialog(parent=self)
-            dialog.setWindowTitle("会话时间提醒")
-            dialog._setup_ui_for_timeout()
+            dialog = ContinueOrEndDialog(parent=self, timeout=True)
             dialog.continue_chosen.connect(self._on_timeout_continue)
             def _on_end():
                 self._user_explicit_end = True
@@ -1487,13 +1457,24 @@ class MainWindow(QMainWindow):
         self._play_opening_greeting()
 
     def _on_exit_program(self):
-        """退出整个程序。如果当前被试报告未生成，先生成报告再退出。"""
-        self._cancel_active_pipeline(reason="exit program")
+        """退出整个程序。如果当前被试报告未生成，先生成报告再退出。
 
-        if self._session_ending:
-            # Session end flow already running — just mark for quit after it finishes
-            self._pending_quit = True
-            self._show_exit_waiting_dialog("正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000)
+        组合守卫：退出意图始终记录在 `self._pending_quit`，并在已有结束流程
+        （正在结束 / 决策弹窗打开 / 请求进行中）时不重复发起新的结束请求，
+        避免退出意图被静默丢失。已有流程完成时会据此自动退出。
+        """
+        self._cancel_active_pipeline(reason="exit program")
+        # Mark quit intent up front so it survives any in-progress end flow.
+        self._pending_quit = True
+
+        if self._session_ending or self._end_decision_open or self._end_request_in_progress:
+            # An end flow is already running/showing a dialog — don't stack
+            # another request; just wait. It will auto-quit when finished.
+            logger.info("[EndFlow] quit requested during end flow; waiting for completion")
+            if not getattr(self, "_exit_wait_dialog", None):
+                self._show_exit_waiting_dialog(
+                    "正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000
+                )
             return
 
         # No current subject — just quit immediately, no report needed.
@@ -1512,9 +1493,7 @@ class MainWindow(QMainWindow):
         )
 
         if has_active_session and not self._current_report_generated:
-            # Use unified end flow — will check scales, relaxation, then end
-            # Don't show waiting dialog yet — let readiness check decide
-            self._pending_quit = True
+            # Use unified end flow — will check scales, relaxation, then end.
             self._user_explicit_end = True
             self._request_end_with_readiness_check(
                 EndType.QUIT, allow_force_relaxation=False, source="exit_program"
@@ -2047,7 +2026,12 @@ class MainWindow(QMainWindow):
             self._play_tts_async(rec_text)
             self.processing_queue.put(("highlight_relax_delayed", (tag, 1000)))
             self.processing_queue.put(("status", "请尝试放松训练"))
+            # Defer the end until the user finishes the recommended relaxation.
+            # Remember the deferred end so _on_video_finished can re-trigger it;
+            # otherwise the session could never end after relaxation completes.
+            self._pending_end_after_video = end_type
             self._session_ending = False
+            self._end_request_in_progress = False
             self.session_end_controller.defer_for_relaxation()
             return
 

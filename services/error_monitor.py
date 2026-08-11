@@ -84,16 +84,18 @@ class ErrorMonitor:
 
 
 _monitor: Optional[ErrorMonitor] = None
+_monitor_lock = threading.Lock()
 
 
 def get_error_monitor(log_dir: Optional[str] = None) -> ErrorMonitor:
     """Return the shared error monitor, lazily installing it on first call."""
     global _monitor
-    if _monitor is None:
-        if log_dir is None:
-            # Default: <APP_ROOT>/logs
-            app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            log_dir = os.path.join(app_root, "logs")
-        _monitor = ErrorMonitor(log_dir)
-        _monitor.install()
-    return _monitor
+    with _monitor_lock:
+        if _monitor is None:
+            if log_dir is None:
+                # Default: <APP_ROOT>/logs
+                app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                log_dir = os.path.join(app_root, "logs")
+            _monitor = ErrorMonitor(log_dir)
+            _monitor.install()
+        return _monitor

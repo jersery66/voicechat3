@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
-    QFrame, QGraphicsDropShadowEffect
+    QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QColor
@@ -144,9 +144,16 @@ class LoadingScreen(QWidget):
         self.progress_bar.setValue(100)
 
     def fade_out(self, callback=None):
-        """Fade out and remove the loading screen."""
+        """Fade out and remove the loading screen.
+
+        Uses a QGraphicsOpacityEffect because this is a plain QWidget child
+        (not a top-level window), so animating the `windowOpacity` property
+        has no effect.
+        """
         self._dot_timer.stop()
-        self._fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        opacity = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(opacity)
+        self._fade_anim = QPropertyAnimation(opacity, b"opacity")
         self._fade_anim.setDuration(500)
         self._fade_anim.setStartValue(1.0)
         self._fade_anim.setEndValue(0.0)

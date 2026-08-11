@@ -246,6 +246,9 @@ class STTService:
                         self.recorded_audio.append(audio_chunk)
                     except queue.Empty:
                         continue
+                # VAD auto-stop (or manual stop) reached: close the recording
+                # stream from this collector thread, not from the audio callback.
+                self._stop_stream()
                         
             self.collect_thread = threading.Thread(target=collect_audio, daemon=True)
             self.collect_thread.start()
@@ -258,14 +261,25 @@ class STTService:
             # Ideally the UI should know.
             logger.exception("Exception occurred")
         
+    def _stop_stream(self):
+        """Close the microphone input stream if it is still open.
+
+        Safe to call from any thread EXCEPT the stream's own audio callback
+        (sounddevice forbids closing the active stream from inside it).
+        """
+        stream = getattr(self, "stream", None)
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception as e:
+                logger.warning(f"Error closing recording stream: {e}")
+            self.stream = None
+
     def stop_recording(self) -> np.ndarray:
         """Stop recording and return the audio data."""
         self.is_recording = False
-        
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+        self._stop_stream()
             
         # Wait for collect thread to finish
         if hasattr(self, 'collect_thread') and self.collect_thread.is_alive():

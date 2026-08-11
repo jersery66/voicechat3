@@ -103,6 +103,10 @@ class EndSessionCommand(Command):
     # end flow must NOT force another one (legacy parity: the recommendation
     # already happened inside the reply).
     ai_relaxation_tag: Optional[str] = None
+    # Whether the pipeline already ran a relaxation this session (its own
+    # relaxation_used flag). When True, the forced-relaxation intercept is
+    # skipped so the "at most once per session" rule is honored.
+    relaxation_used: bool = False
 
 
 class PlayRelaxationCommand(Command):

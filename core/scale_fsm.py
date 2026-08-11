@@ -1,13 +1,18 @@
-# core.scale_fsm — scale state ownership (pure logic).
+# core.scale_fsm — scale STATE CONTAINER / snapshot (pure logic).
 #
-# Stage 1 of the scale extraction from ConversationPipeline:
-# this module OWNS all scale-related mutable state that used to be
-# scattered across the pipeline class (~25 fields). ConversationPipeline
-# keeps backward-compatible property aliases via delegate_property(), so
-# its ~120 internal call sites work untouched.
+# NOTE: this module is intentionally NOT a state machine. The authoritative
+# transition logic (start / advance / complete / resume, crisis locks, scale
+# deferral, etc.) still lives in services/pipeline.py, which is the single
+# owner of scale flow. ScaleState here is the one place that OWNS all
+# scale-related mutable state that used to be scattered across the pipeline
+# class (~25 fields); ConversationPipeline keeps backward-compatible property
+# aliases via delegate_property() so its ~120 internal call sites work
+# untouched. Treat ScaleState as the source of truth for scale state VALUES,
+# and the pipeline as the source of truth for scale TRANSITIONS.
 #
-# Later stages will move transition logic (start/advance/complete/resume)
-# in here as explicit, unit-tested methods.
+# If this module ever grows transition methods, they must mirror the
+# pipeline's invariants exactly (e.g. "at most one active scale", "resume
+# only after a soft pause") and be guarded by unit tests.
 
 from typing import Dict, List, Optional
 

@@ -37,6 +37,7 @@ from app.contracts import (
     PlayRelaxationCommand,
     RelaxationFinishedCommand,
     RelaxationRecommendedEvent,
+    SessionEndedEvent,
     SessionEndingEvent,
     StartSessionCommand,
     StateChangedEvent,
@@ -81,6 +82,9 @@ class SessionEngine:
         # end request deferred while a relaxation video is playing
         # (mirrors legacy MainWindow._pending_end_after_video)
         self._pending_end: Optional[EndSessionCommand] = None
+        # end_type of the most recent accepted end flow, surfaced again in
+        # SessionEndedEvent (H15).
+        self._last_end_type: Optional[EndType] = None
 
         self._handlers = {
             "start_session": self._handle_start_session,
@@ -89,6 +93,16 @@ class SessionEngine:
             "relaxation_finished": self._handle_relaxation_finished,
             "continue_chat": self._handle_continue_chat,
             "acknowledge_time_limit": self._handle_acknowledge_time_limit,
+            # Commands not yet owned by the shadow-mode engine: explicitly
+            # rejected (H14) so nothing is silently dropped.
+            "user_text": self._handle_unimplemented,
+            "start_recording": self._handle_unimplemented,
+            "stop_recording": self._handle_unimplemented,
+            "play_game": self._handle_unimplemented,
+            "select_media": self._handle_unimplemented,
+            "confirm_user_info": self._handle_unimplemented,
+            "prepare_next_subject": self._handle_unimplemented,
+            "exit": self._handle_unimplemented,
         }
 
     # ==================== lifecycle ====================
@@ -132,11 +146,30 @@ class SessionEngine:
         handler = self._handlers.get(command.kind)
         if handler is None:
             logger.warning(f"SessionEngine: unhandled command kind {command.kind!r}")
+            self._emit(ErrorEvent(
+                message=f"unhandled command kind: {command.kind!r}",
+                recoverable=True,
+                context="process_command",
+            ))
             return
         try:
             handler(command)
         except Exception:
             logger.exception(f"SessionEngine: handler failed for {command.kind!r}")
+
+    def _handle_unimplemented(self, command: Command) -> None:
+        """Explicitly reject commands not yet wired into the shadow-mode engine.
+
+        H14: previously such commands were silently dropped. Now we emit an
+        ErrorEvent so the client (and tests) can see the engine does not own
+        this flow yet, rather than wondering why nothing happened.
+        """
+        logger.info(f"SessionEngine: command {command.kind!r} not implemented (shadow mode)")
+        self._emit(ErrorEvent(
+            message=f"command {command.kind!r} is not implemented in this engine build",
+            recoverable=True,
+            context=command.kind,
+        ))
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -221,6 +254,9 @@ class SessionEngine:
             # the forced recommendation — read the FSM context, not a local flag
             and not self._orchestrator.ctx.current_relaxation_type
             and not self._orchestrator.ctx.has_forced_relaxation_rec
+            # pipeline-level flag: honor "at most once per session" even when
+            # the relaxation was driven outside the FSM (M10)
+            and not command.relaxation_used
         )
 
         if force_allowed:
@@ -253,6 +289,7 @@ class SessionEngine:
             return
 
         self._emit_state()
+        self._last_end_type = command.end_type
         self._emit(SessionEndingEvent(end_type=command.end_type))
 
     def _handle_play_relaxation(self, command: PlayRelaxationCommand) -> None:
@@ -328,8 +365,19 @@ class SessionEngine:
         """User chose 'continue chatting' in the time-limit dialog."""
         self._time_limit_continue_chosen = True
 
-    def mark_session_ended(self) -> None:
-        """Client finished report generation: complete the FSM + release guard."""
+    def mark_session_ended(self, report_path: Optional[str] = None,
+                           farewell_text: str = "") -> None:
+        """Client finished report generation: complete the FSM + release guard.
+
+        H15: emits the terminal SessionEndedEvent (with report_path /
+        farewell_text) so clients waiting on the session-end contract can
+        react. The end_type comes from the SessionEndingEvent emitted earlier.
+        """
         self._orchestrator.transition_to(SessionState.SESSION_ENDED)
         self._guard.reset()
         self._emit_state()
+        self._emit(SessionEndedEvent(
+            end_type=self._last_end_type or EndType.GOAL_ACHIEVED,
+            farewell_text=farewell_text,
+            report_path=report_path,
+        ))

@@ -65,6 +65,9 @@ class TTSService:
             raise RuntimeError(f"Failed to download VoxCPM2 from both ModelScope and HuggingFace: {e}")
 
     def load_model(self, progress_callback=None, **kwargs):
+        if self.model is not None:
+            logger.info("VoxCPM2 model already loaded, skipping re-load.")
+            return True
         if progress_callback:
             progress_callback("Loading VoxCPM2 model...")
 
@@ -76,23 +79,28 @@ class TTSService:
 
         from voxcpm import VoxCPM
 
-        if voxcpm_path and os.path.isdir(voxcpm_path):
-            self.model = VoxCPM(
-                voxcpm_model_path=voxcpm_path,
-                zipenhancer_model_path=None,
-                enable_denoiser=False,
-                optimize=False,
-            )
-        else:
-            voxcpm_path = self._download_model()
-            self.model = VoxCPM(
-                voxcpm_model_path=voxcpm_path,
-                zipenhancer_model_path=None,
-                enable_denoiser=False,
-                optimize=False,
-            )
+        try:
+            if voxcpm_path and os.path.isdir(voxcpm_path):
+                self.model = VoxCPM(
+                    voxcpm_model_path=voxcpm_path,
+                    zipenhancer_model_path=None,
+                    enable_denoiser=False,
+                    optimize=False,
+                )
+            else:
+                voxcpm_path = self._download_model()
+                self.model = VoxCPM(
+                    voxcpm_model_path=voxcpm_path,
+                    zipenhancer_model_path=None,
+                    enable_denoiser=False,
+                    optimize=False,
+                )
 
-        self.sample_rate = self.model.tts_model.sample_rate
+            self.sample_rate = self.model.tts_model.sample_rate
+        except Exception:
+            logger.error("VoxCPM2 model load failed, rolling back partial resources.")
+            self.unload_model()
+            raise
 
         if prompt_wav and os.path.exists(prompt_wav):
             logger.info(f"Voice prompt: {prompt_wav}")
@@ -113,6 +121,20 @@ class TTSService:
         if progress_callback:
             progress_callback("VoxCPM2 loaded!")
 
+        return True
+
+    def unload_model(self):
+        """Release the VoxCPM2 model and free GPU memory."""
+        if self.model is not None:
+            logger.info("Unloading VoxCPM2 model...")
+            try:
+                del self.model
+            except Exception as e:
+                logger.warning(f"Error deleting VoxCPM2 model: {e}")
+            self.model = None
+        self.prompt_cache = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return True
 
     def warmup(self):
@@ -181,7 +203,8 @@ class TTSService:
         # as they are generated. No open/close overhead between batches.
         import threading as _threading
 
-        buf = np.zeros(int(self.sample_rate * 120), dtype=np.float32)
+        buf_len = int(self.sample_rate * 120)
+        buf = np.zeros(buf_len, dtype=np.float32)
         write_pos = 0
         read_pos = 0
         lock = _threading.Lock()
@@ -201,7 +224,13 @@ class TTSService:
                     outdata[:, 0] = 0
                     return
                 n = min(frames, avail)
-                outdata[:n, 0] = buf[read_pos:read_pos + n]
+                start = read_pos % buf_len
+                if start + n <= buf_len:
+                    outdata[:n, 0] = buf[start:start + n]
+                else:
+                    first = buf_len - start
+                    outdata[:first, 0] = buf[start:]
+                    outdata[first:n, 0] = buf[:n - first]
                 if n < frames:
                     outdata[n:, 0] = 0
                 read_pos += n
@@ -250,7 +279,13 @@ class TTSService:
                         continue
                     with lock:
                         n = len(audio_np)
-                        buf[write_pos:write_pos + n] = audio_np
+                        start = write_pos % buf_len
+                        if start + n <= buf_len:
+                            buf[start:start + n] = audio_np
+                        else:
+                            first = buf_len - start
+                            buf[start:] = audio_np[:first]
+                            buf[:n - first] = audio_np[first:]
                         write_pos += n
             else:
                 for chunk in self.model.generate_streaming(
@@ -268,7 +303,13 @@ class TTSService:
                         continue
                     with lock:
                         n = len(audio_np)
-                        buf[write_pos:write_pos + n] = audio_np
+                        start = write_pos % buf_len
+                        if start + n <= buf_len:
+                            buf[start:start + n] = audio_np
+                        else:
+                            first = buf_len - start
+                            buf[start:] = audio_np[:first]
+                            buf[:n - first] = audio_np[first:]
                         write_pos += n
         except Exception as e:
             logger.error(f"generate_and_play generation error: {e}")
@@ -338,7 +379,8 @@ class TTSService:
         self.is_playing = True
 
         try:
-            sd.play(audio, samplerate=self.sample_rate, blocking=True)
+            # Non-blocking: do NOT hold the calling (possibly GUI) thread.
+            sd.play(audio, samplerate=self.sample_rate)
         except Exception as e:
             logger.error(f"play_audio error: {e}")
             logger.exception("Exception occurred")

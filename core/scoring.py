@@ -54,10 +54,16 @@ def infer_scale_score_from_text(text: str, scale_name: str, item: int = None) ->
     if not t:
         return None
 
-    # Check if text contains symptom keywords for the current item
+    # Check if text contains symptom keywords for the current item.
+    # Item-aware matching prevents a wrong-item symptom from being scored
+    # against the active question (e.g. talking about sleep while on the
+    # appetite item should not yield a score).
     _item_symptom_match = True
     if item is not None and scale_name == "PHQ-9":
         item_keywords = PHQ_POSITIVE_KEYWORDS_BY_ITEM.get(item, [])
+        _item_symptom_match = any(kw in t for kw in item_keywords)
+    elif item is not None and scale_name == "GAD-7":
+        item_keywords = GAD7_POSITIVE_KEYWORDS_BY_ITEM.get(item, [])
         _item_symptom_match = any(kw in t for kw in item_keywords)
 
     if scale_name in ("PHQ-9", "GAD-7"):

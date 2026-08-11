@@ -273,7 +273,11 @@ class ChatPanel(FrostedPanel):
         self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
-        """Keep newest message visible at the bottom."""
+        """Keep newest message visible at the bottom.
+
+        Two staggered scrolls (not four) cover layout settling after async
+        streaming; auto-pin on range change handles the rest.
+        """
         def do_scroll():
             self._msg_container.adjustSize()
             self._msg_container.updateGeometry()
@@ -281,9 +285,7 @@ class ChatPanel(FrostedPanel):
             bar.setValue(bar.maximum())
 
         QTimer.singleShot(0, do_scroll)
-        QTimer.singleShot(50, do_scroll)
         QTimer.singleShot(150, do_scroll)
-        QTimer.singleShot(300, do_scroll)
 
     def _on_scroll_range_changed(self, _min, max_value):
         """Auto-pin to bottom only if user was already at/near the bottom."""
@@ -303,7 +305,9 @@ class ChatPanel(FrostedPanel):
         self.btn_send.setEnabled(enabled)
 
     def _on_clear(self):
-        self.clear_chat()
+        # Same behavior as the bottom "清除记录" button: delegate to the
+        # MainWindow handler (which clears chat + starts a fresh greeting),
+        # avoiding a redundant double clear.
         self.clear_clicked.emit()
 
     def clear_chat(self):

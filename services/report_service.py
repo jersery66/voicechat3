@@ -58,6 +58,8 @@ class ReportService:
         self.time_limit_prompt_shown: bool = False
         self.continued_after_time_limit: bool = False
         self.completed_relaxation: Optional[str] = None # Track completed relaxation type
+        self.game_results = None  # set by record_game_session(); declared here so it exists pre-start
+        self.activity_log: list = []  # session activity log; declared here so it exists pre-start
         
     def _get_llm_service(self):
         """Lazy load LLM service if not provided."""
@@ -184,8 +186,17 @@ class ReportService:
     def should_warn_time_limit(self) -> Tuple[bool, str]:
         """
         Check if time/round warning should be shown.
-        At TIME_WARNING_MINUTES: show one warning.
-        At MAX_CONVERSATION_MINUTES: ask continue/end only once.
+
+        IMPORTANT: this is a STATE-ADVANCING command, not a pure query — calling
+        it consumes the one-shot warning / ask flags. Rename to a command-style
+        name (e.g. ``consume_time_limit_warning``) when the caller is updated.
+
+        SOFT LIMIT: MAX_CONVERSATION_MINUTES is advisory, not a hard cutoff.
+        The time-limit prompt fires AT MOST ONCE. If the user chooses to
+        continue, ``continued_after_time_limit`` is set and all further prompts
+        are suppressed for the rest of the session, so the session may run past
+        the limit. Enforcing a hard cutoff requires the caller (UI) to actually
+        end the session on the second limit hit — see is_over_limit().
 
         Returns:
             (should_warn, warning_message)
@@ -212,7 +223,12 @@ class ReportService:
         return False, ""
 
     def is_over_limit(self) -> bool:
-        """Check if session has exceeded time limit and still needs prompting."""
+        """Check if session has exceeded time limit and still needs prompting.
+
+        SOFT LIMIT: returns False once the one-shot prompt has been shown or the
+        user has chosen to continue (see should_warn_time_limit). A hard cutoff
+        must be enforced by the caller — this method only reports the condition.
+        """
         duration = self.get_session_duration_minutes()
         return (
             duration >= MAX_CONVERSATION_MINUTES
@@ -245,8 +261,6 @@ class ReportService:
         Returns:
             Structured report dict
         """
-        llm = self._get_llm_service()
-        
         # Format conversation for analysis
         formatted_history = self._format_conversation(conversation_history)
         
@@ -349,7 +363,6 @@ class ReportService:
         Returns:
             Feedback text string or generator (if stream=True)
         """
-        llm = self._get_llm_service()
         formatted_history = self._format_conversation(conversation_history)
         
         # Map relaxation_rec code to Chinese for prompt
@@ -418,8 +431,6 @@ class ReportService:
         Returns:
             Summary text string or generator (if stream=True)
         """
-        llm = self._get_llm_service()
-        
         formatted_history = self._format_conversation(conversation_history)
         
         prompt = SESSION_SUMMARY_PROMPT.format(
@@ -518,8 +529,7 @@ class ReportService:
             Short suggestions text (4 items, ~60 chars total)
         """
         from config import SUGGESTIONS_PROMPT
-        
-        llm = self._get_llm_service()
+
         formatted_history = self._format_conversation(conversation_history)
         
         prompt = SUGGESTIONS_PROMPT.format(conversation=formatted_history)

@@ -43,7 +43,11 @@ _COMPILED_REC_TAGS = [(re.compile(p), name) for p, name in REC_TAGS.items()]
 
 
 def parse_scale_tags(text: str) -> Dict[str, Dict[int, int]]:
-    """Extract scale answers from text. Returns {scale_name: {question_num: score}}."""
+    """Extract scale answers from text. Returns {scale_name: {question_num: score}}.
+
+    When the same question appears multiple times, the last occurrence wins
+    (consistent with the original behavior and the test contract).
+    """
     results: Dict[str, Dict[int, int]] = {}
     for match in SCALE_PATTERN.finditer(text):
         scale_name = match.group(1)
@@ -73,13 +77,17 @@ def detect_tag(text: str, patterns: dict) -> Optional[str]:
 
 # ==================== Tag Cleaning ====================
 
-# Internal strategy terms that must NEVER appear in spoken output
+# Internal strategy terms that must NEVER appear in spoken output.
+# NOTE: keep this list precise. Over-broad tokens (e.g. the bare word "防御",
+# which is a common everyday term) would silently delete legitimate reply
+# content, so only unambiguous strategy phrases / model-internal jargon belong
+# here.
 _FORBIDDEN_INTERNAL_TERMS = [
-    "高防御", "中防御", "中等防御", "低防御", "防御",
+    "高防御", "中防御", "中等防御", "低防御",
     "无情感反映", "情感反映",
-    "具体化开放式提问", "具体化", "开放式提问",
+    "具体化开放式提问", "开放式提问",
     "策略选择", "状态评估", "情绪识别", "变革话语",
-    "PHQ", "GAD", "PCL", "量表", "问卷", "评分", "分数", "风险等级",
+    "PHQ", "GAD", "PCL", "量表", "问卷", "风险等级", "分数",
     "内部策略", "危机干预", "crisis", "risk level",
     "intent", "emotion detection",
 ]

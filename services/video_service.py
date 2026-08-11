@@ -15,19 +15,27 @@ logger = get_logger(__name__)
 
 class VideoPlayer:
     def __init__(self):
-        pass
+        self._abort = threading.Event()
 
     def play_video(self, file_path):
         """
         Play video in fullscreen (Kiosk mode).
-        Blocks until video finishes or (Win + Esc) is pressed.
+        Blocks until video finishes or (Win + Esc) is pressed (or stop() is called).
         """
         if not os.path.exists(file_path):
             logger.error(f"Video file not found: {file_path}")
             return
 
-        # Initialize Pygame
-        pygame.init()
+        # Reset abort flag for this playback session.
+        self._abort.clear()
+
+        # Only initialise Pygame / mixer if we are the one bringing them up,
+        # so we never tear down a Pygame instance owned by the game service
+        # running in the same process.
+        pygame_owned = not pygame.get_init()
+        mixer_owned = pygame.mixer.get_init() is None
+        if pygame_owned:
+            pygame.init()
         pygame.mouse.set_visible(False) # Hide cursor
 
         # Fullscreen, No Frame
@@ -42,6 +50,7 @@ class VideoPlayer:
         pygame.display.set_caption("Relaxation Video")
         
         # Load Video using MoviePy
+        clip = None
         try:
             clip = VideoFileClip(file_path)
             
@@ -103,7 +112,7 @@ class VideoPlayer:
             running = True
             
             for frame in clip_resized.iter_frames(fps=fps, dtype="uint8"):
-                if not running:
+                if not running or self._abort.is_set():
                     break
                 
                 # Check events
@@ -165,15 +174,27 @@ class VideoPlayer:
             
         finally:
             logger.info("Cleaning up video player...")
+            # Close the MoviePy clip to release the ffmpeg subprocess handle.
+            if clip is not None:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+
+            # Only tear down Pygame / mixer if we initialised them; otherwise
+            # we would break a game service that shares the same Pygame instance.
             try:
-                if pygame.mixer.get_init():
+                if mixer_owned and pygame.mixer.get_init() is not None:
                     pygame.mixer.music.stop()
                     pygame.mixer.quit()
-            except: pass
-            
+            except Exception:
+                pass
+
             try:
-                pygame.quit()
-            except: pass
+                if pygame_owned and pygame.get_init():
+                    pygame.quit()
+            except Exception:
+                pass
             
             # Keep audio cache for faster subsequent plays
             # try:
@@ -182,6 +203,10 @@ class VideoPlayer:
             # except: pass
             
         return
+
+    def stop(self):
+        """Request the currently playing video to abort (e.g. at session end)."""
+        self._abort.set()
 
 _video_player = None
 def get_video_player():

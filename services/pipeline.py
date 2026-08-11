@@ -892,6 +892,28 @@ class ConversationPipeline:
             suggested_scale = agent_route.get("scale")
             probe_hint = agent_route.get("probe_hint", "")
 
+            # --- Normalize the suggested scale to a canonical name ---
+            # The agent may return variants like "PHQ9" / "phq-9" / "GAD7". A
+            # non-canonical name would silently fail `SCALES.get(...)` and the
+            # scale could neither advance nor complete, leaking an un-hittable name.
+            if suggested_scale:
+                _norm = (str(suggested_scale).strip().upper()
+                         .replace("PHQ9", "PHQ-9").replace("GAD7", "GAD-7")
+                         .replace("PCL5", "PCL-5").replace(" ", ""))
+                if _norm in ("PHQ-9", "GAD-7", "PCL-5"):
+                    suggested_scale = _norm
+                else:
+                    logger.warning(f"[ScaleDebug] agent returned unknown scale {suggested_scale!r}; ignoring")
+                    suggested_scale = None
+
+            # --- Consume agent's exit intent (user wants to end) ---
+            # The agent router detects explicit/implicit end intent; the pipeline
+            # previously ignored `exit_intent` entirely, so a user saying "我想结束"
+            # would be silently dropped.
+            if agent_route.get("exit_intent") and not result.end_type:
+                result.end_type = "quit"
+                logger.warning(f"[Pipeline] agent exit_intent consumed -> end_type=quit")
+
             if scale_action == "pause":
                 # Don't pause during positive_pending_frequency — must ask for frequency
                 if _positive_pending_active:
@@ -901,7 +923,7 @@ class ConversationPipeline:
                 else:
                     self._scale_pause_turns = 2
 
-            elif scale_action == "start" and not self._active_scale and allow_new_scale and not _waiting_for_answer:
+            elif scale_action == "start" and not self._active_scale and allow_new_scale and not _waiting_for_answer and current_rounds >= MIN_ROUNDS_BEFORE_SCALE:
                 # Agent recommends starting a new scale
                 if suggested_scale:
                     self._active_scale = suggested_scale
@@ -913,6 +935,11 @@ class ConversationPipeline:
                     else:
                         self._active_scale_q = self._next_unanswered_item(suggested_scale)
                     self._active_scale_waiting_answer = False
+                    # Agent explicitly started a scale: clear any lingering
+                    # cumulative symptom scores so a residual score can't
+                    # immediately re-trigger a *different* scale right after.
+                    self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
+                    self.symptom_turns = 0
                     # Log specific trigger reason
                     if suggested_scale == "PHQ-9" and self._active_scale_q == 2:
                         logger.warning(f"[ScaleTrigger] depressed mood detected, start PHQ-9 Q2")
@@ -993,6 +1020,10 @@ class ConversationPipeline:
                 self._active_scale_q = item
                 self._active_scale_waiting_answer = False
                 logger.warning(f"[ScaleTriggerHard] {scale_name} Q{item} from deterministic fallback")
+                # Deterministic fallback started a scale: clear residual scores
+                # to prevent an immediate secondary scale trigger next round.
+                self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
+                self.symptom_turns = 0
 
         # --- Cumulative symptom signal scoring (per-scale) ---
         # Only when no active scale and not in cooldown
@@ -1222,8 +1253,11 @@ class ConversationPipeline:
                 if self._active_scale == "PHQ-9":
                     detected_item = detect_phq_item_from_text(result.user_text)
                     if detected_item and detected_item != self._active_scale_q and detected_item not in answered:
-                        # User is talking about a different symptom — score that instead
-                        inferred = infer_scale_score_from_text(result.user_text, self._active_scale, self._active_scale_q)
+                        # User is talking about a different symptom — score that
+                        # item (NOT the active question number) using item-aware
+                        # inference, otherwise the symptom keywords would be
+                        # matched against the wrong question's scoring logic.
+                        inferred = infer_scale_score_from_text(result.user_text, self._active_scale, detected_item)
                         if inferred is not None:
                             self._scale_answers.setdefault(self._active_scale, {})[detected_item] = inferred
                             logger.warning(

@@ -665,8 +665,11 @@ class AgentService:
     ) -> dict:
         """Unified routing decision for scale/relaxation/crisis per turn.
 
-        Uses direct API call without response_format to avoid Ollama
-        compatibility issues with json_object mode on small models.
+        Uses direct API call WITHOUT response_format=json_object. We
+        deliberately avoid json_object mode here (unlike the other `_call_json`
+        routes) because small local models on Ollama frequently reject or
+        mangle the `response_format` argument. The loose JSON parser
+        (`_parse_json_loose`) handles undecorated JSON output robustly.
         """
         # Build context for the agent
         context_parts = []

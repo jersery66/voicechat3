@@ -37,6 +37,7 @@ class SessionContext:
     current_relaxation_type: Optional[str] = None
     has_forced_relaxation_rec: bool = False
     post_relaxation_timed_out: bool = False
+    relaxation_used: bool = False  # set when the pipeline already ran a relaxation this session
 
 
 class SessionOrchestrator:
@@ -103,19 +104,28 @@ class SessionOrchestrator:
             SessionState.SESSION_ENDED,
         )
 
-    def evaluate_session_end(self, end_type, relaxation_tag=None):
+    def evaluate_session_end(self, end_type, relaxation_tag=None, relaxation_used: bool = False):
         """
         Decide what to do when session end is detected.
+
+        Args:
+            relaxation_used: whether the pipeline already ran a relaxation this
+                session (its own ``relaxation_used`` flag). When True, the
+                forced-relaxation intercept is skipped so the "at most once per
+                session" rule holds even when the relaxation was not driven
+                through the FSM's ``current_relaxation_type``.
 
         Returns:
             (action, data) where action is:
             - "force_relaxation": intercept end, recommend relaxation first
             - "generate_reports": proceed to report generation
         """
+        effective_relaxation_used = relaxation_used or self.ctx.relaxation_used
         should_force = (
             end_type not in (EndType.SAFETY, EndType.INVALID, EndType.QUIT)
             and not self.ctx.current_relaxation_type
             and not self.ctx.has_forced_relaxation_rec
+            and not effective_relaxation_used
         )
 
         if should_force:

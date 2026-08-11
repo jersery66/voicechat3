@@ -302,9 +302,6 @@ class ControlPanel(FrostedPanel):
         self.time_progress.setFormat("时间 %v/%m 分钟")
         layout.addWidget(self.time_progress)
 
-        self.round_progress = self._make_progress_bar()
-        self.round_progress.setVisible(False)
-
         # Separator
         sep4 = QFrame()
         sep4.setFrameShape(QFrame.HLine)
@@ -404,6 +401,30 @@ class ControlPanel(FrostedPanel):
             self.record_button.stop_recording()
         self.rec_hint_label.setText("点击麦克风开始录音")
 
+    def reset_form(self):
+        """Reset all user-info inputs and button/label states for a new subject.
+
+        Called by MainWindow._prepare_next_subject() before starting a fresh
+        session. Without this method that call raises AttributeError and breaks
+        the end-of-session / next-subject flow.
+        """
+        # Clear text inputs
+        for widget in (self.id_input, self.age_input):
+            widget.clear()
+        # Reset combo boxes to their empty (first) item
+        for combo in (self.gender_combo, self.edu_combo,
+                      self.marital_combo, self.drug_combo):
+            combo.setCurrentIndex(0)
+        # Reset confirmation / modify state
+        self._info_confirmed = False
+        self.btn_confirm.setEnabled(True)
+        self.btn_modify.setEnabled(False)
+        self.user_status_label.setText("请填写基本信息后开始对话")
+        self.user_status_label.setStyleSheet("color: #E53935; font-size: 11px; padding: 2px;")
+        # Stop any active blink highlights and recording
+        self.stop_all_blinks()
+        self.reset_recording()
+
     def highlight_relax_button(self, btn_name):
         """Highlight a specific relaxation button with golden blink."""
         btn_map = {
@@ -416,8 +437,14 @@ class ControlPanel(FrostedPanel):
         btn = btn_map.get(btn_name)
         if btn:
             btn.start_blink()
-            # Auto-stop after 10 seconds
-            QTimer.singleShot(10000, btn.stop_blink)
+            # Auto-stop after 10 seconds. Track the stop timer so a second
+            # highlight call cancels the previous one instead of stacking.
+            if getattr(self, "_blink_stop_timer", None) and self._blink_stop_timer.isActive():
+                self._blink_stop_timer.stop()
+            self._blink_stop_timer = QTimer(self)
+            self._blink_stop_timer.setSingleShot(True)
+            self._blink_stop_timer.timeout.connect(btn.stop_blink)
+            self._blink_stop_timer.start(10000)
 
     def stop_all_blinks(self):
         for btn in self._blink_buttons:
@@ -461,10 +488,6 @@ class ControlPanel(FrostedPanel):
 
         self.time_progress.setMaximum(total_minutes)
         self.time_progress.setValue(int(math.ceil(elapsed_minutes)))
-
-        # Round bar stays hidden but tracks internally
-        self.round_progress.setMaximum(total_rounds)
-        self.round_progress.setValue(rounds_used)
 
         # Time bar color: blue -> orange -> red
         if time_pct > 0.95:

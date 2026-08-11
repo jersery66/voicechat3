@@ -1,6 +1,7 @@
 # Data Manager - Hierarchical Storage System
 
 import os
+import re
 import sys
 import json
 from datetime import datetime
@@ -60,7 +61,17 @@ class DataManager:
         these are mapped to ``"default_subject"`` to keep downstream path
         construction safe.
         """
-        cleaned = (user_id or "").strip() or "default_subject"
+        cleaned = (user_id or "").strip()
+        if not cleaned:
+            cleaned = "default_subject"
+        else:
+            # Path-traversal defense: drop filesystem-dangerous characters
+            # (path separators, reserved Windows chars, control chars) while
+            # KEEPING CJK / alphanumerics / underscore / hyphen so Chinese
+            # subject ids like "被试001" survive intact. Python's \w matches
+            # Unicode word characters (incl. CJK), so dots/slashes/colons etc.
+            # collapse to '_' and '..' can never form.
+            cleaned = re.sub(r'[^\w\-]', '_', cleaned)[:64] or "default_subject"
         self.current_subject_id = cleaned
 
     @staticmethod
@@ -374,6 +385,13 @@ class DataManager:
             try:
                 self.current_folder_name = folder_name
                 new_path = self._get_session_path()
+                # Never clobber an existing session folder for this subject
+                # today — if one is already there, fall back to a fresh
+                # timestamped folder instead of silently reusing the old dir.
+                if new_path.exists():
+                    folder_name = f"{base_folder}_{now.strftime('%H%M%S')}"
+                    self.current_folder_name = folder_name
+                    new_path = self._get_session_path()
 
                 old_path.rename(new_path)
                 logger.info(f"Renamed empty default session to: {new_path}")
