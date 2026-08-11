@@ -14,7 +14,12 @@ from typing import Any, Dict, List, Optional
 
 class FakeLLM:
     """Canned streaming LLM. Pops one full response per chat() call and
-    yields it in small chunks to exercise the streaming code path."""
+    yields it in small chunks to exercise the streaming code path.
+
+    Mirrors the real LLMService side effects on conversation_history
+    (user message appended when chat starts, assistant message appended
+    when the stream finishes) so multi-turn dependent behavior (agent
+    recent_history, RAG multi-turn query) is testable."""
 
     def __init__(self, responses: Optional[List[str]] = None):
         self.responses: List[str] = list(responses or [])
@@ -26,9 +31,11 @@ class FakeLLM:
     def chat(self, text: str, system_suffix: str = ""):
         full = self.responses.pop(0) if self.responses else self.default_response
         self.calls.append({"user_text": text, "system_suffix": system_suffix, "full": full})
+        self.conversation_history.append({"role": "user", "content": text})
         # stream in ~8-char chunks
         for i in range(0, len(full), 8):
             yield full[i:i + 8]
+        self.conversation_history.append({"role": "assistant", "content": full})
 
     def reset_conversation(self):
         self.conversation_history = []
@@ -44,6 +51,7 @@ class FakeAgent:
         self.available = True
         self.route_script: List[Dict[str, Any]] = []
         self.route_calls: List[Dict[str, Any]] = []
+        self.route_error: Optional[Exception] = None  # raised by routing if set
         self.crisis_keyword_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
         self.crisis_llm_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
         self.emotion_result = {"emotion": "neutral", "intensity": 0.2}
@@ -61,6 +69,8 @@ class FakeAgent:
             "relaxation_done": relaxation_done,
         }
         self.route_calls.append(call)
+        if self.route_error is not None:
+            raise self.route_error
         if self.route_script:
             return self.route_script.pop(0)
         return {"scale_action": "chat", "scale": None, "item": None,

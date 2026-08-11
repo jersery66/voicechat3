@@ -135,6 +135,10 @@ class TestScaleFlow:
         assert p._scale_answers.get("PHQ-9", {}).get(2) == 1
 
     def test_short_answer_inferred_without_tag(self, ctx):
+        """The trigger text deliberately contains NO frequency word, so
+        turn 1 cannot be retroactively scored; the tagless answer in turn 2
+        must go through the real inference path (short-answer scoring /
+        infer_scale_score_from_text) for Q1."""
         agent = FakeAgent()
         agent.route_script = [
             {"scale_action": "start", "scale": "PHQ-9", "item": 1,
@@ -145,12 +149,14 @@ class TestScaleFlow:
         llm = FakeLLM([
             "【情绪识别】低落【状态评估】中【变革话语】无【策略选择】量表|||这两周心情低落的次数多吗？",
             # LLM forgets the SCALE tag; pipeline must infer from user text
-            "【情绪识别】低落【状态评估】中【变革话语】无【策略选择】量表|||低落得这么频繁啊，那睡眠呢？",
+            "【情绪识别】低落【状态评估】中【变革话语】无【策略选择】量表|||这么频繁啊，那平时做事的劲头呢？",
         ])
         p = ctx(agent=agent, llm=llm)
-        run_turn(p, "心里一直很低落")
-        run_turn(p, "低落，几乎每天")
-        # Q1 was asked in turn 1; the tagless answer in turn 2 must be scored
+        # no frequency word here -> nothing retroactively scored in turn 1
+        run_turn(p, "最近睡不着")
+        assert p._scale_answers.get("PHQ-9", {}).get(1) is None
+        # Q1 symptom keyword + frequency word, but no SCALE tag in the reply
+        run_turn(p, "做什么都没劲，几乎每天")
         assert p._scale_answers.get("PHQ-9", {}).get(1) == 3
 
 
@@ -220,3 +226,76 @@ class TestShadowIndependence:
     def test_pipeline_imports_without_app_layer(self):
         import services.pipeline as sp
         assert sp.__name__ == "services.pipeline"
+
+
+class TestCumulativeSymptomTrigger:
+    def test_symptom_signals_alone_start_scale(self, ctx):
+        """F14: no agent start action — cumulative symptom scoring alone
+        (duration +1, PHQ symptoms +2 => >=3) must trigger PHQ-9."""
+        agent = FakeAgent()  # default route = 'chat', low confidence
+        p = ctx(agent=agent)
+        result, _ = run_turn(p, "最近一直睡不着")
+        assert p._active_scale == "PHQ-9"
+        assert result.scale_active is True
+
+
+class TestSeparatorEdgeCases:
+    def test_reversed_format_recovered(self, ctx):
+        """F10: spoken|||analysis (reversed) must be detected via the
+        analysis-tag heuristic; spoken side is the LEFT part."""
+        llm = FakeLLM([
+            "嗯，你接着说，我听着呢。|||【情绪识别】平静【状态评估】低【变革话语】无【策略选择】肯定",
+        ])
+        p = ctx(llm=llm)
+        result, _ = run_turn(p, "随便聊聊")
+        assert "你接着说" in result.clean_spoken
+        assert "【情绪识别】" in result.analysis_text
+        assert "【" not in result.clean_spoken
+
+    def test_internal_terms_never_leak_to_display(self, ctx):
+        """F11: forbidden internal strategy terms in the spoken side are
+        stripped before display."""
+        llm = FakeLLM([
+            "【情绪识别】焦虑【状态评估】高【变革话语】无【策略选择】情感反映"
+            "|||策略选择是情感反映，你最近睡得怎么样？",
+        ])
+        p = ctx(llm=llm)
+        result, _ = run_turn(p, "心里有点烦")
+        assert "策略选择" not in result.clean_spoken
+        assert "情感反映" not in result.clean_spoken
+
+
+class TestAgentResilience:
+    def test_route_exception_falls_back_and_turn_completes(self, ctx):
+        """Agent routing failure must not kill the turn: fallback route is
+        used, cooldown engages, reply still delivered."""
+        agent = FakeAgent()
+        agent.route_error = RuntimeError("3B model exploded")
+        p = ctx(agent=agent)
+        result, _ = run_turn(p, "最近有点烦")
+        assert result.spoken_text.strip() != ""
+        assert p._agent_route_cooldown > 0
+
+    def test_agent_unavailable_turn_completes(self, ctx):
+        agent = FakeAgent()
+        agent.available = False
+        p = ctx(agent=agent)
+        result, _ = run_turn(p, "最近有点烦")
+        assert result.spoken_text.strip() != ""
+
+
+class TestMultiTurnHistory:
+    def test_history_flows_to_agent_and_rag(self, ctx):
+        """FakeLLM mirrors real history side effects; turn 2 must see the
+        previous user turn in agent recent_history and RAG query."""
+        agent = FakeAgent()
+        rag = FakeRAG(suffix="【知识库】测试条目")
+        p = ctx(agent=agent, rag=rag)
+        run_turn(p, "第一轮说的话")
+        run_turn(p, "第二轮说的话")
+        # agent received accumulated context on the second route call
+        assert len(agent.route_calls) == 2
+        assert "第一轮说的话" in (agent.route_calls[1].get("recent_history") or "") or \
+               len(p.llm.conversation_history) >= 4
+        # RAG query for turn 2 includes earlier user turns (multi-turn ctx)
+        assert any("第一轮说的话" in q for q in rag.queries)

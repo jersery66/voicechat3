@@ -1,14 +1,12 @@
 """Layer-2 headless UI tests: real MainWindow on the offscreen Qt platform.
 
-Requires a working PySide6 install (skipped otherwise, e.g. on machines
-where the Qt DLLs cannot load). Validates:
-  - MainWindow constructs with the shadow SessionEngine enabled
-  - lifecycle forwarding: _start_new_session -> engine CHATTING
-  - _engine_submit(EndSessionCommand) -> engine SESSION_ENDING
-  - engine shuts down cleanly
+Requires a working PySide6 install (skipped otherwise) and shadow mode
+enabled (skipped when VOICECHAT_ENGINE_SHADOW=0).
 
-These tests never touch GPU/audio/network: services stay None (models are
-not loaded), which is exactly the boot state of the real app.
+IMPORTANT: MainWindow.__init__ unconditionally spawns the model-loading
+thread; the fixture monkeypatches load_models to a no-op so these tests
+never touch GPU/audio/Ollama on ANY machine (including deployment boxes
+where the real models would otherwise load during test runs).
 """
 
 import os
@@ -22,9 +20,16 @@ pytest.importorskip("PySide6.QtWidgets", reason="PySide6 not available")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from config import SESSION_ENGINE_SHADOW  # noqa: E402
 from core.session_fsm import SessionState  # noqa: E402
 from app.contracts import EndSessionCommand  # noqa: E402
 from core.types import EndType  # noqa: E402
+
+if not SESSION_ENGINE_SHADOW:
+    pytest.skip(
+        "SESSION_ENGINE_SHADOW disabled (VOICECHAT_ENGINE_SHADOW=0)",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -34,6 +39,8 @@ def qapp():
 
 
 def wait_until(predicate, timeout=3.0):
+    """Poll a predicate. Works because SessionEngine state transitions
+    happen on its own worker thread, independent of the Qt event loop."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
@@ -43,8 +50,11 @@ def wait_until(predicate, timeout=3.0):
 
 
 @pytest.fixture
-def window(qapp):
+def window(qapp, monkeypatch):
     from ui.main_window import MainWindow
+    # Never start the real model-loading chain in tests (it would load
+    # FunASR/VoxCPM and warm up Ollama on deployment machines).
+    monkeypatch.setattr(MainWindow, "load_models", lambda self: None)
     w = MainWindow()
     yield w
     engine = getattr(w, "session_engine", None)
