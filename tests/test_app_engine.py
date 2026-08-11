@@ -10,6 +10,7 @@ from app.contracts import (
     ContinueChatCommand,
     ContinueOrEndAskEvent,
     EndSessionCommand,
+    ErrorEvent,
     PlayRelaxationCommand,
     RelaxationFinishedCommand,
     RelaxationRecommendedEvent,
@@ -99,13 +100,64 @@ class TestEndSession:
         engine.process_command(EndSessionCommand(end_type=EndType.QUIT))
         assert not any(isinstance(e, SessionEndingEvent) for e in events)
 
-    def test_completed_relaxation_blocks_force(self, engine, events):
+    def test_played_relaxation_blocks_force_completed(self, engine, events):
+        """Legacy gate: any played relaxation (completed=True) blocks forcing."""
         start(engine)
         engine.process_command(PlayRelaxationCommand(relaxation="muscle"))
         engine.process_command(RelaxationFinishedCommand(completed=True))
         events.clear()
         engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
         assert any(isinstance(e, SessionEndingEvent) for e in events)
+        assert not any(isinstance(e, RelaxationRecommendedEvent) for e in events)
+
+    def test_played_relaxation_blocks_force_exited_early(self, engine, events):
+        """completed=False (user exited the video early) must also block the
+        forced relaxation — matches legacy ctx.current_relaxation_type gate."""
+        start(engine)
+        engine.process_command(PlayRelaxationCommand(relaxation="muscle"))
+        engine.process_command(RelaxationFinishedCommand(completed=False))
+        events.clear()
+        engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
+        assert any(isinstance(e, SessionEndingEvent) for e in events)
+        assert not any(isinstance(e, RelaxationRecommendedEvent) for e in events)
+
+
+class TestEndDuringVideo:
+    """Regression: end_session while VIDEO_PLAYING used to deadlock the FSM."""
+
+    def test_end_deferred_until_video_finishes(self, engine, events):
+        start(engine)
+        engine.process_command(PlayRelaxationCommand(relaxation="breathing"))
+        assert engine.state == SessionState.VIDEO_PLAYING
+
+        engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
+        # no end flow yet, guard released, state untouched
+        assert not any(isinstance(e, SessionEndingEvent) for e in events)
+        assert engine.state == SessionState.VIDEO_PLAYING
+        assert not engine.is_ending
+
+        # video finishes -> deferred end resumes straight to reports
+        events.clear()
+        engine.process_command(RelaxationFinishedCommand(completed=True))
+        assert any(isinstance(e, SessionEndingEvent) for e in events)
+        assert engine.state == SessionState.SESSION_ENDING
+
+    def test_deferred_end_survives_mark_ended(self, engine, events):
+        start(engine)
+        engine.process_command(PlayRelaxationCommand(relaxation="muscle"))
+        engine.process_command(EndSessionCommand(end_type=EndType.QUIT))
+        engine.process_command(RelaxationFinishedCommand(completed=True))
+        engine.mark_session_ended()
+        assert engine.state == SessionState.SESSION_ENDED
+        assert not engine.is_ending
+
+    def test_start_session_clears_pending_end(self, engine, events):
+        start(engine)
+        engine.process_command(PlayRelaxationCommand(relaxation="breathing"))
+        engine.process_command(EndSessionCommand(end_type=EndType.QUIT))
+        start(engine)  # operator starts a fresh session instead
+        engine.process_command(RelaxationFinishedCommand(completed=True))
+        assert not any(isinstance(e, SessionEndingEvent) for e in events)
 
 
 class TestRelaxationFlow:
@@ -126,6 +178,12 @@ class TestRelaxationFlow:
         engine.process_command(PlayRelaxationCommand(relaxation="breathing"))
         assert engine.state == SessionState.SESSION_ENDING
 
+    def test_stray_relaxation_finished_ignored(self, engine, events):
+        start(engine)
+        engine.process_command(RelaxationFinishedCommand(completed=True))
+        assert engine.state == SessionState.CHATTING
+        assert not any(isinstance(e, ContinueOrEndAskEvent) for e in events)
+
 
 class TestTimeLimitDecisions:
     def test_warning_single_shot(self, engine):
@@ -138,16 +196,30 @@ class TestTimeLimitDecisions:
         assert engine.should_emit_time_warning(39.0, 40) is False
         assert engine.should_emit_time_warning(40.0, 40) is True
 
-    def test_limit_ask_persistent(self, engine):
-        start(engine)
-        assert engine.should_emit_time_limit_ask(44.0, 45) is False
-        assert engine.should_emit_time_limit_ask(45.1, 45) is True
-
     def test_warning_reset_on_new_session(self, engine):
         start(engine)
         engine.should_emit_time_warning(41.0, 40)
         start(engine)
         assert engine.should_emit_time_warning(41.0, 40) is True
+
+    def test_limit_ask_single_shot(self, engine):
+        """Legacy parity: the ask fires once, then stays silent."""
+        start(engine)
+        assert engine.should_emit_time_limit_ask(44.0, 45) is False
+        assert engine.should_emit_time_limit_ask(45.1, 45) is True
+        assert engine.should_emit_time_limit_ask(45.2, 45) is False
+
+    def test_continue_choice_suppresses_forever(self, engine):
+        start(engine)
+        assert engine.should_emit_time_limit_ask(45.1, 45) is True
+        engine.acknowledge_time_limit_continue()
+        assert engine.should_emit_time_limit_ask(46.0, 45) is False
+
+    def test_limit_ask_reset_on_new_session(self, engine):
+        start(engine)
+        engine.should_emit_time_limit_ask(45.1, 45)
+        start(engine)
+        assert engine.should_emit_time_limit_ask(45.1, 45) is True
 
 
 class TestMarkEnded:
@@ -180,3 +252,11 @@ class TestThreadedMode:
         engine.shutdown(timeout=3)
         state_changes = [e for e in events if isinstance(e, StateChangedEvent)]
         assert len(state_changes) >= 5
+
+    def test_submit_after_shutdown_dropped(self, events):
+        engine = SessionEngine(emit=events.append)
+        engine.start()
+        engine.shutdown(timeout=2)
+        engine.submit(StartSessionCommand(subject=SubjectInfo(subject_id="SZ")))
+        time.sleep(0.2)
+        assert engine.state == SessionState.IDLE  # never processed

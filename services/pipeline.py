@@ -417,9 +417,13 @@ class ConversationPipeline:
             logger.debug(f"executor shutdown error: {e}")
 
     def reset_session(self):
-        """Reset per-session state (scale tracking). Call on new session."""
-        # All scale-related fields reset via the state container
-        # (exact legacy semantics preserved in ScaleState.reset()).
+        """Reset per-session state (scale tracking). Call on new session.
+
+        Note: the legacy implementation cleared the scale containers in
+        place (`.clear()`); ScaleState.reset() replaces them with fresh
+        objects. Verified safe: no code outside this class keeps
+        long-lived references to those containers.
+        """
         self._scale_state.reset()
         self._agent_route_cooldown = 0
         self.relaxation_recommended = False

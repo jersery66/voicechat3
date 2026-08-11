@@ -20,7 +20,7 @@ python main.py                # Main entry (PySide6 UI)
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests/ -v    # 72 unit tests (no external deps required)
+python -m pytest tests/ -v    # 172 unit tests (no external deps required)
 ```
 
 ### Config Health Check

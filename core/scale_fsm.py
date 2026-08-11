@@ -38,10 +38,13 @@ class ScaleState:
     """
 
     def __init__(self) -> None:
+        # Init-only constant: legacy reset_session() never touched it, so
+        # reset() below must not either.
+        self.scale_trigger_cooldown: int = 3
         self.reset()
 
     def reset(self) -> None:
-        """Reset to the start-of-session state (exact legacy semantics)."""
+        """Reset to the start-of-session state (legacy reset_session semantics)."""
         # --- core FSM ---
         self.administered: set = set()
         self.answers: Dict[str, Dict[int, int]] = {}
@@ -67,7 +70,8 @@ class ScaleState:
         self.symptom_scores: Dict[str, int] = fresh_symptom_scores()
         self.symptom_turns: int = 0
         self.last_scale_trigger_round: int = -999
-        self.scale_trigger_cooldown: int = 3
+        # NOTE: scale_trigger_cooldown is deliberately NOT reset here
+        # (legacy reset_session never touched it); it is set in __init__.
         # --- resume bookkeeping ---
         self.pending_scale_resume: bool = False
         self.last_bot_asked_scale: Optional[str] = None

@@ -41,6 +41,11 @@ def _iter_dirs_bounded(base, max_depth=4, max_dirs=20000):
     Never follows symlinks/junctions (avoids infinite recursion on cyclic
     links) and stops after scanning max_dirs directories (bounds import time
     on very large trees such as PROGRAM_ROOT).
+
+    Semantic differences vs the old recursive glob (documented on purpose):
+      - directories deeper than max_depth are not searched;
+      - trees behind symlinks/junctions are not descended into (a matching
+        link directory itself is still yielded and marker-checked).
     """
     base = os.path.abspath(base)
     base_depth = base.rstrip(os.sep).count(os.sep)
@@ -53,6 +58,10 @@ def _iter_dirs_bounded(base, max_depth=4, max_dirs=20000):
         for d in list(dirs):
             scanned += 1
             if scanned > max_dirs:
+                # Loud on purpose: silently giving up here used to make
+                # model detection nondeterministic and hard to debug.
+                print(f"[config] model search truncated: more than {max_dirs} "
+                      f"directories under {base}")
                 return
             yield os.path.join(root, d)
 

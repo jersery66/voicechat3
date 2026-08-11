@@ -95,6 +95,14 @@ class TestScaleStateReset:
         a["PHQ-9"] = 9
         assert b["PHQ-9"] == 0
 
+    def test_reset_preserves_trigger_cooldown(self):
+        """Legacy reset_session() never touched scale_trigger_cooldown;
+        reset() must not either (init-only constant)."""
+        state = ScaleState()
+        state.scale_trigger_cooldown = 5
+        state.reset()
+        assert state.scale_trigger_cooldown == 5
+
 
 class TestDelegateProperty:
     class Holder:

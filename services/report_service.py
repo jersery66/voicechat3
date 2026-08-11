@@ -7,7 +7,6 @@ import json
 import re
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
-from enum import Enum
 
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
