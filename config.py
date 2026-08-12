@@ -219,7 +219,7 @@ def _detect_voice_prompt_text():
 
 
 def _detect_ollama_model():
-    """Try to get the best available Ollama model for conversation.
+    """Inspect the local Ollama inventory for diagnostics only.
 
     Prefers qwen2.5:72b for stable counseling output (no thinking mode issues).
     Falls back to smaller models if 72b is unavailable.
@@ -244,9 +244,9 @@ def _detect_ollama_model():
                 names.append(name)
         if not names:
             return None
-        # The standard deployment has a 6 GB RTX 3060. Prefer the 3B route
-        # model for a reliably startable local UI; operators with more memory
-        # can explicitly choose a larger model through OLLAMA_MODEL.
+        # This inventory is reported by print_model_status() only. Runtime
+        # model selection comes from deployment.profiles and explicit operator
+        # environment overrides, never from whatever happens to be installed.
         for exact in ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:8b", "qwen2.5:14b", "qwen2.5:72b"]:
             for n in names:
                 if exact.lower() in n.lower():
@@ -316,8 +316,15 @@ DATA_ROOT = os.environ.get(
     r"D:\program\voice_chat_data",
 )
 
-# ============== Ollama ==============
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL") or _OLLAMA_DETECTED or "qwen2.5:72b"
+# ============== Deployment Profile / Ollama ==============
+# The profile is an explicit deployment decision, never an automatic hardware
+# guess.  A100 production stays pinned to the user's verified Qwen2.5 72B
+# dialogue baseline; local 6GB machines default to the light development model.
+from deployment.profiles import get_deployment_profile, resolve_runtime_models
+
+DEPLOYMENT_PROFILE = get_deployment_profile()
+RUNTIME_MODELS = resolve_runtime_models(DEPLOYMENT_PROFILE)
+OLLAMA_MODEL = RUNTIME_MODELS.dialogue
 
 
 def print_model_status():
@@ -714,7 +721,7 @@ SESSION_ENGINE_AUTHORITATIVE = (
 
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:3b")
+AGENT_MODEL = RUNTIME_MODELS.router
 AGENT_MODEL_SERVER = OLLAMA_HOST.rstrip('/') + '/v1'
 AGENT_API_KEY = 'EMPTY'
 

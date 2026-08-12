@@ -52,6 +52,9 @@ _CRISIS_DENIAL_PATTERNS = [
 _CRISIS_SIGNAL_TERMS = (
     "自杀", "自伤", "自残", "伤害自己", "想死", "轻生", "不想活",
     "活不下去", "结束生命", "死了算了", "不如死了", "死了一了百了",
+    # A method disclosed outside a denial clause is always a separate,
+    # high-consequence signal. Keep this list aligned with _critical below.
+    "跳楼", "割腕", "上吊", "喝农药", "安眠药", "马上去死", "现在就死",
 )
 
 # Relaxation keywords for keyword fallback

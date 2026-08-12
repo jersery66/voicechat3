@@ -326,6 +326,13 @@ class PipelineResult:
     emotion_result: dict = field(default_factory=dict)
     crisis_risk: int = 0
     crisis_indicators: list = field(default_factory=list)
+    # New coordinator boundary may stop dialogue before model generation.
+    # The legacy UI consumes this payload through the existing ``show_crisis``
+    # queue event during the migration period.
+    safety_payload: dict = field(default_factory=dict)
+    # Raw legacy router output is retained only in memory. The coordinator
+    # converts it to a typed, de-identified research event at the boundary.
+    agent_route: dict = field(default_factory=dict)
     scale_tags: dict = field(default_factory=dict)
     scale_active: bool = False             # True when a scale is currently being administered
     scale_completed: bool = False
@@ -847,6 +854,8 @@ class ConversationPipeline:
                 logger.warning(f"[AgentRoute] failed: {e}")
                 self._agent_route_cooldown = AGENT_ROUTE_COOLDOWN_ROUNDS
                 agent_route = _AGENT_FALLBACK
+
+        result.agent_route = dict(agent_route or _AGENT_FALLBACK)
 
         # Hard safety: crisis keywords always take priority (not dependent on agent)
         if self.agent:

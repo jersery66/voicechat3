@@ -35,3 +35,13 @@ def test_denial_does_not_erase_a_separate_disclosed_suicide_ideation():
 
     assert result["risk_level"] >= 7
     assert result["immediate_action"] is True
+
+
+def test_denial_never_hides_a_current_plan_with_a_method():
+    """A denial clause must not suppress a separate imminent disclosure."""
+    result = AgentService()._keyword_crisis_risk(
+        "\u6211\u4e0d\u60f3\u81ea\u6740\uff0c\u4f46\u6211\u5df2\u7ecf\u51c6\u5907\u597d\u4eca\u665a\u5272\u8155"
+    )
+
+    assert result["risk_level"] >= 9
+    assert result["immediate_action"] is True

@@ -274,13 +274,13 @@ class MainWindow(QMainWindow):
         if self.data_manager:
             self.data_manager.set_user_id(user_id)
             self.data_manager.save_user_profile(normalized)
-            if self.llm_service:
-                context = self.data_manager.get_formatted_history_context(
-                    subject_id=user_id,
-                    include_profile=True,
-                    include_summaries=3,
-                )
-                self.llm_service.set_history_context(context)
+        if self.llm_service and self.data_manager:
+            context = self.data_manager.get_formatted_history_context(
+                subject_id=user_id,
+                include_profile=True,
+                include_summaries=3,
+            )
+            self.llm_service.set_history_context(context)
 
         self._play_opening_greeting()
         self.control_panel.set_status("请等待问候后再录音")
@@ -513,7 +513,10 @@ class MainWindow(QMainWindow):
                 self._pending_scale_prompt = None
                 config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data, extra_system_suffix=extra)
 
-            result = self.pipeline.execute(config, safe_put)
+            coordinator = getattr(self, "conversation_coordinator", None)
+            if coordinator is None:
+                raise RuntimeError("Conversation coordinator is unavailable; model loading did not complete")
+            result = coordinator.execute(config, safe_put)
             # Cumulate scale tags — don't overwrite previous rounds' scores
             if result.scale_tags:
                 for scale_name, answers in result.scale_tags.items():
@@ -886,6 +889,17 @@ class MainWindow(QMainWindow):
                 emotion_tracker=self.emotion_tracker,
             )
 
+            # New authoritative turn boundary: every text turn now enters via
+            # one coordinator. The legacy pipeline remains the compatibility
+            # implementation behind it while voice streaming is migrated.
+            from conversation.coordinator import ConversationCoordinator
+            from research.event_journal import EventJournal
+            journal_root = self.data_manager.data_root / "research_events"
+            self.conversation_coordinator = ConversationCoordinator(
+                pipeline=self.pipeline,
+                journal=EventJournal(journal_root / "events.jsonl"),
+            )
+
             # Tools
             from services.tools.video_tool import VideoPlayTool
             from services.tools.relaxation_tool import RelaxationRecommendationTool
@@ -1004,6 +1018,8 @@ class MainWindow(QMainWindow):
             self.emotion_tracker.reset()
         if hasattr(self, 'pipeline') and self.pipeline:
             self.pipeline.reset_session()
+        if getattr(self, "conversation_coordinator", None):
+            self.conversation_coordinator.start_research_session()
         if self.llm_service:
             self.llm_service.reset_conversation()
             if self.data_manager and self.current_user_id:
