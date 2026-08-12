@@ -106,3 +106,26 @@ class TestHeadlessBoot:
         assert wait_until(
             lambda: window.session_engine.state == SessionState.CHATTING
         ), "engine did not reset to CHATTING for the new session"
+
+    def test_failed_report_is_not_presented_as_saved(self, window):
+        window._on_session_finished(report_ok=False)
+
+        assert window._current_report_generated is False
+        assert "失败" in window.control_panel.status_label.text()
+
+    def test_failed_game_is_not_recorded_as_relaxation(self, window):
+        class Report:
+            activity_log = []
+
+            def __init__(self):
+                self.relaxations = []
+
+            def record_relaxation(self, name):
+                self.relaxations.append(name)
+
+        report = Report()
+        window.report_service = report
+        window._on_game_finished(completed=False)
+
+        assert report.relaxations == []
+        assert "未完成" in window.control_panel.status_label.text()

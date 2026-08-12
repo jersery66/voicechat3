@@ -233,7 +233,7 @@ def _detect_ollama_model():
             # Older ollama SDK versions do not accept a timeout kwarg.
             client = ollama.Client(host=OLLAMA_HOST)
         raw = client.list()
-        model_list = raw.get("models", []) if isinstance(raw, dict) else []
+        model_list = raw.get("models", []) if isinstance(raw, dict) else getattr(raw, "models", [])
         names = []
         for m in model_list:
             if isinstance(m, dict):
@@ -244,12 +244,14 @@ def _detect_ollama_model():
                 names.append(name)
         if not names:
             return None
-        # Priority: qwen2.5:72b > qwen2.5:14b > qwen2.5:8b > any 72b > any 35b
-        for exact in ["qwen2.5:72b", "qwen2.5:14b", "qwen2.5:8b"]:
+        # The standard deployment has a 6 GB RTX 3060. Prefer the 3B route
+        # model for a reliably startable local UI; operators with more memory
+        # can explicitly choose a larger model through OLLAMA_MODEL.
+        for exact in ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:8b", "qwen2.5:14b", "qwen2.5:72b"]:
             for n in names:
                 if exact.lower() in n.lower():
                     return n
-        for pref in ["72b", "35b", "32b", "14b", "8b"]:
+        for pref in ["3b", "7b", "8b", "14b", "32b", "35b", "72b"]:
             for n in names:
                 if pref in n.lower():
                     return n
@@ -841,7 +843,7 @@ AGENT_SUMMARY_SYSTEM_MESSAGE = """你是一个对话摘要压缩器。将心理�
 
 摘要应该简洁（150字以内），用第三人称描述，供后续对话参考。"""
 
-AGENT_TIMEOUT = 3            # 意图分类超时（秒）
+AGENT_TIMEOUT = 10           # 意图分类超时（秒）
 AGENT_REPORT_TIMEOUT = 60    # 报告生成超时（秒）
 AGENT_ROUTE_ENABLED = True   # 启用 AgentRoute
 AGENT_ROUTE_COOLDOWN_ROUNDS = 1  # Agent route 失败后冷却轮数

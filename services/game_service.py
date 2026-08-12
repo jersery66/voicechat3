@@ -41,11 +41,17 @@ class GameService:
         tracker = ClinicalTracker(csv_path)
 
         engine = GameEngine(tracker)
+        completed = True
         try:
             results = engine.run()
         except Exception as e:
             logger.error(f"Game engine crashed: {e}", exc_info=True)
             results = tracker.get_summary_metrics() if hasattr(tracker, 'get_summary_metrics') else {}
+            completed = False
+
+        if not isinstance(results, dict):
+            results = {}
+            completed = False
 
         try:
             tracker.save_csv()
@@ -60,6 +66,7 @@ class GameService:
             except Exception as e:
                 logger.debug(f"Could not append difficulty metrics: {e}")
 
+        results["_completed"] = completed
         return results
 
     def launch(self, session_folder: Optional[str] = None) -> dict:

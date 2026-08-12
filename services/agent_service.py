@@ -69,7 +69,7 @@ class AgentService:
         self.client = OpenAI(
             base_url=AGENT_MODEL_SERVER,
             api_key=AGENT_API_KEY,
-            timeout=3.0,
+            timeout=AGENT_TIMEOUT,
             max_retries=0,
         )
         self.model = AGENT_MODEL
@@ -782,6 +782,15 @@ class AgentService:
 
             # Build normalized result — derive booleans from action field
             intervention = result.get("intervention_type")
+            if raw_action == "recommend_relaxation":
+                intervention = {
+                    "mindfulness": "meditation",
+                    "meditation": "meditation",
+                    "muscle": "muscle",
+                    "muscle_relaxation": "muscle",
+                    "progressive_muscle_relaxation": "muscle",
+                    "breathing": "breathing",
+                }.get(str(intervention or "").strip().lower(), "breathing")
             normalized = {
                 "action": raw_action,
                 "scale_action": scale_action,

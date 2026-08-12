@@ -693,10 +693,19 @@ class MainWindow(QMainWindow):
                     self._start_ollama_keepalive()
 
                 elif msg_type == "video_finished":
-                    QTimer.singleShot(500, lambda c=content: self._on_video_finished(c))
+                    if isinstance(content, tuple):
+                        relaxation_type, completed = content
+                    else:
+                        # Compatibility with queues created by older callers.
+                        relaxation_type, completed = content, True
+                    QTimer.singleShot(
+                        500,
+                        lambda t=relaxation_type, ok=completed: self._on_video_finished(t, ok),
+                    )
 
                 elif msg_type == "game_finished":
-                    QTimer.singleShot(500, self._on_game_finished)
+                    completed = content if isinstance(content, bool) else True
+                    QTimer.singleShot(500, lambda ok=completed: self._on_game_finished(ok))
 
                 elif msg_type == "loading_progress":
                     if self.loading_screen:
@@ -713,7 +722,9 @@ class MainWindow(QMainWindow):
                         self.control_panel.set_buttons_enabled(False)
 
                 elif msg_type == "session_finished":
-                    self._on_session_finished()
+                    self._on_session_finished(
+                        report_ok=content if isinstance(content, bool) else True
+                    )
 
                 elif msg_type == "quit":
                     self._force_quit_now()
@@ -1123,27 +1134,29 @@ class MainWindow(QMainWindow):
         self._pending_relaxation_type = relaxation_type
 
         def video_runner():
+            completed = False
             try:
-                self.video_tool.execute(relaxation_type=relaxation_type)
+                completed = bool(self.video_tool.execute(relaxation_type=relaxation_type))
             except Exception as e:
                 logger.warning(f"Video error: {e}")
             finally:
-                self.processing_queue.put(("video_finished", relaxation_type))
+                self.processing_queue.put(("video_finished", (relaxation_type, completed)))
 
         threading.Thread(target=video_runner, daemon=True).start()
 
-    def _on_video_finished(self, relaxation_type):
+    def _on_video_finished(self, relaxation_type, completed=True):
         """视频播放完成：记录放松，回到正常聊天。不弹结束框。"""
-        # Shadow-mode mirror (legacy stays authoritative). Legacy records the
-        # relaxation after the video regardless of how it exited, so forward
-        # completed=True; a deferred end request resumes inside the engine.
+        # A missing or failed video is not a completed intervention and must
+        # never be recorded as one in either the shadow engine or the report.
         try:
             from app.contracts import RelaxationFinishedCommand
-            self._engine_submit(RelaxationFinishedCommand(completed=True))
+            self._engine_submit(RelaxationFinishedCommand(completed=completed))
         except Exception as e:
             logger.warning(f"[EngineShadow] relaxation_finished forward failed: {e}")
         # Record relaxation AFTER video finishes
-        relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
+        relax_name = ""
+        if completed:
+            relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
         if relax_name:
             self.orchestrator.ctx.current_relaxation_type = relax_name
             if self.report_service:
@@ -1165,6 +1178,10 @@ class MainWindow(QMainWindow):
         pending_end = getattr(self, "_pending_end_after_video", None)
         if pending_end:
             self._pending_end_after_video = None
+            if not completed:
+                self.chat_panel.add_system_message("放松训练未能启动，未记录为已完成。请检查媒体文件后重试。")
+                self.control_panel.set_status("放松训练未完成")
+                return
             logger.info(f"[EndFlow] executing deferred end after video: {pending_end}")
             self._request_end_with_readiness_check(
                 pending_end, allow_force_relaxation=False, source="after_video"
@@ -1193,21 +1210,23 @@ class MainWindow(QMainWindow):
         self.control_panel.stop_all_blinks()
 
         def game_runner():
+            completed = False
             try:
                 from services.game_service import get_game_service
                 game = get_game_service()
-                game.launch()
+                game_result = game.launch()
+                completed = bool(game_result.get("_completed", True)) if isinstance(game_result, dict) else False
             except Exception as e:
                 logger.warning(f"Game error: {e}")
             finally:
-                self.processing_queue.put(("game_finished", None))
+                self.processing_queue.put(("game_finished", completed))
 
         threading.Thread(target=game_runner, daemon=True).start()
 
-    def _on_game_finished(self):
+    def _on_game_finished(self, completed: bool = True):
         """Game finished — return to normal chat. No dialog, no end prompt."""
         # Record relaxation
-        if self.report_service:
+        if completed and self.report_service:
             self.report_service.record_relaxation("game")
             self.report_service.activity_log.append({
                 "type": "relaxation",
@@ -1222,10 +1241,15 @@ class MainWindow(QMainWindow):
         self._end_decision_open = False
         self._pre_end_relax_prompted = False
 
-        message = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "玩完啦，感觉怎么样？放松一点了吗？"
+        if completed:
+            message = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "游戏结束了，感觉怎么样？"
+            status = "继续对话中..."
+        else:
+            message = "小游戏未能完成，未记录为已完成的放松训练。我们可以继续聊。"
+            status = "小游戏未完成"
         self.chat_panel.add_system_message(message)
         self._play_tts_async(message)
-        self.control_panel.set_status("继续对话中...")
+        self.control_panel.set_status(status)
 
     def _ask_continue_or_end(self):
         """Ask user whether to continue or end when time limit is reached."""
@@ -1781,20 +1805,26 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1000, lambda: self.control_panel.highlight_relax_button(tag))
         self.control_panel.set_status("请先完成放松训练")
 
-    def _on_session_finished(self):
+    def _on_session_finished(self, report_ok: bool = True):
         """Session ended — keep chat visible until operator confirms next subject."""
         if self._exit_wait_dialog:
             self._exit_wait_dialog.close()
             self._exit_wait_dialog = None
         self._session_ending = False
         self._current_report_generating = False
-        self._current_report_generated = True
+        self._current_report_generated = report_ok
         # Disable recording but keep chat and farewell visible
         self.control_panel.set_buttons_enabled(False)
-        self.control_panel.set_status("会话已结束，报告已保存")
-        self.chat_panel.add_system_message(
-            '会话已结束，报告已保存。点击"确认信息并开始"进入下一位参与者。'
-        )
+        if report_ok:
+            self.control_panel.set_status("会话已结束，报告已保存")
+            self.chat_panel.add_system_message(
+                '会话已结束，报告已保存。点击"确认信息并开始"进入下一位参与者。'
+            )
+        else:
+            self.control_panel.set_status("会话已结束，报告保存失败")
+            self.chat_panel.add_system_message(
+                '会话已结束，但报告保存失败；请检查数据目录和日志后再开始下一位参与者。'
+            )
 
     def _force_quit_now(self):
         """Immediate quit — stop all services and exit, no farewell/report."""
@@ -2168,8 +2198,16 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         logger.warning(f"PDF generation timed out or failed: {e}")
 
-                    report_ok = True
-                    self._current_report_generated = True
+                    report_ok = bool(
+                        isinstance(researcher_report, dict)
+                        and isinstance(save_result, dict)
+                        and save_result.get("ok", False)
+                    )
+                    self._current_report_generated = report_ok
+                    if not report_ok:
+                        logger.warning(
+                            "Report persistence incomplete: save_result=%r", save_result
+                        )
                 except FuturesTimeout:
                     logger.warning("Report generation timed out (60s)")
                 except Exception as e:
@@ -2202,6 +2240,6 @@ class MainWindow(QMainWindow):
                     self.processing_queue.put(("quit", None))
                 else:
                     logger.info("[ExitDebug] report done, queuing session_finished")
-                    self.processing_queue.put(("session_finished", None))
+                    self.processing_queue.put(("session_finished", report_ok))
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()

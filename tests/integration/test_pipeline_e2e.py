@@ -229,14 +229,49 @@ class TestShadowIndependence:
 
 
 class TestCumulativeSymptomTrigger:
-    def test_symptom_signals_alone_start_scale(self, ctx):
-        """F14: no agent start action — cumulative symptom scoring alone
-        (duration +1, PHQ symptoms +2 => >=3) must trigger PHQ-9."""
+    def test_symptom_signals_wait_for_minimum_rounds_before_starting_scale(self, ctx):
+        """Cumulative signals must honour the same minimum-round gate as
+        an agent initiated scale start."""
         agent = FakeAgent()  # default route = 'chat', low confidence
-        p = ctx(agent=agent)
+        p = ctx(agent=agent, report=FakeReport(start_round=0))
+
+        for _ in range(4):
+            result, _ = run_turn(p, "最近一直睡不着")
+            assert p._active_scale is None
+
         result, _ = run_turn(p, "最近一直睡不着")
         assert p._active_scale == "PHQ-9"
         assert result.scale_active is True
+
+
+class TestAgentRecommendationNormalization:
+    def test_agent_game_recommendation_survives_parallel_intent_classification(self, ctx):
+        agent = FakeAgent()
+        agent.route_script = [{
+            "scale_action": "none", "scale": None, "item": None,
+            "recommend_game": True, "confidence": 0.95,
+            "risk_level": 0, "reason": "用户想放松",
+        }]
+        p = ctx(agent=agent)
+
+        result, _ = run_turn(p, "有点无聊")
+
+        assert result.intent == "entertainment"
+
+    def test_agent_relaxation_type_is_normalized_for_ui_and_video(self, ctx):
+        agent = FakeAgent()
+        agent.route_script = [{
+            "scale_action": "none", "scale": None, "item": None,
+            "recommend_relaxation": True,
+            "relaxation_type": "muscle_relaxation",
+            "confidence": 0.95, "risk_level": 0, "reason": "身体紧张",
+        }]
+        p = ctx(agent=agent)
+
+        result, _ = run_turn(p, "我浑身紧绷")
+
+        assert result.relaxation_rec == "muscle"
+        assert result.scale_active is False
 
 
 class TestSeparatorEdgeCases:
@@ -251,6 +286,20 @@ class TestSeparatorEdgeCases:
         assert "你接着说" in result.clean_spoken
         assert "【情绪识别】" in result.analysis_text
         assert "【" not in result.clean_spoken
+
+    def test_reversed_format_never_streams_internal_analysis(self, ctx):
+        llm = FakeLLM([
+            "我会继续听你说。|||【情绪识别】平静【状态评估】低【变革话语】无【策略选择】肯定",
+        ])
+        p = ctx(llm=llm)
+
+        _, emit = run_turn(p, "随便聊聊")
+
+        streamed = "".join(
+            content for event, content in emit.events if event == "stream_text"
+        )
+        assert "情绪识别" not in streamed
+        assert "状态评估" not in streamed
 
     def test_internal_terms_never_leak_to_display(self, ctx):
         """F11: forbidden internal strategy terms in the spoken side are

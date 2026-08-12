@@ -215,6 +215,7 @@ class LLMService:
             raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
         # Retry once if truly empty (no thinking, no content)
+        recovered_from_retry = False
         if chunks_yielded == 0 or not full_response.strip():
             logger.warning(
                 f"[LLM] Empty stream (no thinking, no content). Retrying. "
@@ -229,6 +230,7 @@ class LLMService:
                 )
                 retry_msg = _msg_get(retry_resp, "message", {})
                 full_response = (_msg_get(retry_msg, "content") or "").strip()
+                recovered_from_retry = bool(full_response)
             except Exception as retry_err:
                 logger.warning(f"[LLM] Retry also failed: {retry_err}")
 
@@ -245,6 +247,11 @@ class LLMService:
         # in the stream loop above. Yielding here would duplicate the content.
 
         # Add assistant response to history — only spoken text, no analysis
+        if recovered_from_retry:
+            # The original streaming call produced no content. Return the
+            # recovered response once so the UI and TTS receive it.
+            yield full_response
+
         self.conversation_history.append({
             "role": "assistant",
             "content": self._history_visible_text(full_response)
@@ -362,7 +369,7 @@ class LLMService:
     def generate_short_text(self, prompt: str, max_tokens: int = 60) -> str:
         """Generate a short text using the main LLM model (non-streaming)."""
         try:
-            client = get_ollama_client()
+            client = get_ollama_client(self.host)
             response = client.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],

@@ -3,20 +3,20 @@
 # ------------------------------------------------------------
 # 用法：在项目目录执行  powershell -ExecutionPolicy Bypass -File .\run_local.ps1
 #
-# 本脚本针对 6GB 显存机器，使用 qwen2.5:7b 作为主对话模型，
-# qwen2.5:3b 作为 Agent 路由模型（替代默认的 8b 以省显存）。
+# 本脚本针对 6GB 显存机器，使用 qwen2.5:3b 作为主对话和 Agent 路由模型。
+# 如部署机拥有更多显存/内存，可在启动前覆盖 OLLAMA_MODEL。
 # ============================================================
 
 $ErrorActionPreference = "Stop"
 
 # ---------- 路径配置 ----------
-$VenvPython = "C:\Users\Jersery\.qoderwork\workspace\msnk4887lp0t9ndj\vcenv\Scripts\python.exe"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$VenvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
 $OllamaExe  = "C:\Users\Jersery\AppData\Local\Programs\Ollama\ollama.exe"
 
 # ---------- 模型与数据配置 ----------
-# 显式指定模型，避免 config.py 自动检测选错（7b/3b 不在优先列表里）
-$env:OLLAMA_MODEL      = "qwen2.5:7b"      # 主对话模型
+# 显式指定模型，保证启动脚本与 6GB 显存部署配置一致。
+$env:OLLAMA_MODEL      = "qwen2.5:3b"      # 主对话模型（6GB 显存稳定）
 $env:AGENT_MODEL       = "qwen2.5:3b"      # Agent 路由模型
 $env:OLLAMA_HOST       = "http://localhost:11434"
 $env:OLLAMA_MODELS     = "E:\ollama_models" # 模型仓库放 E 盘（C 盘空间紧张）

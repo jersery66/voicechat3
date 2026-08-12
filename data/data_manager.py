@@ -97,6 +97,18 @@ class DataManager:
         except OSError as e:
             logger.warning(f"Failed to write JSON {path}: {e}")
             return False
+
+    @staticmethod
+    def _write_text(path: Path, text: str) -> bool:
+        """Safely write UTF-8 text to ``path``. Returns True on success."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            return True
+        except OSError as e:
+            logger.warning(f"Failed to write text {path}: {e}")
+            return False
         
     # ==================== User Profile Management ====================
 
@@ -437,10 +449,10 @@ class DataManager:
         """Get the current session directory path."""
         return self.data_root / self.current_date / self.current_folder_name
     
-    def _save_metadata(self, metadata: Dict[str, Any]):
+    def _save_metadata(self, metadata: Dict[str, Any]) -> bool:
         """Save session metadata."""
         metadata_path = self._get_session_path() / "metadata.json"
-        self._write_json(metadata_path, metadata)
+        return self._write_json(metadata_path, metadata)
 
     def _load_metadata(self) -> Dict[str, Any]:
         """Load session metadata."""
@@ -612,7 +624,7 @@ class DataManager:
     def save_session_report(self, 
                            researcher_report: dict, 
                            visitor_feedback: str,
-                           end_type: str) -> Dict[str, str]:
+                           end_type: str) -> Dict[str, Any]:
         """
         Save session report (researcher version + visitor feedback).
         
@@ -633,34 +645,39 @@ class DataManager:
         report_path = session_path / "researcher_report.json"
         researcher_report["end_type"] = end_type
         researcher_report["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        try:
-            with open(report_path, 'w', encoding='utf-8') as f:
-                json.dump(researcher_report, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to save researcher report: {e}")
+        report_saved = self._write_json(report_path, researcher_report)
 
         # Save visitor feedback as text
         feedback_path = session_path / "visitor_feedback.txt"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        try:
-            with open(feedback_path, 'w', encoding='utf-8') as f:
-                f.write(f"[{timestamp}]\n{visitor_feedback}")
-        except Exception as e:
-            logger.warning(f"Failed to save visitor feedback: {e}")
+        feedback_saved = self._write_text(
+            feedback_path, f"[{timestamp}]\n{visitor_feedback}"
+        )
 
         # Update metadata with report info
+        metadata_saved = False
         try:
             metadata = self._load_metadata()
             metadata["report_generated"] = True
             metadata["end_type"] = end_type
             metadata["end_time"] = timestamp
-            self._save_metadata(metadata)
+            metadata_saved = self._save_metadata(metadata)
         except Exception as e:
             logger.warning(f"Failed to update metadata for report: {e}")
+
+        errors = []
+        if not report_saved:
+            errors.append("researcher_report")
+        if not feedback_saved:
+            errors.append("visitor_feedback")
+        if not metadata_saved:
+            errors.append("metadata")
         
         return {
             "report_path": str(report_path),
-            "feedback_path": str(feedback_path)
+            "feedback_path": str(feedback_path),
+            "ok": not errors,
+            "errors": errors,
         }
     
     def get_session_duration_minutes(self) -> float:
@@ -696,4 +713,3 @@ def get_data_manager() -> DataManager:
     if _data_manager is None:
         _data_manager = DataManager()
     return _data_manager
-

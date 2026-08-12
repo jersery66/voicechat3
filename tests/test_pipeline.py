@@ -111,17 +111,25 @@ class TestParseScaleTags:
     """parse_scale_tags extracts scale answers from text."""
 
     def test_single_scale(self):
-        text = "[SCALE:PHQ-9:Q1:S3][SCALE:PHQ-9:Q2:S4]"
+        text = "[SCALE:PHQ-9:Q1:S3][SCALE:PHQ-9:Q2:S3]"
         result = parse_scale_tags(text)
-        assert result == {"PHQ-9": {1: 3, 2: 4}}
+        assert result == {"PHQ-9": {1: 3, 2: 3}}
 
     def test_multiple_scales(self):
-        text = "[SCALE:PHQ-9:Q1:S2][SCALE:GAD-7:Q1:S5]"
+        text = "[SCALE:PHQ-9:Q1:S2][SCALE:GAD-7:Q1:S3]"
         result = parse_scale_tags(text)
-        assert result == {"PHQ-9": {1: 2}, "GAD-7": {1: 5}}
+        assert result == {"PHQ-9": {1: 2}, "GAD-7": {1: 3}}
 
     def test_no_scales(self):
         assert parse_scale_tags("普通文本") == {}
 
     def test_empty_string(self):
         assert parse_scale_tags("") == {}
+
+    def test_rejects_unknown_questions_and_out_of_range_scores(self):
+        text = (
+            "[SCALE:PHQ-9:Q99:S3]"
+            "[SCALE:PHQ-9:Q1:S9]"
+            "[SCALE:NOT-A-SCALE:Q1:S1]"
+        )
+        assert parse_scale_tags(text) == {}

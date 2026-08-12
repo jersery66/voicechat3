@@ -8,5 +8,6 @@ accelerate>=1.0
 transformers>=4.40
 sentencepiece>=0.2
 librosa>=0.10
-PyAudio>=0.2
+# Legacy CosyVoice only. The active VoxCPM2 backend uses sounddevice instead;
+# keeping PyAudio out avoids a Windows build-time dependency on PortAudio.
 voxcpm>=2.0

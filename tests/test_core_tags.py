@@ -37,10 +37,8 @@ class TestCoreTagsParsing:
     def test_scale_tags(self):
         assert parse_scale_tags("[SCALE:PHQ-9:Q2:S1]") == {"PHQ-9": {2: 1}}
 
-    def test_case_insensitive_match_preserves_name_case(self):
-        # The regex matches case-insensitively, but the captured scale name
-        # keeps its original case (existing behavior — preserved by refactor).
-        assert parse_scale_tags("[scale:gad-7:q3:s2]") == {"gad-7": {3: 2}}
+    def test_case_insensitive_match_normalizes_to_canonical_name(self):
+        assert parse_scale_tags("[scale:gad-7:q3:s2]") == {"GAD-7": {3: 2}}
 
 
 class TestCoreTagsCleaning:

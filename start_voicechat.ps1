@@ -1,8 +1,18 @@
 # Voice Chat Startup Script
 # Sets model and host environment variables, then launches the application.
 
-$env:OLLAMA_MODEL = "qwen3.6:35b"
+$ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$VenvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
+
+$env:OLLAMA_MODEL = "qwen2.5:3b"
+$env:AGENT_MODEL = "qwen2.5:3b"
 $env:OLLAMA_HOST = "http://localhost:11434"
 
+if (-not (Test-Path $VenvPython)) {
+    Write-Host "Virtual environment not found: $VenvPython" -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "Starting Voice Chat with model: $env:OLLAMA_MODEL" -ForegroundColor Green
-python main.py
+Set-Location $ProjectDir
+& $VenvPython main.py

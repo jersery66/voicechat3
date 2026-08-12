@@ -18,6 +18,14 @@ class VideoPlayTool:
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
 
+    def _resolve_video_path(self, filename: str) -> str:
+        """Resolve both legacy root media and the documented media library."""
+        candidates = (
+            os.path.join(self.base_dir, filename),
+            os.path.join(self.base_dir, "media_library", "relaxation", filename),
+        )
+        return next((path for path in candidates if os.path.isfile(path)), "")
+
     def execute(self, relaxation_type: str = None, filename: str = None) -> str:
         """
         Play a relaxation video. Blocks until video finishes.
@@ -35,9 +43,12 @@ class VideoPlayTool:
             return None
 
         from services.video_service import get_video_player
-        video_path = os.path.join(self.base_dir, filename)
-        if not os.path.exists(video_path):
-            print(f"[WARNING] Video file not found: {video_path}")
+        video_path = self._resolve_video_path(filename)
+        if not video_path:
+            print(
+                "[WARNING] Video file not found in either media location: "
+                f"{filename}"
+            )
             return None
 
         player = get_video_player()

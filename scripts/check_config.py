@@ -45,8 +45,9 @@ def check_ollama() -> bool:
         import ollama
         client = ollama.Client(host=OLLAMA_HOST)
         models = client.list()
+        model_list = models.get("models", []) if isinstance(models, dict) else getattr(models, "models", [])
         names = []
-        for m in models.get("models", []):
+        for m in model_list:
             if isinstance(m, dict):
                 names.append(m.get("model") or m.get("name") or "")
             else:
@@ -189,11 +190,15 @@ def check_relaxation_media() -> bool:
     if not os.path.isdir(relax_dir):
         _warn("Relaxation Media", f"{relax_dir} not found (download separately)")
         return True
-    mp4s = [f for f in os.listdir(relax_dir) if f.lower().endswith(".mp4")]
-    if not mp4s:
+    required = {"呼吸训练.mp4", "肌肉放松.mp4", "冥想训练.mp4"}
+    available = {f for f in os.listdir(relax_dir) if f.lower().endswith(".mp4")}
+    missing = sorted(required - available)
+    if not available:
         _warn("Relaxation Media", f"no .mp4 files in {relax_dir} (download separately)")
+    elif missing:
+        _warn("Relaxation Media", f"missing required files: {', '.join(missing)}")
     else:
-        _ok(f"Relaxation Media ({len(mp4s)} .mp4 files)")
+        _ok(f"Relaxation Media ({len(required)} required videos)")
     return True  # non-fatal
 
 

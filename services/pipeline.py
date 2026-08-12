@@ -14,6 +14,21 @@ from config import MIN_ROUNDS_BEFORE_SCALE, SCALE_ROUTE_CONFIDENCE, RELAX_ROUTE_
 logger = get_logger(__name__)
 
 
+_RELAXATION_TYPE_ALIASES = {
+    "breathing": "breathing",
+    "mindfulness": "meditation",
+    "meditation": "meditation",
+    "muscle": "muscle",
+    "muscle_relaxation": "muscle",
+    "progressive_muscle_relaxation": "muscle",
+}
+
+
+def _normalize_relaxation_type(value) -> str:
+    """Map agent intervention labels to the UI/media contract."""
+    return _RELAXATION_TYPE_ALIASES.get(str(value or "").strip().lower(), "breathing")
+
+
 # ==================== Tag Detection Constants (single source of truth) ====================
 # Tag constants and cleaning functions live in core.tags (pure domain logic).
 # They are re-exported here so existing call sites
@@ -434,6 +449,10 @@ class ConversationPipeline:
         self.finish_mode = False
         self._post_scale_relaxation_done = False
         self._relaxation_recommended_this_session.clear()
+        self._game_recommended_this_session = False
+        self._pending_relaxation_after_scale = None
+        self._relaxation_candidate = None
+        self._game_candidate = False
 
     def get_active_scale_state(self) -> Optional[Dict[str, Any]]:
         """Return current active scale state for relaxation-interruption tracking."""
@@ -970,7 +989,9 @@ class ConversationPipeline:
                 and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE
                 and not self.relaxation_used
                 and not self._active_scale_waiting_answer):
-                self._relaxation_candidate = agent_route.get("relaxation_type") or "breathing"
+                self._relaxation_candidate = _normalize_relaxation_type(
+                    agent_route.get("relaxation_type")
+                )
                 logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
                 logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
                 # Inject hint so LLM naturally mentions relaxation in its reply
@@ -1041,6 +1062,7 @@ class ConversationPipeline:
 
             # Trigger highest-scoring scale if threshold reached
             if (allow_new_scale
+                and current_rounds >= MIN_ROUNDS_BEFORE_SCALE
                 and current_rounds > self.last_scale_trigger_round + self.scale_trigger_cooldown):
                 # Find the scale with highest score that hasn't been administered
                 best_scale = None
@@ -1211,10 +1233,9 @@ class ConversationPipeline:
                 logger.warning(f"[RelaxDebug] relaxation from agent: {self._relaxation_candidate}")
         self._relaxation_candidate = None
 
-        # Game: agent recommended game and hint was injected
-        if self._game_candidate and result.intent != "entertainment":
-            result.intent = "entertainment"
-            logger.warning("[GameDebug] game recommendation from agent")
+        # Preserve this turn's recommendation until the asynchronous intent
+        # classification has completed below.
+        game_recommended = self._game_candidate
         self._game_candidate = False
         result.scale_tags = parse_scale_tags(result.full_response)
         if result.scale_tags:
@@ -1398,6 +1419,10 @@ class ConversationPipeline:
             result.intent = "counseling"
             result.emotion_result = {"emotion": "neutral", "intensity": 0.0}
             crisis_keyword_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
+
+        if game_recommended:
+            result.intent = "entertainment"
+            logger.warning("[GameDebug] game recommendation from agent")
 
         # Emotion keyword override: if agent misclassifies negative text as happy
         _emotion_text = result.user_text.lower()
@@ -1902,41 +1927,11 @@ class ConversationPipeline:
         full_response = ""
         analysis_text = ""
         spoken_text = ""
-        found_separator = False
-        pre_separator_buffer = ""
 
         llm_gen = self.llm.chat(text, system_suffix=system_suffix)
 
         for chunk in llm_gen:
             full_response += chunk
-
-            if not found_separator:
-                pre_separator_buffer += chunk
-                if '|||' in pre_separator_buffer:
-                    parts = pre_separator_buffer.split('|||', 1)
-                    analysis_text = parts[0].strip()
-                    spoken_buffer = parts[1]
-                    found_separator = True
-                    cleaned = _RE_THINK.sub('', spoken_buffer)
-                    cleaned = _RE_PIPE_TAG.sub('', cleaned)
-                    cleaned = _RE_REC_TAG.sub('', cleaned)
-                    cleaned = _RE_END_TAG.sub('', cleaned)
-                    cleaned = _RE_SCALE_TAG.sub('', cleaned)
-                    cleaned = _RE_BRACKETS_CN.sub('', cleaned)
-                    cleaned = _RE_BREATH_LAUGH.sub('', cleaned)
-                    if cleaned.strip():
-                        emit("stream_text", cleaned.strip())
-                continue
-
-            cleaned = _RE_THINK.sub('', chunk)
-            cleaned = _RE_PIPE_TAG.sub('', cleaned)
-            cleaned = _RE_REC_TAG.sub('', cleaned)
-            cleaned = _RE_END_TAG.sub('', cleaned)
-            cleaned = _RE_SCALE_TAG.sub('', cleaned)
-            cleaned = _RE_BRACKETS_CN.sub('', cleaned)
-            cleaned = _RE_BREATH_LAUGH.sub('', cleaned)
-            if cleaned.strip():
-                emit("stream_text", cleaned.strip())
 
         if '|||' in full_response:
             parts = full_response.split('|||', 1)
@@ -1967,26 +1962,6 @@ class ConversationPipeline:
                     spoken_text = spoken_text.split(_tag)[0].strip()
         else:
             spoken_text = full_response.strip()
-            if not found_separator:
-                cleaned = _RE_THINK.sub('', spoken_text)
-                cleaned = _RE_PIPE_TAG.sub('', cleaned)
-                cleaned = _RE_REC_TAG.sub('', cleaned)
-                cleaned = _RE_END_TAG.sub('', cleaned)
-                cleaned = _RE_SCALE_TAG.sub('', cleaned)
-                cleaned = _RE_BRACKETS_CN.sub('', cleaned)
-                cleaned = _RE_BREATH_LAUGH.sub('', cleaned)
-                if cleaned.strip():
-                    emit("stream_text", cleaned.strip())
-                else:
-                    logger.warning(f"Spoken text empty after cleaning, using raw response as fallback")
-                    fallback = _RE_THINK.sub('', spoken_text)
-                    fallback = _RE_REC_TAG.sub('', fallback)
-                    fallback = _RE_END_TAG.sub('', fallback)
-                    fallback = _RE_SCALE_TAG.sub('', fallback)
-                    fallback = _RE_BREATH_LAUGH.sub('', fallback)
-                    if fallback.strip():
-                        emit("stream_text", fallback.strip())
-                        spoken_text = fallback.strip()
 
         # Final safety: if spoken_text is still empty or only contains analysis
         # tags that will be stripped by clean_for_display, use a safe fallback.
@@ -1995,5 +1970,13 @@ class ConversationPipeline:
                 f"spoken_text empty after final cleaning. full_response_head={full_response[:300]!r}"
             )
             spoken_text = make_safe_fallback_reply(text)
+
+        # The response protocol permits the model to produce spoken|||analysis
+        # in reverse. Buffer a tagged response until that orientation is known;
+        # otherwise private analysis could briefly appear in the UI before the
+        # final cleanup pass corrects it.
+        display_text = clean_for_display(spoken_text)
+        if display_text:
+            emit("stream_text", display_text)
 
         return full_response, analysis_text, spoken_text

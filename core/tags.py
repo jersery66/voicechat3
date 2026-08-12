@@ -28,6 +28,12 @@ REC_TAGS = {
 
 SCALE_PATTERN = re.compile(r'\[SCALE:(\w+-\d+):Q(\d+):S?(\d+)\]', re.IGNORECASE)
 
+_SCALE_TAG_BOUNDS = {
+    "PHQ-9": (9, 3),
+    "GAD-7": (7, 3),
+    "PCL-5": (8, 4),
+}
+
 # Pre-compiled regexes for hot-path tag stripping (avoids re-compiling per chunk)
 _RE_REC_TAG = re.compile(r'\[REC_[A-Z_]+\]')
 _RE_END_TAG = re.compile(r'\[END_[A-Z_]+\]')
@@ -50,9 +56,15 @@ def parse_scale_tags(text: str) -> Dict[str, Dict[int, int]]:
     """
     results: Dict[str, Dict[int, int]] = {}
     for match in SCALE_PATTERN.finditer(text):
-        scale_name = match.group(1)
+        scale_name = match.group(1).upper()
         q_num = int(match.group(2))
         score = int(match.group(3))
+        bounds = _SCALE_TAG_BOUNDS.get(scale_name)
+        if not bounds:
+            continue
+        max_question, max_score = bounds
+        if not 1 <= q_num <= max_question or not 0 <= score <= max_score:
+            continue
         results.setdefault(scale_name, {})[q_num] = score
     return results
 
