@@ -324,6 +324,14 @@ from deployment.profiles import get_deployment_profile, resolve_runtime_models
 
 DEPLOYMENT_PROFILE = get_deployment_profile()
 RUNTIME_MODELS = resolve_runtime_models(DEPLOYMENT_PROFILE)
+# Dialogue transport is profile-owned. ``OLLAMA_MODEL`` is retained as the
+# existing application-wide model-name variable for compatibility; under the
+# A100 profile it names the vLLM-served model rather than an Ollama tag.
+DIALOGUE_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
+DIALOGUE_BASE_URL = os.environ.get(
+    "VOICECHAT_DIALOGUE_BASE_URL",
+    DEPLOYMENT_PROFILE.dialogue_base_url,
+)
 OLLAMA_MODEL = RUNTIME_MODELS.dialogue
 
 

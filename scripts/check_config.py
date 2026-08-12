@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Pre-launch configuration health check (NON-BLOCKING DIAGNOSTIC).
 
-Validates that external dependencies (Ollama, model files, knowledge base,
-relaxation media) are reachable / parseable before the main UI starts.
+Validates the selected dialogue backend, model files, knowledge base, and
+relaxation media before the main UI starts.
 
 IMPORTANT: this is a *diagnostic*. run_check() returns False only when a
-CRITICAL check fails (Ollama unreachable, data root not writable). The
+CRITICAL check fails (dialogue backend unreachable, data root not writable). The
 launcher (main.py) currently only prints the result and does NOT abort the
 startup, so a non-critical failure is reported but the app still launches.
 Non-critical gaps (missing converted knowledge base, missing relaxation
@@ -19,6 +19,9 @@ Usage:
 import json
 import os
 import sys
+from urllib.parse import urljoin
+
+import requests
 
 # Ensure project root is on sys.path
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,6 +62,33 @@ def check_ollama() -> bool:
         return True
     except Exception as e:
         return _fail("Ollama", f"cannot reach {OLLAMA_HOST}: {e}")
+
+
+def check_dialogue_backend() -> bool:
+    """Check the selected dialogue transport without assuming Ollama.
+
+    For vLLM this deliberately calls the OpenAI-compatible ``/v1/models``
+    endpoint. The desktop UI must never try to probe the A100 dialogue server
+    through the Ollama client API.
+    """
+    from config import DIALOGUE_BACKEND, DIALOGUE_BASE_URL, OLLAMA_MODEL
+
+    if DIALOGUE_BACKEND == "ollama":
+        return check_ollama()
+    if DIALOGUE_BACKEND != "vllm":
+        return _fail("Dialogue Backend", f"unsupported backend: {DIALOGUE_BACKEND}")
+    try:
+        url = urljoin(DIALOGUE_BASE_URL.rstrip("/") + "/", "models")
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        available = [item.get("id") for item in data.get("data", []) if item.get("id")]
+        if OLLAMA_MODEL not in available:
+            return _fail("vLLM", f"model '{OLLAMA_MODEL}' not served by {url}")
+        _ok(f"vLLM ({len(available)} models, using '{OLLAMA_MODEL}')")
+        return True
+    except Exception as exc:
+        return _fail("vLLM", f"cannot reach {DIALOGUE_BASE_URL}: {exc}")
 
 
 def check_funasr() -> bool:
@@ -217,7 +247,7 @@ def run_check() -> bool:
 
     results = [
         check_offline_model_root(),
-        check_ollama(),
+        check_dialogue_backend(),
         check_funasr(),
         check_cosyvoice(),
         check_voxcpm(),

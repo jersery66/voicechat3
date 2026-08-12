@@ -22,9 +22,11 @@ def main():
     get_error_monitor()
 
     # Print actual model configuration
-    from config import OLLAMA_MODEL, OLLAMA_HOST, print_model_status
+    from config import (
+        DIALOGUE_BACKEND, DIALOGUE_BASE_URL, OLLAMA_MODEL, print_model_status,
+    )
     print(f"[VoiceChat] Using LLM model: {OLLAMA_MODEL}")
-    print(f"[VoiceChat] Ollama host: {OLLAMA_HOST}")
+    print(f"[VoiceChat] Dialogue backend: {DIALOGUE_BACKEND} ({DIALOGUE_BASE_URL})")
     print_model_status()
 
     # Pre-launch config check (non-blocking — warn but don't block startup)

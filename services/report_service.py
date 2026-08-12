@@ -11,12 +11,11 @@ from typing import Optional, Dict, Any, List, Tuple
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    OLLAMA_HOST, OLLAMA_MODEL,
+    DIALOGUE_BACKEND, OLLAMA_MODEL,
     MAX_CONVERSATION_ROUNDS, MAX_CONVERSATION_MINUTES, TIME_WARNING_MINUTES,
     CRISIS_HOTLINES, RESEARCHER_REPORT_PROMPT, VISITOR_FEEDBACK_PROMPT,
     SESSION_SUMMARY_PROMPT, AGENT_REPORT_TIMEOUT
 )
-from services._ollama_pool import get_ollama_client
 from services.logger import get_logger
 
 logger = get_logger(__name__)
@@ -78,18 +77,28 @@ class ReportService:
     # ==================== Fallback Helpers ====================
 
     def _get_fallback_client(self):
-        """Return the shared (pooled) ollama client used as 72B fallback."""
-        return get_ollama_client(OLLAMA_HOST)
+        """Return the selected dialogue service for report fallbacks.
+
+        The result implements the legacy ``chat`` surface on both Ollama and
+        vLLM profiles, so reports cannot quietly fall back to a local Ollama
+        process when the A100 dialogue server is the configured production
+        backend.
+        """
+        return self._get_llm_service()
 
     def _fallback_chat(self, prompt: str, *, stream: bool = False):
-        """Run a 72B fallback chat call. Returns either text or a stream."""
+        """Run a selected-dialogue fallback chat call. Returns text or a stream."""
         client = self._get_fallback_client()
         if stream:
+            if DIALOGUE_BACKEND == "vllm":
+                return client.chat(prompt)
             return client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 stream=True,
             )
+        if DIALOGUE_BACKEND == "vllm":
+            return client.chat_sync(prompt)
         response = client.chat(
             model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -396,18 +405,8 @@ class ReportService:
                     return self._clean_for_tts(feedback)
             except Exception as agent_err:
                 logger.warning(f"3B feedback failed, falling back to 72B: {agent_err}")
-                client = self._get_fallback_client()
                 if stream:
-                    def stream_generator():
-                        stream_response = client.chat(
-                            model=OLLAMA_MODEL,
-                            messages=[{"role": "user", "content": prompt}],
-                            stream=True
-                        )
-                        for chunk in stream_response:
-                            if "message" in chunk and "content" in chunk["message"]:
-                                yield self._clean_for_tts(chunk["message"]["content"])
-                    return stream_generator()
+                    return (self._clean_for_tts(chunk) for chunk in self._fallback_chat(prompt, stream=True))
                 else:
                     feedback = self._fallback_chat(prompt, stream=False)
                     return self._clean_for_tts(feedback)
@@ -453,18 +452,8 @@ class ReportService:
                     return self._clean_for_tts(summary)
             except Exception as agent_err:
                 logger.warning(f"3B summary failed, falling back to 72B: {agent_err}")
-                client = self._get_fallback_client()
                 if stream:
-                    def stream_generator():
-                        stream_response = client.chat(
-                            model=OLLAMA_MODEL,
-                            messages=[{"role": "user", "content": prompt}],
-                            stream=True
-                        )
-                        for chunk in stream_response:
-                            if "message" in chunk and "content" in chunk["message"]:
-                                yield self._clean_for_tts(chunk["message"]["content"])
-                    return stream_generator()
+                    return (self._clean_for_tts(chunk) for chunk in self._fallback_chat(prompt, stream=True))
                 else:
                     feedback = self._fallback_chat(prompt, stream=False)
                     return self._clean_for_tts(feedback)

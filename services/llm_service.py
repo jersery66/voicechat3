@@ -429,8 +429,9 @@ class LLMService:
 # Singleton instance
 _llm_service = None
 
-def get_llm_service() -> LLMService:
+def get_llm_service():
     global _llm_service
     if _llm_service is None:
-        _llm_service = LLMService()
+        from services.llm_factory import build_llm_service
+        _llm_service = build_llm_service()
     return _llm_service

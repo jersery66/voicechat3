@@ -749,7 +749,7 @@ class MainWindow(QMainWindow):
         """Load all models with progress updates."""
         try:
             from services.stt_service import STTService
-            from services.llm_service import LLMService
+            from services.llm_factory import build_llm_service
             from services.tts_service import TTSService
             from services.rag_service import get_rag_service
             from data.data_manager import DataManager
@@ -838,9 +838,9 @@ class MainWindow(QMainWindow):
             self.processing_queue.put(("loading_step", "步骤 2/3: 智能对话模块"))
             self.processing_queue.put(("status", "正在连接智能助手..."))
             self.processing_queue.put(("loading_progress", 70))
-            self.llm_service = LLMService()
+            self.llm_service = build_llm_service()
             if not self.llm_service.test_connection():
-                self.processing_queue.put(("error", "无法连接到 Ollama 服务"))
+                self.processing_queue.put(("error", "无法连接到对话模型服务"))
                 return
             self.processing_queue.put(("loading_progress", 80))
             self.processing_queue.put(("status", "正在预热智能助手..."))

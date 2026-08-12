@@ -20,6 +20,7 @@ class DeploymentProfile:
     expected_gpu_memory_gb: int
     runtime_backend: str
     dialogue_model: str
+    dialogue_base_url: str
     router_model: str
     optional_guard_model: Optional[str]
     enable_streaming_tts: bool
@@ -41,6 +42,7 @@ _PROFILES = {
         expected_gpu_memory_gb=6,
         runtime_backend="ollama",
         dialogue_model="qwen2.5:3b",
+        dialogue_base_url="http://localhost:11434",
         router_model="qwen2.5:3b",
         optional_guard_model=None,
         enable_streaming_tts=False,
@@ -49,12 +51,13 @@ _PROFILES = {
     "a100_80g": DeploymentProfile(
         name="a100_80g",
         expected_gpu_memory_gb=80,
-        runtime_backend="ollama",
-        dialogue_model="qwen2.5:72b",
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen2.5-72B-Instruct-AWQ",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
         router_model="qwen2.5:3b",
         optional_guard_model="qwen3guard:4b",
         enable_streaming_tts=True,
-        notes="Single A100 80GB profile. Qwen2.5 72B remains the verified dialogue baseline.",
+        notes="Single A100 80GB profile. Qwen2.5 72B AWQ runs behind vLLM.",
     ),
 }
 
@@ -76,7 +79,12 @@ def resolve_runtime_models(profile: DeploymentProfile,
     """Resolve only explicit overrides; live server inventory never selects a model."""
     environment = os.environ if environment is None else environment
     return RuntimeModels(
-        dialogue=environment.get("OLLAMA_MODEL") or profile.dialogue_model,
+        dialogue=(
+            environment.get("VOICECHAT_DIALOGUE_MODEL")
+            or environment.get("VOICECHAT_VLLM_MODEL")
+            or environment.get("OLLAMA_MODEL")
+            or profile.dialogue_model
+        ),
         router=environment.get("AGENT_MODEL") or profile.router_model,
         optional_guard=environment.get("VOICECHAT_GUARD_MODEL") or profile.optional_guard_model,
     )

@@ -9,8 +9,8 @@ def test_a100_profile_preserves_the_verified_72b_dialogue_model():
     profile = get_deployment_profile("a100_80g")
 
     assert profile.expected_gpu_memory_gb == 80
-    assert profile.dialogue_model == "qwen2.5:72b"
-    assert profile.runtime_backend == "ollama"
+    assert profile.dialogue_model == "Qwen/Qwen2.5-72B-Instruct-AWQ"
+    assert profile.runtime_backend == "vllm"
     assert profile.optional_guard_model == "qwen3guard:4b"
 
 
@@ -22,7 +22,7 @@ def test_unknown_profile_fails_closed():
 def test_profile_model_wins_over_accidental_live_ollama_detection():
     models = resolve_runtime_models(get_deployment_profile("a100_80g"), environment={})
 
-    assert models.dialogue == "qwen2.5:72b"
+    assert models.dialogue == "Qwen/Qwen2.5-72B-Instruct-AWQ"
     assert models.router == "qwen2.5:3b"
 
 
