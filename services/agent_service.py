@@ -43,6 +43,17 @@ _CRISIS_KEYWORDS = [
     "没有意义", "活着没意思", "不如死了",
 ]
 
+_CRISIS_DENIAL_PATTERNS = [
+    "没有伤害自己", "没有自伤", "没有自残", "没有自杀",
+    "不想伤害自己", "不想自伤", "不想自残", "不想自杀",
+    "没想过伤害自己", "没想过自伤", "没想过自残", "没想过自杀",
+]
+
+_CRISIS_SIGNAL_TERMS = (
+    "自杀", "自伤", "自残", "伤害自己", "想死", "轻生", "不想活",
+    "活不下去", "结束生命", "死了算了", "不如死了", "死了一了百了",
+)
+
 # Relaxation keywords for keyword fallback
 _RELAXATION_KEYWORDS = [
     "放松训练", "呼吸训练", "肌肉放松", "冥想",
@@ -226,6 +237,8 @@ class AgentService:
         Falls back to keyword scoring on failure.
         Set use_llm=False to skip the LLM call and use keyword scoring only.
         """
+        if self._has_explicit_crisis_denial(text):
+            return {"risk_level": 0, "indicators": [], "immediate_action": False}
         if not use_llm:
             return self._keyword_crisis_risk(text)
         timeout = timeout or AGENT_TIMEOUT
@@ -246,6 +259,8 @@ class AgentService:
 
     def _keyword_crisis_risk(self, text: str) -> Dict[str, Any]:
         """Keyword-based crisis risk scoring fallback."""
+        if self._has_explicit_crisis_denial(text):
+            return {"risk_level": 0, "indicators": [], "immediate_action": False}
         risk_level = 0
         indicators = []
 
@@ -258,8 +273,9 @@ class AgentService:
                 indicators.append(f"危急关键词: {kw}")
 
         # Level 7-8: Suicide ideation, self-harm
-        _severe = ["自杀", "想死", "死了算了", "活不下去", "轻生", "自残",
-                    "不想活", "活着没意思", "不如死了", "死了一了百了"]
+        _severe = ["自杀", "自伤", "自残", "伤害自己", "想死", "死了算了",
+                    "活不下去", "轻生", "不想活", "活着没意思", "不如死了",
+                    "死了一了百了"]
         for kw in _severe:
             if kw in text:
                 risk_level = max(risk_level, 7)
@@ -286,6 +302,21 @@ class AgentService:
             "indicators": indicators,
             "immediate_action": risk_level >= 7,
         }
+
+    @staticmethod
+    def _has_explicit_crisis_denial(text: str) -> bool:
+        """Recognize a clear denial without hiding a separate positive signal."""
+        compact = "".join((text or "").lower().split())
+        if not any(pattern in compact for pattern in _CRISIS_DENIAL_PATTERNS):
+            return False
+
+        # A person may deny current intent while disclosing prior/current ideation
+        # elsewhere in the same utterance.  Remove only the denial clauses before
+        # deciding whether it is safe to suppress the LLM reassessment.
+        non_denial_text = compact
+        for pattern in _CRISIS_DENIAL_PATTERNS:
+            non_denial_text = non_denial_text.replace(pattern, "")
+        return not any(term in non_denial_text for term in _CRISIS_SIGNAL_TERMS)
 
     # ==================== Report Generation ====================
 

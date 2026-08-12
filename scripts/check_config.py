@@ -84,6 +84,13 @@ def check_cosyvoice() -> bool:
 def check_voxcpm() -> bool:
     """Verify VoxCPM2 model availability."""
     from config import VOXCPM_MODEL_PATH
+    from services.tts_service_voxcpm import TTSService
+
+    blocker = TTSService.get_load_blocker()
+    if blocker:
+        _warn("VoxCPM2", blocker)
+        return True
+
     if VOXCPM_MODEL_PATH and os.path.isdir(VOXCPM_MODEL_PATH):
         _ok(f"VoxCPM2 ({VOXCPM_MODEL_PATH})")
         return True

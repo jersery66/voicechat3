@@ -714,7 +714,7 @@ SESSION_ENGINE_AUTHORITATIVE = (
 
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen3:8b")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:3b")
 AGENT_MODEL_SERVER = OLLAMA_HOST.rstrip('/') + '/v1'
 AGENT_API_KEY = 'EMPTY'
 

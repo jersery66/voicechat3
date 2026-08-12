@@ -16,6 +16,9 @@ from services.logger import get_logger
 logger = get_logger(__name__)
 
 
+VOXCPM_MIN_GPU_MEMORY_GB = 8
+
+
 class TTSService:
     def __init__(self):
         self.model = None
@@ -36,6 +39,26 @@ class TTSService:
                     os.remove(fp)
         except Exception as e:
             logger.warning(f"Temp cleanup failed: {e}")
+
+    @staticmethod
+    def get_load_blocker() -> str | None:
+        """Return why VoxCPM2 must not be loaded on this GPU, if applicable.
+
+        VoxCPM2's local weights occupy over 4 GB before allocator overhead and
+        AudioVAE buffers.  On 6 GB cards its constructor can terminate the
+        Python process with a native access violation instead of raising a
+        recoverable CUDA OOM exception.
+        """
+        if not torch.cuda.is_available():
+            return None
+        total_bytes = torch.cuda.get_device_properties(0).total_memory
+        total_gb = total_bytes / 1024 ** 3
+        if total_gb < VOXCPM_MIN_GPU_MEMORY_GB:
+            return (
+                f"VoxCPM2 requires at least {VOXCPM_MIN_GPU_MEMORY_GB}GB GPU memory; "
+                f"detected {total_gb:.0f}GB. TTS is disabled to prevent a native crash."
+            )
+        return None
 
     def _download_model(self) -> str:
         voxcpm_cache_dir = os.path.join(config.PROGRAM_ROOT, "models", "VoxCPM2")
@@ -68,6 +91,9 @@ class TTSService:
         if self.model is not None:
             logger.info("VoxCPM2 model already loaded, skipping re-load.")
             return True
+        blocker = self.get_load_blocker()
+        if blocker:
+            raise RuntimeError(blocker)
         if progress_callback:
             progress_callback("Loading VoxCPM2 model...")
 
@@ -395,6 +421,7 @@ class TTSService:
 
     def cleanup(self):
         sd.stop()
+        self.unload_model()
 
 
 _tts_service = None

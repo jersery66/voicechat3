@@ -2,6 +2,7 @@
 
 import os
 import sys
+import gc
 
 # Monkey-patch torchaudio.load to use soundfile/miniaudio (avoids torchcodec/ffmpeg dependency).
 # Must happen before funasr imports torchaudio.
@@ -394,7 +395,21 @@ class STTService:
             logger.warning(f"STT Warmup had issue (non-fatal): {e}")
             # Don't fail completely - the model may still work
             return True
-    
+
+    def cleanup(self):
+        """Stop capture and release the loaded ASR model before application exit."""
+        self.stop_recording()
+        self.model_kwargs = {}
+        if self.model is not None:
+            try:
+                del self.model
+            except Exception as exc:
+                logger.warning(f"Error releasing FunASR model: {exc}")
+            self.model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _correct_common_errors(self, text: str) -> str:
         """Correct common STT misrecognitions, especially drug-related terms."""
         if not text:
