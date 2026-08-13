@@ -44,6 +44,12 @@ class VLLMCompatibleLLMService:
         return "\n".join(part for part in parts if part)
 
     def chat(self, user_message: str, system_suffix: Optional[str] = None) -> Generator[str, None, None]:
+        # Keep the outgoing request to at most ``MAX_HISTORY_TURNS`` dialogue
+        # turns, counting the current user message.  Trim complete prior turns
+        # before appending so no orphaned assistant message is retained.
+        max_prior_messages = (self.MAX_HISTORY_TURNS - 1) * 2
+        if len(self.conversation_history) > max_prior_messages:
+            self.conversation_history = self.conversation_history[-max_prior_messages:]
         self.conversation_history.append({"role": "user", "content": user_message})
         full_response = ""
         messages = [{"role": "system", "content": self._system_context(system_suffix)}]
@@ -78,9 +84,16 @@ class VLLMCompatibleLLMService:
         return LLMService._history_visible_text(text)
 
     def _maybe_summarize(self) -> None:
-        # History compression remains a separate migration because it uses the
-        # local router service. Do not silently send it to another backend.
-        return None
+        """Keep vLLM requests below a bounded recent-turn context window.
+
+        The previous Ollama-specific summarizer is intentionally not reused:
+        it would introduce a hidden second model dependency.  Retaining only
+        complete recent dialogue turns gives the A100 profile a deterministic
+        bound that works when every language model is served by vLLM.
+        """
+        max_messages = self.MAX_HISTORY_TURNS * 2
+        if len(self.conversation_history) > max_messages:
+            self.conversation_history = self.conversation_history[-max_messages:]
 
     def chat_sync(self, user_message: str) -> str:
         return "".join(self.chat(user_message))

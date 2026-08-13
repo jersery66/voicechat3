@@ -68,6 +68,24 @@ def test_vllm_compatibility_service_preserves_clean_history_and_short_reply():
     )]
 
 
+def test_vllm_compatibility_service_bounds_history_to_recent_turns():
+    observed_messages = []
+
+    class Backend:
+        def stream_messages(self, *, messages):
+            observed_messages.append(messages)
+            yield "analysis|||spoken"
+
+    service = build_llm_service.__globals__["VLLMCompatibleLLMService"](Backend(), model="test")
+    for index in range(service.MAX_HISTORY_TURNS + 2):
+        assert list(service.chat(f"turn {index}")) == ["analysis|||spoken"]
+
+    assert len(service.conversation_history) == service.MAX_HISTORY_TURNS * 2
+    # One system message plus no more than 20 dialogue turns, including the
+    # current user message.
+    assert len(observed_messages[-1]) <= 1 + service.MAX_HISTORY_TURNS * 2
+
+
 def test_vllm_compatibility_service_uses_the_standard_counselling_system_prompt():
     from config import SYSTEM_PROMPT
 

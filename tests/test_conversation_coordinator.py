@@ -18,6 +18,17 @@ class FakePipeline:
         return PipelineResult(user_text=config.user_text, full_response="ok")
 
 
+class VoiceCapableFakePipeline(FakePipeline):
+    def __init__(self, transcript):
+        super().__init__()
+        self.transcript = transcript
+        self.transcribe_calls = []
+
+    def transcribe(self, audio_data, emit):
+        self.transcribe_calls.append(audio_data)
+        return self.transcript
+
+
 def test_legacy_agent_route_becomes_a_typed_policy_decision():
     decision = PolicyDecision.from_agent_route(
         {"scale_action": "start", "scale": "phq9", "item": 2, "confidence": 0.91}
@@ -88,13 +99,35 @@ def test_emergency_turn_bypasses_dialogue_generation_and_uses_legacy_ui_event(tm
     assert ("show_crisis", result.safety_payload) in events
 
 
-def test_voice_turn_is_kept_on_the_compatibility_path_until_streaming_asr_moves(tmp_path):
-    pipeline = FakePipeline()
+def test_high_risk_voice_transcript_bypasses_dialogue_generation(tmp_path):
+    pipeline = VoiceCapableFakePipeline("我准备今晚割腕")
+    events = []
+    coordinator = ConversationCoordinator(pipeline=pipeline, journal=EventJournal(tmp_path / "events.jsonl"))
+
+    result = coordinator.execute(
+        PipelineConfig(use_stt=True, audio_data=[1]), lambda *event: events.append(event)
+    )
+
+    assert pipeline.transcribe_calls == [[1]]
+    assert pipeline.calls == []
+    assert result.crisis_risk == 9
+    assert ("show_crisis", result.safety_payload) in events
+
+
+def test_safe_voice_transcript_is_transcribed_once_then_runs_legacy_pipeline(tmp_path):
+    pipeline = VoiceCapableFakePipeline("我今天有点累")
     journal = EventJournal(tmp_path / "events.jsonl")
     coordinator = ConversationCoordinator(pipeline=pipeline, journal=journal)
 
-    coordinator.execute(PipelineConfig(use_stt=True), lambda *_event: None)
+    result = coordinator.execute(PipelineConfig(use_stt=True, audio_data=[1]), lambda *_event: None)
 
+    assert pipeline.transcribe_calls == [[1]]
     assert len(pipeline.calls) == 1
+    assert pipeline.calls[0].use_stt is True
+    assert pipeline.calls[0].transcribed_text == "我今天有点累"
+    assert result.full_response == "ok"
     records = [json.loads(line) for line in journal.path.read_text(encoding="utf-8").splitlines()]
+    assert [record["type"] for record in records] == [
+        "safety_decision", "policy_decision", "turn_completed"
+    ]
     assert records[-1]["payload"] == {"input_mode": "voice", "end_type": None}

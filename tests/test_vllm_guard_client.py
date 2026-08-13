@@ -14,9 +14,7 @@ def test_a100_guard_client_uses_its_own_profile_owned_vllm_endpoint():
 
     guard = build_guard_client(profile, resolve_runtime_models(profile, environment={}))
 
-    assert isinstance(guard, VLLMGuardClient)
-    assert guard.model == "Qwen/Qwen3Guard-Gen-4B"
-    assert guard.base_url == "http://127.0.0.1:8002/v1"
+    assert guard is None
 
 
 def test_guard_is_not_created_when_a_profile_does_not_select_one():
@@ -25,12 +23,12 @@ def test_guard_is_not_created_when_a_profile_does_not_select_one():
     assert build_guard_client(profile, resolve_runtime_models(profile, environment={})) is None
 
 
-def test_factory_wires_a100_guard_into_the_safety_boundary():
+def test_factory_keeps_a100_safety_boundary_deterministic():
     profile = get_deployment_profile("a100_80g")
 
     gate = build_safety_gate(profile, resolve_runtime_models(profile, environment={}))
 
-    assert isinstance(gate._guard_client, VLLMGuardClient)
+    assert gate._guard_client is None
 
 
 def test_guard_parses_qwen_guard_self_harm_classification_without_overriding_crisis_policy():

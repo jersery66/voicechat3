@@ -87,10 +87,14 @@ _PROFILES = {
         router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
         agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
         agent_base_url="http://127.0.0.1:8001/v1",
-        optional_guard_model="Qwen/Qwen3Guard-Gen-4B",
-        guard_base_url="http://127.0.0.1:8002/v1",
+        optional_guard_model=None,
+        guard_base_url=None,
         enable_streaming_tts=True,
-        notes="Single A100 80GB profile. Qwen2.5 72B AWQ runs behind vLLM.",
+        notes=(
+            "Single A100 80GB profile. Qwen2.5 72B AWQ dialogue and a 3B "
+            "Agent run behind vLLM; the deterministic crisis policy is the "
+            "sole production safety boundary."
+        ),
     ),
 }
 

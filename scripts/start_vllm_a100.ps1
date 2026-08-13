@@ -4,10 +4,11 @@ Start a production vLLM language-model server on the Linux/WSL A100 host.
 This script is deliberately separate from the PySide client: each vLLM process
 owns a fixed language model and exposes an OpenAI-compatible /v1 endpoint.
 Run it once per service on the Python environment where vLLM is installed.
-The ``a100_80g`` profile uses: 8000 = 72B dialogue, 8001 = 3B Agent,
-8002 = Qwen3Guard.  It never calls Ollama.  Example:
+The ``a100_80g`` profile uses: 8000 = 72B dialogue, 8001 = 3B Agent.
+It never calls Ollama.  The launcher is loopback-only; put a separately
+authenticated reverse proxy in front of it if remote access is required.
+Example:
   .\scripts\start_vllm_a100.ps1 -Model Qwen/Qwen2.5-3B-Instruct-AWQ -Port 8001 -GpuMemoryUtilization 0.08 -MaxModelLen 4096
-  .\scripts\start_vllm_a100.ps1 -Model Qwen/Qwen3Guard-Gen-4B -Port 8002 -GpuMemoryUtilization 0.10 -MaxModelLen 4096
 #>
 
 [CmdletBinding()]
@@ -21,7 +22,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 vllm serve $Model `
-    --host 0.0.0.0 `
+    --host 127.0.0.1 `
     --port $Port `
     --dtype auto `
     --gpu-memory-utilization $GpuMemoryUtilization `

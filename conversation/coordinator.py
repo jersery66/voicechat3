@@ -57,13 +57,26 @@ class ConversationCoordinator:
     def execute(self, config: PipelineConfig, emit: Callable[[str, Any], None]) -> PipelineResult:
         """Run one turn while preserving the legacy UI callback protocol."""
         if config.use_stt:
-            # Audio becomes text inside the legacy streaming path. It is kept
-            # there for this first slice so no audio is duplicated or dropped.
-            result = self._pipeline.execute(config, emit)
-            self._record("turn_completed", {"input_mode": "voice", "end_type": result.end_type})
-            return result
+            transcript = self._pipeline.transcribe(config.audio_data, emit)
+            if not transcript.strip():
+                self._record("turn_completed", {"input_mode": "voice", "end_type": None})
+                return PipelineResult()
+            safe_config = PipelineConfig(
+                use_stt=True,
+                use_tts=config.use_tts,
+                audio_data=config.audio_data,
+                transcribed_text=transcript,
+                extra_system_suffix=config.extra_system_suffix,
+            )
+            return self._execute_text_turn(safe_config, emit, input_mode="voice")
 
-        safety = self._safety_gate.assess_input(config.user_text)
+        return self._execute_text_turn(config, emit, input_mode="text")
+
+    def _execute_text_turn(self, config: PipelineConfig, emit: Callable[[str, Any], None], *,
+                           input_mode: str) -> PipelineResult:
+        """Apply safety to a text turn, including a coordinator-owned transcript."""
+        input_text = config.transcribed_text or config.user_text
+        safety = self._safety_gate.assess_input(input_text)
         self._record("safety_decision", safety)
         if safety.action in {SafetyAction.ESCALATE, SafetyAction.EMERGENCY}:
             payload = {
@@ -71,16 +84,16 @@ class ConversationCoordinator:
                 "indicators": [e.text for e in safety.evidence_spans],
                 "immediate_action": True,
             }
-            emit("append_chat", ("user", config.user_text))
+            emit("append_chat", ("user", input_text))
             emit("show_crisis", payload)
             result = PipelineResult(
-                user_text=config.user_text,
+                user_text=input_text,
                 crisis_risk=safety.risk_level,
                 crisis_indicators=payload["indicators"],
             )
             result.safety_payload = payload
             self._record("policy_decision", PolicyDecision())
-            self._record("turn_completed", {"input_mode": "text", "end_type": "safety"})
+            self._record("turn_completed", {"input_mode": input_mode, "end_type": "safety"})
             return result
 
         result = self._pipeline.execute(config, emit)
@@ -88,7 +101,7 @@ class ConversationCoordinator:
         # action fields in research storage, never its free-text rationale.
         policy = PolicyDecision.from_agent_route(result.agent_route)
         self._record("policy_decision", policy.model_copy(update={"reason": ""}))
-        self._record("turn_completed", {"input_mode": "text", "end_type": result.end_type})
+        self._record("turn_completed", {"input_mode": input_mode, "end_type": result.end_type})
         return result
 
     def _record(self, event_type: str, payload: Any) -> None:

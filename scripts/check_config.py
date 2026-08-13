@@ -116,8 +116,8 @@ def _check_openai_compatible_model(label: str, base_url: str,
 
 
 def check_agent_backend() -> bool:
-    """Check the optional Agent endpoint without blocking dialogue startup."""
-    from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER
+    """Check the Agent endpoint, enforcing it for the production A100 profile."""
+    from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER, DEPLOYMENT_PROFILE
 
     if AGENT_BACKEND == "ollama":
         available = _check_openai_compatible_model("Agent Ollama", AGENT_MODEL_SERVER, AGENT_MODEL)
@@ -126,6 +126,8 @@ def check_agent_backend() -> bool:
     else:
         available = _fail("Agent Backend", f"unsupported backend: {AGENT_BACKEND}")
     if not available:
+        if DEPLOYMENT_PROFILE.name == "a100_80g":
+            return _fail("Agent", "required by the a100_80g production profile")
         _warn("Agent", "unavailable; deterministic keyword routing remains active")
     return True
 

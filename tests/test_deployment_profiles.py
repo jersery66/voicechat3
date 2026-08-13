@@ -13,8 +13,8 @@ def test_a100_profile_preserves_the_verified_72b_dialogue_model():
     assert profile.runtime_backend == "vllm"
     assert profile.agent_model == "Qwen/Qwen2.5-3B-Instruct-AWQ"
     assert profile.agent_base_url == "http://127.0.0.1:8001/v1"
-    assert profile.guard_base_url == "http://127.0.0.1:8002/v1"
-    assert profile.optional_guard_model == "Qwen/Qwen3Guard-Gen-4B"
+    assert profile.guard_base_url is None
+    assert profile.optional_guard_model is None
 
 
 def test_dev_vllm_profile_is_an_explicit_local_integration_route():
@@ -41,7 +41,7 @@ def test_profile_model_wins_over_accidental_live_ollama_detection():
 
     assert models.dialogue == "Qwen/Qwen2.5-72B-Instruct-AWQ"
     assert models.router == "Qwen/Qwen2.5-3B-Instruct-AWQ"
-    assert models.optional_guard == "Qwen/Qwen3Guard-Gen-4B"
+    assert models.optional_guard is None
 
 
 def test_explicit_model_environment_override_is_still_supported():

@@ -5,7 +5,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![PySide6](https://img.shields.io/badge/UI-PySide6-green)
-![Ollama](https://img.shields.io/badge/LLM-Ollama-black)
+![vLLM](https://img.shields.io/badge/LLM-vLLM-8A2BE2)
 ![FunASR](https://img.shields.io/badge/STT-FunASR-orange)
 ![VoxCPM2](https://img.shields.io/badge/TTS-VoxCPM2-purple)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
@@ -168,8 +168,9 @@ flowchart TD
     D -->|chat / start_scale / continue_scale / recommend_relaxation| E[📊 累计症状评分]
     E -->|PHQ-9 / GAD-7 / PCL-5 达到阈值| F[📋 量表采样]
     C --> G[🛡️ 危机关键词检测]
-    C --> C2[📚 RAG 专家知识库]
-    C2 --> H[💬 LLM 流式生成 Ollama]
+    C --> C1[🛡️ 确定性危机安全门]
+    C1 --> C2[📚 RAG 专家知识库]
+    C2 --> H[💬 LLM 流式生成 vLLM / Ollama]
     F --> H
     G --> H
     H --> I[🏷️ 标签解析 + 内部标签过滤]
@@ -208,8 +209,8 @@ stateDiagram-v2
 |------|-------------|------|
 | 🖥️ 桌面 UI | PySide6 | 主窗口、控制面板、对话面板、弹窗 |
 | 🎤 语音识别 | FunASR | 本地语音转写 |
-| 🧠 大语言模型 | Ollama | 本地或局域网 LLM 服务 |
-| 🤖 小模型 Agent | Ollama / AgentService | 意图分类、情绪识别、报告辅助 |
+| 🧠 大语言模型 | vLLM（A100）/ Ollama（6GB 开发） | 对话服务 |
+| 🤖 小模型 Agent | vLLM（A100）/ Ollama（6GB 开发） | 意图分类、情绪识别、报告辅助 |
 | 🔊 语音合成 | VoxCPM2 | 本地 TTS、音色克隆、流式播放 |
 | 🎬 视频/游戏 | pygame / moviepy | 放松视频、小游戏 |
 | 📄 报告生成 | ReportLab | PDF 报告 |
@@ -302,6 +303,29 @@ ollama serve
 默认监听 `http://localhost:11434`。
 
 > 💡 **提示**：系统会自动检测本机已安装的 Ollama 模型，并优先选择合适的模型。也可以通过环境变量 `OLLAMA_MODEL` 指定。
+
+---
+
+#### 🖥️ A100 80GB 生产部署：vLLM 双服务
+
+生产 profile 不使用 Ollama，也不启动 Guard 模型。危机转介由本地确定性策略在语音转写或文字输入进入 72B 对话模型前完成；它是路由规则，不是医学诊断。
+
+在 A100 主机安装 vLLM，并确保 `vllm` 命令可用后，运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_a100_vllm_stack.ps1
+```
+
+该脚本会：
+
+1. 设置 `VOICECHAT_DEPLOYMENT_PROFILE=a100_80g`；
+2. 仅在 `127.0.0.1` 启动 `8000` 的 `Qwen/Qwen2.5-72B-Instruct-AWQ`；
+3. 仅在 `127.0.0.1` 启动 `8001` 的 `Qwen/Qwen2.5-3B-Instruct-AWQ`；
+4. 使用 `0.82 + 0.08 = 0.90` 的显存上限，并在两个 `/v1/models` 端点就绪后启动桌面程序。
+
+不要把 vLLM 端口直接暴露到局域网；若需要远程桌面或远程服务，请在受控网络中通过具备认证和 TLS 的反向代理访问。
+
+`run_local.ps1` 和 `start_voicechat.ps1` 仍只服务于 6GB 开发机的 Ollama 调试，不是 A100 生产入口。
 
 ---
 
@@ -645,8 +669,9 @@ flowchart TD
     C --> D[🧠 Intent Agent]
     C --> E[😊 Emotion Agent]
     C --> F[🛡️ Crisis keyword detection]
-    C --> C2[📚 RAG knowledge base]
-    C2 --> H[💬 LLM streaming - Ollama]
+    C --> C1[🛡️ Deterministic crisis safety gate]
+    C1 --> C2[📚 RAG knowledge base]
+    C2 --> H[💬 LLM streaming - vLLM / Ollama]
     D --> H
     E --> H
     F --> H
@@ -687,8 +712,8 @@ stateDiagram-v2
 |-------|-----------|-------------|
 | 🖥️ Desktop UI | PySide6 | Main window, panels, dialogs |
 | 🎤 Speech recognition | FunASR | Local STT |
-| 🧠 LLM | Ollama | Local / LAN LLM service |
-| 🤖 Agent models | Ollama / AgentService | Intent, emotion, report assist |
+| 🧠 LLM | vLLM (A100) / Ollama (6GB development) | Dialogue service |
+| 🤖 Agent models | vLLM (A100) / Ollama (6GB development) | Intent, emotion, report assist |
 | 🔊 TTS | VoxCPM2 | Local synthesis, voice cloning, streaming |
 | 🎬 Video / Games | pygame / moviepy | Relaxation media |
 | 📄 Reports | ReportLab | PDF generation |
@@ -781,6 +806,22 @@ ollama serve
 Default: listens on `http://localhost:11434`.
 
 > 💡 **Tip**: The system auto-detects installed Ollama models and picks the best one. Override with `OLLAMA_MODEL` env var.
+
+---
+
+#### 🖥️ A100 80GB production deployment: two vLLM services
+
+The production profile does not use Ollama and does not start a Guard model. A local deterministic policy routes crisis inputs before a voice transcript or typed text is sent to the 72B dialogue model; it is a routing rule, not a medical diagnosis.
+
+After installing vLLM on the A100 host and making the `vllm` command available, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_a100_vllm_stack.ps1
+```
+
+The launcher sets `VOICECHAT_DEPLOYMENT_PROFILE=a100_80g`, starts loopback-only endpoints for the 72B dialogue model on `8000` and the 3B Agent on `8001`, budgets GPU memory at `0.82 + 0.08 = 0.90`, verifies both `/v1/models` endpoints, then opens the desktop application.
+
+Do not expose vLLM ports directly to a LAN. Remote access requires a controlled network with an authenticated TLS reverse proxy. `run_local.ps1` and `start_voicechat.ps1` remain Ollama-only development entry points for the 6GB machine.
 
 ---
 

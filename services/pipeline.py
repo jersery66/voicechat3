@@ -347,6 +347,7 @@ class PipelineConfig:
     use_tts: bool = False       # True for voice output, False for text-only
     audio_data: Optional[Any] = None  # Raw audio numpy array if use_stt=True
     user_text: str = ""         # Text input if use_stt=False
+    transcribed_text: str = ""  # Coordinator-owned STT result; skips a second ASR pass
     extra_system_suffix: str = ""  # Additional system context (e.g. scale questions)
 
 
@@ -704,6 +705,21 @@ class ConversationPipeline:
             )
         return "\n\n".join(parts)
 
+    def transcribe(self, audio_data: Any, emit: Callable[[str, Any], None]) -> str:
+        """Convert one audio turn to text without starting dialogue processing.
+
+        The coordinator owns the safety boundary between this operation and the
+        rest of ``execute``.  Keeping ASR here preserves the existing STT
+        provider and UI status callback while preventing duplicate audio work.
+        """
+        if audio_data is None or len(audio_data) == 0:
+            emit("status", "未检测到语音")
+            return ""
+        emit("status", "正在转写...")
+        metrics = get_metrics()
+        with metrics.timer("stt.transcribe"):
+            return self.stt.transcribe(audio_data)
+
     def execute(self, config: PipelineConfig,
                 emit: Callable[[str, Any], None]) -> PipelineResult:
         """
@@ -715,16 +731,13 @@ class ConversationPipeline:
         result = PipelineResult()
 
         # --- STT (optional) ---
-        if config.use_stt:
-            if config.audio_data is None or len(config.audio_data) == 0:
-                emit("status", "未检测到语音")
-                metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
-                return result
-            emit("status", "正在转写...")
-            with metrics.timer("stt.transcribe"):
-                result.user_text = self.stt.transcribe(config.audio_data)
+        if config.transcribed_text:
+            result.user_text = config.transcribed_text
+        elif config.use_stt:
+            result.user_text = self.transcribe(config.audio_data, emit)
             if not result.user_text.strip():
-                emit("status", "无法识别内容")
+                if config.audio_data is not None and len(config.audio_data) > 0:
+                    emit("status", "无法识别内容")
                 metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
                 return result
         else:
