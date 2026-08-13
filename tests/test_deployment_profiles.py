@@ -52,3 +52,18 @@ def test_explicit_model_environment_override_is_still_supported():
 
     assert models.dialogue == "custom-dialogue"
     assert models.router == "custom-router"
+
+
+def test_a100_profile_ignores_model_overrides_that_would_break_its_stack_contract():
+    models = resolve_runtime_models(
+        get_deployment_profile("a100_80g"),
+        environment={
+            "OLLAMA_MODEL": "stale-ollama-model",
+            "VOICECHAT_GUARD_MODEL": "unbudgeted-guard",
+            "AGENT_MODEL": "unexpected-agent",
+        },
+    )
+
+    assert models.dialogue == "Qwen/Qwen2.5-72B-Instruct-AWQ"
+    assert models.router == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+    assert models.optional_guard is None

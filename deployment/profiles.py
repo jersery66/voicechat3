@@ -112,9 +112,18 @@ def get_deployment_profile(name: Optional[str] = None) -> DeploymentProfile:
 
 
 def resolve_runtime_models(profile: DeploymentProfile,
-                           environment: Mapping[str, str] | None = None) -> RuntimeModels:
+                            environment: Mapping[str, str] | None = None) -> RuntimeModels:
     """Resolve only explicit overrides; live server inventory never selects a model."""
     environment = os.environ if environment is None else environment
+    if profile.name == "a100_80g":
+        # Production uses the profile as an immutable deployment contract.
+        # Dev-shell overrides must not silently point the desktop client at a
+        # different model or re-enable an unbudgeted third vLLM service.
+        return RuntimeModels(
+            dialogue=profile.dialogue_model,
+            router=profile.router_model,
+            optional_guard=None,
+        )
     return RuntimeModels(
         dialogue=(
             environment.get("VOICECHAT_DIALOGUE_MODEL")

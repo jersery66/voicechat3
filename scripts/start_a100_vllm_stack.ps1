@@ -21,6 +21,12 @@ if (-not (Test-Path $Python)) {
 
 $env:VOICECHAT_DEPLOYMENT_PROFILE = "a100_80g"
 $env:NO_PROXY = "localhost,127.0.0.1"
+Remove-Item Env:OLLAMA_MODEL -ErrorAction SilentlyContinue
+Remove-Item Env:AGENT_MODEL -ErrorAction SilentlyContinue
+Remove-Item Env:VOICECHAT_DIALOGUE_MODEL -ErrorAction SilentlyContinue
+Remove-Item Env:VOICECHAT_VLLM_MODEL -ErrorAction SilentlyContinue
+Remove-Item Env:VOICECHAT_GUARD_MODEL -ErrorAction SilentlyContinue
+Remove-Item Env:VOICECHAT_GUARD_BASE_URL -ErrorAction SilentlyContinue
 
 function Start-VoiceChatVllmService {
     param(
@@ -45,23 +51,39 @@ function Start-VoiceChatVllmService {
     )
 }
 
-Start-VoiceChatVllmService -Model "Qwen/Qwen2.5-72B-Instruct-AWQ" -Port 8000 -GpuMemoryUtilization 0.82 -MaxModelLen 8192
-Start-VoiceChatVllmService -Model "Qwen/Qwen2.5-3B-Instruct-AWQ" -Port 8001 -GpuMemoryUtilization 0.08 -MaxModelLen 4096
+function Wait-VoiceChatVllmModel {
+    param(
+        [int]$Port,
+        [string]$ExpectedModel
+    )
 
-$deadline = (Get-Date).AddMinutes(8)
-foreach ($port in 8000, 8001) {
+    $deadline = (Get-Date).AddMinutes(8)
     do {
         try {
-            $null = Invoke-RestMethod -Uri "http://127.0.0.1:$port/v1/models" -TimeoutSec 5 -ErrorAction Stop
-            break
+            $models = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 5 -ErrorAction Stop
+            $modelIds = @($models.data | ForEach-Object { $_.id })
+            if ($ExpectedModel -in $modelIds) {
+                return
+            }
+            throw "Expected model '$ExpectedModel' was not served on port $Port. Found: $($modelIds -join ', ')"
         } catch {
+            $lastError = $_
             Start-Sleep -Seconds 2
         }
     } while ((Get-Date) -lt $deadline)
 
-    if ((Get-Date) -ge $deadline) {
-        throw "vLLM service on port $port did not become ready within 8 minutes."
-    }
+    throw "vLLM service on port $Port did not serve '$ExpectedModel' within 8 minutes: $lastError"
+}
+
+Start-VoiceChatVllmService -Model "Qwen/Qwen2.5-72B-Instruct-AWQ" -Port 8000 -GpuMemoryUtilization 0.82 -MaxModelLen 8192
+Start-VoiceChatVllmService -Model "Qwen/Qwen2.5-3B-Instruct-AWQ" -Port 8001 -GpuMemoryUtilization 0.08 -MaxModelLen 4096
+
+Wait-VoiceChatVllmModel -Port 8000 -ExpectedModel "Qwen/Qwen2.5-72B-Instruct-AWQ"
+Wait-VoiceChatVllmModel -Port 8001 -ExpectedModel "Qwen/Qwen2.5-3B-Instruct-AWQ"
+
+& $Python (Join-Path $ProjectRoot "scripts\check_config.py")
+if ($LASTEXITCODE -ne 0) {
+    throw "A100 production readiness check failed; desktop application was not started."
 }
 
 Set-Location $ProjectRoot

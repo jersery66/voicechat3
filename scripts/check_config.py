@@ -4,14 +4,14 @@
 Validates the selected dialogue backend, model files, knowledge base, and
 relaxation media before the main UI starts.
 
-IMPORTANT: this is a *diagnostic*. run_check() returns False only when a
-CRITICAL check fails (dialogue backend unreachable, data root not writable). The
-launcher (main.py) currently only prints the result and does NOT abort the
-startup, so a non-critical failure is reported but the app still launches.
-Non-critical gaps (missing converted knowledge base, missing relaxation
-videos, optional Agent or Guard servers) are emitted as WARN and still return
-True.  The Agent falls back to deterministic routing when unavailable; the
-Guard never replaces the deterministic crisis policy.
+IMPORTANT: this is a *diagnostic*. Development profiles return False only when
+a critical dependency fails (dialogue backend unreachable, data root not
+writable); their launcher may still continue for troubleshooting. The
+``a100_80g`` production profile additionally requires its 3B Agent endpoint,
+because the production startup script treats a failed check as a hard stop.
+Missing converted knowledge base, relaxation videos, and unselected optional
+Guard servers remain warnings. The deterministic crisis policy is always the
+authoritative safety boundary.
 
 Usage:
     python scripts/check_config.py          # standalone

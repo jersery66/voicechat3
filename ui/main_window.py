@@ -453,6 +453,13 @@ class MainWindow(QMainWindow):
                         self.processing_queue.put(("status", "无法识别内容"))
                         return
 
+                coordinator = getattr(self, "conversation_coordinator", None)
+                if coordinator is None:
+                    raise RuntimeError("Conversation coordinator is unavailable; model loading did not complete")
+                blocked = coordinator.assess_transcript(user_text, safe_put)
+                if blocked is not None:
+                    return
+
                 self._post_relaxation_feedback_consumed = True
                 logger.warning(f"[RelaxResume] consume post-relaxation feedback: {user_text!r}")
 

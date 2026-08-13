@@ -7,6 +7,7 @@ def test_main_window_routes_turns_through_conversation_coordinator():
     source = Path("ui/main_window.py").read_text(encoding="utf-8")
 
     assert "coordinator.execute(config, safe_put)" in source
+    assert "coordinator.assess_transcript(user_text, safe_put)" in source
     assert "self.pipeline.execute(config, safe_put)" not in source
 
 

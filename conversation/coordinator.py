@@ -72,29 +72,42 @@ class ConversationCoordinator:
 
         return self._execute_text_turn(config, emit, input_mode="text")
 
+    def assess_transcript(self, transcript: str, emit: Callable[[str, Any], None], *,
+                          input_mode: str = "voice") -> PipelineResult | None:
+        """Stop a non-dialogue voice branch when its transcript is high risk.
+
+        Some compatibility UI flows consume a transcript without entering the
+        normal dialogue pipeline.  They still must use this same authoritative
+        boundary before displaying a participant-facing reply.
+        """
+        safety = self._safety_gate.assess_input(transcript)
+        self._record("safety_decision", safety)
+        if safety.action not in {SafetyAction.ESCALATE, SafetyAction.EMERGENCY}:
+            return None
+        payload = {
+            "risk_level": safety.risk_level,
+            "indicators": [e.text for e in safety.evidence_spans],
+            "immediate_action": True,
+        }
+        emit("append_chat", ("user", transcript))
+        emit("show_crisis", payload)
+        result = PipelineResult(
+            user_text=transcript,
+            crisis_risk=safety.risk_level,
+            crisis_indicators=payload["indicators"],
+        )
+        result.safety_payload = payload
+        self._record("policy_decision", PolicyDecision())
+        self._record("turn_completed", {"input_mode": input_mode, "end_type": "safety"})
+        return result
+
     def _execute_text_turn(self, config: PipelineConfig, emit: Callable[[str, Any], None], *,
                            input_mode: str) -> PipelineResult:
         """Apply safety to a text turn, including a coordinator-owned transcript."""
         input_text = config.transcribed_text or config.user_text
-        safety = self._safety_gate.assess_input(input_text)
-        self._record("safety_decision", safety)
-        if safety.action in {SafetyAction.ESCALATE, SafetyAction.EMERGENCY}:
-            payload = {
-                "risk_level": safety.risk_level,
-                "indicators": [e.text for e in safety.evidence_spans],
-                "immediate_action": True,
-            }
-            emit("append_chat", ("user", input_text))
-            emit("show_crisis", payload)
-            result = PipelineResult(
-                user_text=input_text,
-                crisis_risk=safety.risk_level,
-                crisis_indicators=payload["indicators"],
-            )
-            result.safety_payload = payload
-            self._record("policy_decision", PolicyDecision())
-            self._record("turn_completed", {"input_mode": input_mode, "end_type": "safety"})
-            return result
+        blocked = self.assess_transcript(input_text, emit, input_mode=input_mode)
+        if blocked is not None:
+            return blocked
 
         result = self._pipeline.execute(config, emit)
         # Router details can be personally revealing. Keep only the typed

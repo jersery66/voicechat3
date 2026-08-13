@@ -131,3 +131,16 @@ def test_safe_voice_transcript_is_transcribed_once_then_runs_legacy_pipeline(tmp
         "safety_decision", "policy_decision", "turn_completed"
     ]
     assert records[-1]["payload"] == {"input_mode": "voice", "end_type": None}
+
+
+def test_high_risk_compatibility_voice_transcript_is_blocked_before_ui_reply(tmp_path):
+    pipeline = FakePipeline()
+    events = []
+    coordinator = ConversationCoordinator(pipeline=pipeline, journal=EventJournal(tmp_path / "events.jsonl"))
+
+    result = coordinator.assess_transcript("我准备今晚割腕", lambda *event: events.append(event))
+
+    assert result is not None
+    assert pipeline.calls == []
+    assert result.crisis_risk == 9
+    assert ("show_crisis", result.safety_payload) in events
