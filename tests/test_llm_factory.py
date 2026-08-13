@@ -23,6 +23,21 @@ def test_a100_profile_builds_a_vllm_backed_compatibility_service(monkeypatch):
     assert service.test_connection() is True
 
 
+def test_a100_llm_factory_ignores_stale_dialogue_endpoint_override(monkeypatch):
+    captured = {}
+
+    class FakeVLLMClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://stale-host:9000/v1")
+    monkeypatch.setattr("services.llm_factory.VLLMOpenAIClient", FakeVLLMClient)
+
+    build_llm_service(profile_name="a100_80g")
+
+    assert captured["base_url"] == "http://127.0.0.1:8000/v1"
+
+
 def test_local_vllm_profile_selects_completion_transport_and_small_output_budget(monkeypatch):
     captured = {}
 
