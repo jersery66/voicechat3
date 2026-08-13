@@ -25,6 +25,23 @@ def test_config_exposes_vllm_endpoint_for_the_a100_profile(monkeypatch):
             sys.modules["config"] = original
 
 
+def test_a100_profile_ignores_endpoint_overrides(monkeypatch):
+    original = sys.modules.get("config")
+    monkeypatch.setenv("VOICECHAT_DEPLOYMENT_PROFILE", "a100_80g")
+    monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://stale-host:9000/v1")
+    monkeypatch.setenv("VOICECHAT_AGENT_BASE_URL", "http://stale-host:9001/v1")
+    sys.modules.pop("config", None)
+    try:
+        config = importlib.import_module("config")
+
+        assert config.DIALOGUE_BASE_URL == "http://127.0.0.1:8000/v1"
+        assert config.AGENT_MODEL_SERVER == "http://127.0.0.1:8001/v1"
+    finally:
+        sys.modules.pop("config", None)
+        if original is not None:
+            sys.modules["config"] = original
+
+
 def test_config_exposes_the_local_vllm_profile(monkeypatch):
     original = sys.modules.get("config")
     monkeypatch.setenv("VOICECHAT_DEPLOYMENT_PROFILE", "dev_vllm_6g")

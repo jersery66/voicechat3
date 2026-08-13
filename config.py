@@ -328,9 +328,10 @@ RUNTIME_MODELS = resolve_runtime_models(DEPLOYMENT_PROFILE)
 # existing application-wide model-name variable for compatibility; under the
 # A100 profile it names the vLLM-served model rather than an Ollama tag.
 DIALOGUE_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
-DIALOGUE_BASE_URL = os.environ.get(
-    "VOICECHAT_DIALOGUE_BASE_URL",
-    DEPLOYMENT_PROFILE.dialogue_base_url,
+DIALOGUE_BASE_URL = (
+    DEPLOYMENT_PROFILE.dialogue_base_url
+    if DEPLOYMENT_PROFILE.name == "a100_80g"
+    else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", DEPLOYMENT_PROFILE.dialogue_base_url)
 )
 OLLAMA_MODEL = RUNTIME_MODELS.dialogue
 
@@ -731,9 +732,10 @@ SESSION_ENGINE_AUTHORITATIVE = (
 AGENT_ENABLED = True
 AGENT_MODEL = RUNTIME_MODELS.router
 AGENT_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
-AGENT_MODEL_SERVER = os.environ.get(
-    "VOICECHAT_AGENT_BASE_URL",
-    DEPLOYMENT_PROFILE.agent_base_url,
+AGENT_MODEL_SERVER = (
+    DEPLOYMENT_PROFILE.agent_base_url
+    if DEPLOYMENT_PROFILE.name == "a100_80g"
+    else os.environ.get("VOICECHAT_AGENT_BASE_URL", DEPLOYMENT_PROFILE.agent_base_url)
 )
 AGENT_API_KEY = 'EMPTY'
 GUARD_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
