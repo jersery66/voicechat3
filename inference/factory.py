@@ -23,4 +23,7 @@ def build_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
         model=models.dialogue,
         base_url=os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url),
         timeout=timeout,
+        request_mode=profile.vllm_request_mode,
+        system_role_mode=profile.vllm_system_role_mode,
+        max_tokens=profile.dialogue_max_tokens,
     )

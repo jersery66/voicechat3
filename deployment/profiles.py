@@ -25,6 +25,10 @@ class DeploymentProfile:
     optional_guard_model: Optional[str]
     enable_streaming_tts: bool
     notes: str = ""
+    vllm_request_mode: str = "chat"
+    vllm_system_role_mode: str = "native"
+    dialogue_max_tokens: int = 1024
+    system_prompt_override: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,23 @@ _PROFILES = {
         optional_guard_model=None,
         enable_streaming_tts=False,
         notes="Local UI and smoke-test profile; it is not a production capacity target.",
+    ),
+    "dev_vllm_6g": DeploymentProfile(
+        name="dev_vllm_6g",
+        expected_gpu_memory_gb=6,
+        runtime_backend="vllm",
+        dialogue_model="gemma-2b-awq",
+        dialogue_base_url="http://127.0.0.1:18000/v1",
+        router_model="qwen2.5:3b",
+        optional_guard_model=None,
+        enable_streaming_tts=False,
+        vllm_request_mode="completion",
+        dialogue_max_tokens=96,
+        system_prompt_override="Reply briefly and directly to the user.",
+        notes=(
+            "Local vLLM integration profile for the Gemma 2B AWQ smoke server. "
+            "It validates desktop-to-vLLM wiring and is not a production dialogue target."
+        ),
     ),
     "a100_80g": DeploymentProfile(
         name="a100_80g",

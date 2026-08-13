@@ -18,11 +18,14 @@ class VLLMCompatibleLLMService:
 
     MAX_HISTORY_TURNS = 20
 
-    def __init__(self, backend: VLLMOpenAIClient, *, model: str) -> None:
+    def __init__(self, backend: VLLMOpenAIClient, *, model: str,
+                 system_prompt: Optional[str] = None) -> None:
+        from config import SYSTEM_PROMPT
+
         self.backend = backend
         self.model = model
         self.conversation_history: list[dict[str, str]] = []
-        self.system_prompt = ""
+        self.system_prompt = SYSTEM_PROMPT if system_prompt is None else system_prompt
         self.history_context = ""
 
     def reset_conversation(self, clear_context: bool = False) -> None:
@@ -83,19 +86,31 @@ class VLLMCompatibleLLMService:
         return "".join(self.chat(user_message))
 
     def generate_short_text(self, prompt: str, max_tokens: int = 60) -> str:
-        return self.chat_sync(prompt)
+        try:
+            return self.backend.complete_messages(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+            ).strip()
+        except Exception:
+            return ""
 
     def get_available_models(self) -> list[str]:
-        return [self.model]
+        try:
+            return self.backend.list_model_ids()
+        except Exception:
+            return []
 
     def test_connection(self) -> bool:
-        # Startup must not consume a production dialogue turn merely to probe.
-        # The deployment health check performs the HTTP models endpoint check.
-        return True
+        try:
+            return self.model in self.backend.list_model_ids()
+        except Exception:
+            return False
 
     def warmup(self) -> bool:
-        # vLLM model loading is owned by the server process, not the UI.
-        return True
+        try:
+            return bool(self.backend.warmup())
+        except Exception:
+            return False
 
 
 def build_llm_service(*, profile_name: str | None = None):
@@ -106,8 +121,15 @@ def build_llm_service(*, profile_name: str | None = None):
         backend = VLLMOpenAIClient(
             model=models.dialogue,
             base_url=os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url),
+            request_mode=profile.vllm_request_mode,
+            system_role_mode=profile.vllm_system_role_mode,
+            max_tokens=profile.dialogue_max_tokens,
         )
-        return VLLMCompatibleLLMService(backend, model=models.dialogue)
+        return VLLMCompatibleLLMService(
+            backend,
+            model=models.dialogue,
+            system_prompt=profile.system_prompt_override,
+        )
 
     from services.llm_service import LLMService
 

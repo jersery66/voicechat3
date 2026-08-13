@@ -14,6 +14,19 @@ def test_a100_profile_preserves_the_verified_72b_dialogue_model():
     assert profile.optional_guard_model == "qwen3guard:4b"
 
 
+def test_dev_vllm_profile_is_an_explicit_local_integration_route():
+    from deployment.profiles import _PROFILES
+
+    profile = _PROFILES.get("dev_vllm_6g")
+
+    assert profile is not None
+    assert profile.runtime_backend == "vllm"
+    assert profile.dialogue_model == "gemma-2b-awq"
+    assert profile.enable_streaming_tts is False
+    assert profile.vllm_request_mode == "completion"
+    assert profile.dialogue_max_tokens == 96
+
+
 def test_unknown_profile_fails_closed():
     with pytest.raises(ValueError, match="Unknown deployment profile"):
         get_deployment_profile("not-a-profile")
