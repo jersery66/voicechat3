@@ -67,6 +67,10 @@ class TestHeadlessBoot:
         assert window.session_engine is not None
         assert window.session_engine.state == SessionState.IDLE
 
+    def test_production_window_has_no_legacy_crisis_ui(self, window):
+        assert not hasattr(window, "_show_crisis_dialog")
+        assert not hasattr(window, "safety_gate")
+
     def test_start_new_session_forwarded_to_engine(self, window):
         window.current_user_id = "HEADLESS-001"
         window._start_new_session()

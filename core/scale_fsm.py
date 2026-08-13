@@ -1,7 +1,7 @@
 # core.scale_fsm — scale STATE CONTAINER / snapshot (pure logic).
 #
 # NOTE: this module is intentionally NOT a state machine. The authoritative
-# transition logic (start / advance / complete / resume, crisis locks, scale
+# transition logic (start / advance / complete / resume, scale
 # deferral, etc.) still lives in services/pipeline.py, which is the single
 # owner of scale flow. ScaleState here is the one place that OWNS all
 # scale-related mutable state that used to be scattered across the pipeline
@@ -32,7 +32,6 @@ class ScaleState:
 
     - core FSM: administered / answers / active_scale / active_item /
       waiting_answer / queue / pause_turns / soft_paused / resume_item
-    - gates: crisis_lock_turns
     - conversational flow bookkeeping: scale_active / scale_name /
       scale_current_item / scale_completed / scale_refused_rounds /
       scale_defer_until_round / last_scale_ask_round / consecutive_scale_asks
@@ -60,8 +59,6 @@ class ScaleState:
         self.pause_turns: int = 0
         self.soft_paused: bool = False
         self.resume_item: int = 1
-        # --- gates ---
-        self.crisis_lock_turns: int = 0
         # --- conversational flow bookkeeping ---
         self.scale_active: bool = False
         self.scale_name: Optional[str] = None

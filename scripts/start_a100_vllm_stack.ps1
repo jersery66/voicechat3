@@ -25,8 +25,6 @@ Remove-Item Env:OLLAMA_MODEL -ErrorAction SilentlyContinue
 Remove-Item Env:AGENT_MODEL -ErrorAction SilentlyContinue
 Remove-Item Env:VOICECHAT_DIALOGUE_MODEL -ErrorAction SilentlyContinue
 Remove-Item Env:VOICECHAT_VLLM_MODEL -ErrorAction SilentlyContinue
-Remove-Item Env:VOICECHAT_GUARD_MODEL -ErrorAction SilentlyContinue
-Remove-Item Env:VOICECHAT_GUARD_BASE_URL -ErrorAction SilentlyContinue
 
 function Start-VoiceChatVllmService {
     param(

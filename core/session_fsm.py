@@ -122,7 +122,7 @@ class SessionOrchestrator:
         """
         effective_relaxation_used = relaxation_used or self.ctx.relaxation_used
         should_force = (
-            end_type not in (EndType.SAFETY, EndType.INVALID, EndType.QUIT)
+            end_type not in (EndType.INVALID, EndType.QUIT)
             and not self.ctx.current_relaxation_type
             and not self.ctx.has_forced_relaxation_rec
             and not effective_relaxation_used

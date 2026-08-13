@@ -84,7 +84,6 @@ class TestEndSession:
 
     @pytest.mark.parametrize("kwargs", [
         {"end_type": EndType.QUIT},
-        {"end_type": EndType.SAFETY},
         {"end_type": EndType.INVALID},
         {"end_type": EndType.GOAL_ACHIEVED, "allow_force_relaxation": False},
     ])

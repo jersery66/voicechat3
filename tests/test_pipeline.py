@@ -76,8 +76,8 @@ class TestDetectTag:
     def test_detect_end_goal(self):
         assert detect_tag("目标达成[END_GOAL_ACHIEVED]", END_PATTERNS) == "goal_achieved"
 
-    def test_detect_end_safety(self):
-        assert detect_tag("[END_SAFETY]危机", END_PATTERNS) == "safety"
+    def test_end_safety_is_not_an_executable_end_tag(self):
+        assert detect_tag("[END_SAFETY]危机", END_PATTERNS) is None
 
     def test_detect_end_time(self):
         assert detect_tag("[END_TIME_LIMIT]", END_PATTERNS) == "time_limit"
@@ -98,13 +98,8 @@ class TestDetectTag:
         assert detect_tag("普通文本", END_PATTERNS) is None
         assert detect_tag("普通文本", REC_TAGS) is None
 
-    def test_detect_first_match(self):
-        # If multiple tags present, returns first match in dict iteration order
-        text = "[END_SAFETY][END_GOAL_ACHIEVED]"
-        result = detect_tag(text, END_PATTERNS)
-        assert result in ("safety", "goal_achieved")  # depends on dict order
-        # Verify it found *something*
-        assert result is not None
+    def test_removed_end_safety_does_not_mask_a_normal_end_tag(self):
+        assert detect_tag("[END_SAFETY][END_GOAL_ACHIEVED]", END_PATTERNS) == "goal_achieved"
 
 
 class TestParseScaleTags:

@@ -14,11 +14,6 @@
 # parameter names/defaults below mirror llm_service/agent_service/
 # stt_service/data_manager/rag_service/video_tool exactly.
 #
-# Known debt (to clean during the authority switch):
-#   - AgentBackend exposes `_keyword_crisis_risk` because the pipeline
-#     still calls that private name directly. Promote it to a public
-#     quick_crisis_check() when wiring authoritative mode.
-
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 
@@ -41,7 +36,7 @@ class LLMBackend(Protocol):
 
 @runtime_checkable
 class AgentBackend(Protocol):
-    """Small routing model: intent/emotion/crisis/scale decisions plus
+    """Small routing model: intent/emotion/scale decisions plus
     lifecycle greeting generation."""
 
     def is_available(self) -> bool: ...
@@ -61,19 +56,12 @@ class AgentBackend(Protocol):
 
     def detect_emotion(self, text: str) -> Dict[str, Any]: ...
 
-    def assess_crisis_risk(self, text: str, timeout: Optional[float] = None,
-                           use_llm: bool = True) -> Dict[str, Any]: ...
-
     # Lifecycle greeting generation (main_window parity)
     def generate_greeting(self, *args, **kwargs) -> str: ...
 
     def generate_post_relaxation_greeting(self, *args, **kwargs) -> str: ...
 
     def generate_fill_info_prompt(self, *args, **kwargs) -> str: ...
-
-    # Debt: private name kept because pipeline calls it directly.
-    def _keyword_crisis_risk(self, text: str) -> Dict[str, Any]: ...
-
 
 @runtime_checkable
 class RAGBackend(Protocol):

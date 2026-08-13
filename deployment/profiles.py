@@ -11,9 +11,8 @@ from typing import Mapping, Optional
 class DeploymentProfile:
     """Pinned runtime contract for one supported machine class.
 
-    ``dialogue_model`` is the model that the profile can run today. Optional
-    models are declared separately so a missing guard/router never silently
-    changes the participant-facing dialogue model.
+    ``dialogue_model`` is the model that the profile can run today. The
+    participant-facing runtime has only dialogue and Agent endpoints.
     """
 
     name: str
@@ -24,8 +23,6 @@ class DeploymentProfile:
     router_model: str
     agent_model: str
     agent_base_url: str
-    optional_guard_model: Optional[str]
-    guard_base_url: Optional[str]
     enable_streaming_tts: bool
     notes: str = ""
     vllm_request_mode: str = "chat"
@@ -40,7 +37,6 @@ class RuntimeModels:
 
     dialogue: str
     router: str
-    optional_guard: Optional[str]
 
 
 _PROFILES = {
@@ -53,8 +49,6 @@ _PROFILES = {
         router_model="qwen2.5:3b",
         agent_model="qwen2.5:3b",
         agent_base_url="http://localhost:11434/v1",
-        optional_guard_model=None,
-        guard_base_url=None,
         enable_streaming_tts=False,
         notes="Local UI and smoke-test profile; it is not a production capacity target.",
     ),
@@ -67,8 +61,6 @@ _PROFILES = {
         router_model="qwen2.5:3b",
         agent_model="qwen2.5:3b",
         agent_base_url="http://127.0.0.1:18001/v1",
-        optional_guard_model=None,
-        guard_base_url=None,
         enable_streaming_tts=False,
         vllm_request_mode="completion",
         dialogue_max_tokens=96,
@@ -87,13 +79,11 @@ _PROFILES = {
         router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
         agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
         agent_base_url="http://127.0.0.1:8001/v1",
-        optional_guard_model=None,
-        guard_base_url=None,
         enable_streaming_tts=True,
         notes=(
             "Single A100 80GB profile. Qwen2.5 72B AWQ dialogue and a 3B "
-            "Agent run behind vLLM; the deterministic crisis policy is the "
-            "sole production safety boundary."
+            "Agent run behind vLLM. The crisis/Guard path is detached from "
+            "production and retained under safety/ for later redesign."
         ),
     ),
 }
@@ -122,7 +112,6 @@ def resolve_runtime_models(profile: DeploymentProfile,
         return RuntimeModels(
             dialogue=profile.dialogue_model,
             router=profile.router_model,
-            optional_guard=None,
         )
     return RuntimeModels(
         dialogue=(
@@ -132,5 +121,4 @@ def resolve_runtime_models(profile: DeploymentProfile,
             or profile.dialogue_model
         ),
         router=environment.get("AGENT_MODEL") or profile.router_model,
-        optional_guard=environment.get("VOICECHAT_GUARD_MODEL") or profile.optional_guard_model,
     )

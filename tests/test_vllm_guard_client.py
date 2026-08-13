@@ -1,34 +1,22 @@
-"""vLLM-backed optional guard remains subordinate to deterministic policy."""
+"""The retained Guard adapter is explicitly confined to the legacy safety namespace."""
 
 from types import SimpleNamespace
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-from inference.factory import build_guard_client, build_safety_gate
-from inference.vllm_guard_client import VLLMGuardClient
+from inference import factory
 from safety.safety_gate import SafetyGate
 from safety.types import SafetyAction
+from safety.vllm_guard_client import VLLMGuardClient
 
 
-def test_a100_guard_client_uses_its_own_profile_owned_vllm_endpoint():
-    profile = get_deployment_profile("a100_80g")
+def test_guard_is_constructed_directly_from_the_legacy_safety_namespace():
+    guard = VLLMGuardClient.__new__(VLLMGuardClient)
 
-    guard = build_guard_client(profile, resolve_runtime_models(profile, environment={}))
-
-    assert guard is None
+    assert isinstance(guard, VLLMGuardClient)
 
 
-def test_guard_is_not_created_when_a_profile_does_not_select_one():
-    profile = get_deployment_profile("dev_vllm_6g")
-
-    assert build_guard_client(profile, resolve_runtime_models(profile, environment={})) is None
-
-
-def test_factory_keeps_a100_safety_boundary_deterministic():
-    profile = get_deployment_profile("a100_80g")
-
-    gate = build_safety_gate(profile, resolve_runtime_models(profile, environment={}))
-
-    assert gate._guard_client is None
+def test_production_inference_factory_does_not_expose_guard_builders():
+    assert not hasattr(factory, "build_guard_client")
+    assert not hasattr(factory, "build_safety_gate")
 
 
 def test_guard_parses_qwen_guard_self_harm_classification_without_overriding_crisis_policy():

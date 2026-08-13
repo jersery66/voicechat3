@@ -73,10 +73,6 @@ class TestEvaluateSessionEnd:
         assert action == "generate_reports"
         assert orchestrator.state == SessionState.SESSION_ENDING
 
-    def test_safety_never_forces_relaxation(self, orchestrator):
-        action, _ = orchestrator.evaluate_session_end(EndType.SAFETY)
-        assert action == "generate_reports"
-
     def test_quit_never_forces_relaxation(self, orchestrator):
         action, _ = orchestrator.evaluate_session_end(EndType.QUIT)
         assert action == "generate_reports"

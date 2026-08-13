@@ -101,12 +101,6 @@ class ReportGenerationTool:
                         scale_scores[name] = {k: v for k, v in scale_result.items() if k != "scale_name"}
 
                 key_events = []
-                if researcher_report and isinstance(researcher_report, dict):
-                    risk = researcher_report.get("risk_assessment", {})
-                    if isinstance(risk, dict):
-                        level = risk.get("level", 0)
-                        if isinstance(level, (int, float)) and level >= 7:
-                            key_events.append(f"crisis_risk_{level}")
                 if relaxation_info and relaxation_info != "未进行":
                     key_events.append(f"relaxation_{relaxation_info}")
                 for scale_name in (scale_tags or {}):

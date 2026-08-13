@@ -1,5 +1,7 @@
 """Tests for services.rag_service — synonym expansion and scoring."""
 
+from pathlib import Path
+
 import pytest
 from services.rag_service import RAGService
 
@@ -101,3 +103,14 @@ class TestScoreEntry:
         score_lazy = rag_service._score_entry(entry_lazy, expanded, "失眠")
 
         assert score_core > score_lazy  # Core entries get higher domain boost
+
+
+def test_core_rag_contains_no_crisis_specific_entry(tmp_path):
+    source = Path("knowledge_base/knowledge.json")
+    (tmp_path / "knowledge.json").write_text(
+        source.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    rag = RAGService(knowledge_base_path=str(tmp_path))
+
+    assert all(entry["title"] != "危机干预与自杀预防" for entry in rag.knowledge_base)
+    assert "危机干预" not in "\n".join(entry["content"] for entry in rag.knowledge_base)

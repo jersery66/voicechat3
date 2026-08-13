@@ -14,7 +14,6 @@ from typing import Optional, Dict
 END_PATTERNS = {
     r'\[END_GOAL_ACHIEVED\]': 'goal_achieved',
     r'\[END_TIME_LIMIT\]': 'time_limit',
-    r'\[END_SAFETY\]': 'safety',
     r'\[END_INVALID\]': 'invalid',
     r'\[END_QUIT\]': 'quit',
 }

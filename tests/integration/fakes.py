@@ -54,8 +54,8 @@ class FakeAgent:
         self.route_script: List[Dict[str, Any]] = []
         self.route_calls: List[Dict[str, Any]] = []
         self.route_error: Optional[Exception] = None  # raised by routing if set
-        self.crisis_keyword_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
-        self.crisis_llm_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
+        self.intent_calls = 0
+        self.emotion_calls = 0
         self.emotion_result = {"emotion": "neutral", "intensity": 0.2}
         self.intent_result = {"intent": "counseling", "confidence": 0.9}
 
@@ -80,16 +80,12 @@ class FakeAgent:
                 "confidence": 0.5, "risk_level": 0, "reason": "fake default"}
 
     def classify_intent(self, text: str):
+        self.intent_calls += 1
         return dict(self.intent_result)
 
     def detect_emotion(self, text: str):
+        self.emotion_calls += 1
         return dict(self.emotion_result)
-
-    def _keyword_crisis_risk(self, text: str):
-        return dict(self.crisis_keyword_result)
-
-    def assess_crisis_risk(self, text: str, use_llm: bool = True):
-        return dict(self.crisis_llm_result)
 
     # Lifecycle greeting generation (protocol parity)
     def generate_greeting(self, *args, **kwargs) -> str:

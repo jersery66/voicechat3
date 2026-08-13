@@ -239,13 +239,6 @@ class ContinueOrEndAskEvent(Event):
     reason: Literal["post_relaxation", "timeout"] = "post_relaxation"
 
 
-class CrisisAlertEvent(Event):
-    """Crisis risk detected — show hotline dialog."""
-    kind: Literal["crisis_alert"] = "crisis_alert"
-    risk_level: int
-    hotlines: Dict[str, str] = Field(default_factory=dict)
-
-
 class SessionEndingEvent(Event):
     """End flow accepted: client should run farewell + report generation.
 
@@ -288,7 +281,6 @@ AnyEvent = (
     | SessionWarningEvent
     | TimeLimitAskEvent
     | ContinueOrEndAskEvent
-    | CrisisAlertEvent
     | SessionEndingEvent
     | SessionEndedEvent
     | ErrorEvent

@@ -45,7 +45,7 @@
     ↓
 📝 STT 语音转写
     ↓
-🧠 意图识别 + 情绪识别 + 危机关键词检测
+🧠 意图识别 + 情绪识别
     ↓
 📚 RAG 专家知识库增强
     ↓
@@ -70,7 +70,7 @@
 * 🔄 双面反映；
 * 🚫 避免说教、命令和评判；
 * 🌱 关注来访者自己的改变动机；
-* 🛡️ 在风险场景下优先进行安全处理。
+* 🧭 对风险线索保持人工复核边界；实际危机处置须按机构流程交由专业人员完成。
 
 ---
 
@@ -138,7 +138,7 @@
 1. **🎤 来访者反馈** — 温和口语化的结束语，TTS 播放。
 2. **📊 研究员报告** — 结构化 JSON + PDF，包含：
    * 👤 基本信息、轮次、时长；
-   * 😊 情绪状态、风险等级、主要问题；
+   * 😊 情绪状态、主要问题；
    * 📋 PHQ-9 / GAD-7 / PCL-5 逐题评分、总分、严重程度；
    * 🧘 放松训练完成情况；
    * 💡 干预建议。
@@ -167,12 +167,9 @@ flowchart TD
     C --> D[🧠 统一路由 Agent]
     D -->|chat / start_scale / continue_scale / recommend_relaxation| E[📊 累计症状评分]
     E -->|PHQ-9 / GAD-7 / PCL-5 达到阈值| F[📋 量表采样]
-    C --> G[🛡️ 危机关键词检测]
-    C --> C1[🛡️ 确定性危机安全门]
-    C1 --> C2[📚 RAG 专家知识库]
+    C --> C2[📚 RAG 专家知识库]
     C2 --> H[💬 LLM 流式生成 vLLM / Ollama]
     F --> H
-    G --> H
     H --> I[🏷️ 标签解析 + 内部标签过滤]
     I --> J{🔀 路由决策}
     J -->|普通回复| K[🔊 TTS VoxCPM2 播放]
@@ -196,7 +193,7 @@ stateDiagram-v2
     VIDEO_PLAYING --> POST_RELAXATION: ⏹️ 视频结束
     POST_RELAXATION --> CHATTING: 💬 继续聊天
     POST_RELAXATION --> SESSION_ENDING: 🏁 结束会话
-    CHATTING --> SESSION_ENDING: 🛑 主动结束 / 时间到 / 安全风险
+    CHATTING --> SESSION_ENDING: 🛑 主动结束 / 时间到
     SESSION_ENDING --> SESSION_ENDED: 📄 报告生成完成
     SESSION_ENDED --> IDLE: 🔄 准备下一位参与者
 ```
@@ -308,7 +305,7 @@ ollama serve
 
 #### 🖥️ A100 80GB 生产部署：vLLM 双服务
 
-生产 profile 不使用 Ollama，也不启动 Guard 模型。危机转介由本地确定性策略在语音转写或文字输入进入 72B 对话模型前完成；它是路由规则，不是医学诊断。
+当前 A100 生产 profile 仍是两个 vLLM 服务：72B 对话模型位于 127.0.0.1:8000，3B Router 位于 127.0.0.1:8001。Phase 1 未修改模型、端口或启动预算；危机/Guard 链路已暂时从生产运行时拆除，相关源代码仅保留在 safety/ 供后续重新设计。
 
 在 A100 主机安装 vLLM，并确保 `vllm` 命令可用后，运行：
 
@@ -474,8 +471,10 @@ data/
 #### 🚪 结束标签
 
 ```text
-[END_GOAL_ACHIEVED] [END_TIME_LIMIT] [END_SAFETY] [END_QUIT]
+[END_GOAL_ACHIEVED] [END_TIME_LIMIT] [END_QUIT]
 ```
+
+Phase 1 当前运行时不执行 `END_SAFETY`；历史枚举与旧报告数据仅为兼容而保留。
 
 #### 🧘 放松推荐标签
 
@@ -504,6 +503,8 @@ POST_RELAXATION_TIMEOUT = 60   # ⏳ 放松后等待选择的超时时间
 ---
 
 ### ⚠️ 10. 安全与伦理声明
+
+⚠️ **Phase 1 运行时限制：**危机/Guard 路由暂时从生产会话运行时拆除，相关历史源代码隔离在 `safety/`，生产应用不会导入它们。如出现自杀意念、自伤、暴力风险或严重精神症状，操作人员必须立即遵循机构处置流程并转交专业人员。
 
 🛡️ 本项目用于心理健康研究与辅助访谈，不构成正式医学诊断或治疗建议。对自杀、自伤、暴力风险等高危场景，应立即转交专业人员。研究使用前应获得机构伦理审批。
 
@@ -548,7 +549,7 @@ Supports natural voice and text input. Users express their concerns conversation
     ↓
 📝 STT transcription
     ↓
-🧠 Intent + emotion + crisis keyword detection
+🧠 Intent + emotion classification
     ↓
 📚 RAG knowledge base augmentation
     ↓
@@ -573,7 +574,7 @@ System prompts follow Motivational Interviewing (MI) and supportive counseling p
 * 🔄 Double-sided reflections;
 * 🚫 Avoiding lecturing, commanding, or judging;
 * 🌱 Focusing on the user's own motivation for change;
-* 🛡️ Prioritizing safety in risk scenarios.
+* 🧭 Keeping an explicit human-review boundary for risk signals; actual crisis handling follows institutional procedures and qualified professionals.
 
 ---
 
@@ -641,7 +642,7 @@ Generated automatically at session end:
 1. **🎤 Visitor feedback** — warm, conversational farewell played via TTS.
 2. **📊 Researcher report** — structured JSON + PDF including:
    * 👤 Basic info, round count, duration;
-   * 😊 Emotional state, risk level, identified issues;
+   * 😊 Emotional state and identified issues;
    * 📋 PHQ-9 / GAD-7 / PCL-5 per-item scores, totals, severity;
    * 🧘 Relaxation training completion;
    * 💡 Intervention recommendations.
@@ -668,13 +669,10 @@ flowchart TD
     B --> C[⚙️ ConversationPipeline]
     C --> D[🧠 Intent Agent]
     C --> E[😊 Emotion Agent]
-    C --> F[🛡️ Crisis keyword detection]
-    C --> C1[🛡️ Deterministic crisis safety gate]
-    C1 --> C2[📚 RAG knowledge base]
+    C --> C2[📚 RAG knowledge base]
     C2 --> H[💬 LLM streaming - vLLM / Ollama]
     D --> H
     E --> H
-    F --> H
     H --> I[🏷️ Tag parsing]
     I --> J{🔀 Routing}
     J -->|Normal reply| K[🔊 TTS - VoxCPM2]
@@ -699,7 +697,7 @@ stateDiagram-v2
     VIDEO_PLAYING --> POST_RELAXATION: ⏹️ Video ends
     POST_RELAXATION --> CHATTING: 💬 Continue chatting
     POST_RELAXATION --> SESSION_ENDING: 🏁 End session
-    CHATTING --> SESSION_ENDING: 🛑 Manual end / time limit / safety risk
+    CHATTING --> SESSION_ENDING: 🛑 Manual end / time limit
     SESSION_ENDING --> SESSION_ENDED: 📄 Reports generated
     SESSION_ENDED --> IDLE: 🔄 Prepare for next participant
 ```
@@ -811,7 +809,7 @@ Default: listens on `http://localhost:11434`.
 
 #### 🖥️ A100 80GB production deployment: two vLLM services
 
-The production profile does not use Ollama and does not start a Guard model. A local deterministic policy routes crisis inputs before a voice transcript or typed text is sent to the 72B dialogue model; it is a routing rule, not a medical diagnosis.
+The current A100 production profile remains two vLLM services: the 72B dialogue model at 127.0.0.1:8000 and the 3B Router at 127.0.0.1:8001. Phase 1 does not change the models, ports, or launch budget; the crisis/Guard path is temporarily detached from the production runtime, with the related source retained only under `safety/` for future redesign.
 
 After installing vLLM on the A100 host and making the `vllm` command available, run:
 
@@ -970,8 +968,10 @@ internal analysis ||| spoken response
 #### 🚪 End Tags
 
 ```text
-[END_GOAL_ACHIEVED] [END_TIME_LIMIT] [END_SAFETY] [END_QUIT]
+[END_GOAL_ACHIEVED] [END_TIME_LIMIT] [END_QUIT]
 ```
+
+The Phase 1 runtime does not execute `END_SAFETY`; the historical enum and legacy report fields remain only for compatibility.
 
 #### 🧘 Relaxation Recommendation Tags
 
@@ -1001,7 +1001,9 @@ POST_RELAXATION_TIMEOUT = 60   # ⏳ Seconds to wait for user choice after relax
 
 ### ⚠️ 10. Safety and Ethics
 
-🛡️ This project is designed for mental health research and supportive counseling. It does not constitute a formal medical diagnosis or treatment. For suicidal ideation, self-harm, violence risk, or severe psychiatric symptoms, immediately refer to qualified professionals. Institutional ethics approval is required for research use.
+⚠️ **Phase 1 operational limitation:** crisis/Guard routing is temporarily detached from the production conversation runtime. Legacy source is isolated under `safety/` and is not imported by the production application. If suicidal ideation, self-harm, violence risk, or severe psychiatric symptoms are reported, operators must immediately follow institutional procedures and refer the person to qualified professionals.
+
+🛡️ This project is designed for mental health research and supportive counseling. It does not constitute a formal medical diagnosis or treatment. Institutional ethics approval is required for research use.
 
 ---
 

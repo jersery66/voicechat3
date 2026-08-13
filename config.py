@@ -322,18 +322,22 @@ DATA_ROOT = os.environ.get(
 # dialogue baseline; local 6GB machines default to the light development model.
 from deployment.profiles import get_deployment_profile, resolve_runtime_models
 
-DEPLOYMENT_PROFILE = get_deployment_profile()
-RUNTIME_MODELS = resolve_runtime_models(DEPLOYMENT_PROFILE)
+_DEPLOYMENT_PROFILE = get_deployment_profile()
+_RUNTIME_MODELS = resolve_runtime_models(_DEPLOYMENT_PROFILE)
+# Public compatibility aliases for callers that still inspect the selected
+# deployment.  Guard/crisis controls are intentionally not exported here.
+DEPLOYMENT_PROFILE = _DEPLOYMENT_PROFILE
+RUNTIME_MODELS = _RUNTIME_MODELS
 # Dialogue transport is profile-owned. ``OLLAMA_MODEL`` is retained as the
 # existing application-wide model-name variable for compatibility; under the
 # A100 profile it names the vLLM-served model rather than an Ollama tag.
-DIALOGUE_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
+DIALOGUE_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
 DIALOGUE_BASE_URL = (
-    DEPLOYMENT_PROFILE.dialogue_base_url
-    if DEPLOYMENT_PROFILE.name == "a100_80g"
-    else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", DEPLOYMENT_PROFILE.dialogue_base_url)
+    _DEPLOYMENT_PROFILE.dialogue_base_url
+    if _DEPLOYMENT_PROFILE.name == "a100_80g"
+    else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", _DEPLOYMENT_PROFILE.dialogue_base_url)
 )
-OLLAMA_MODEL = RUNTIME_MODELS.dialogue
+OLLAMA_MODEL = _RUNTIME_MODELS.dialogue
 
 
 def print_model_status():
@@ -359,7 +363,7 @@ SYSTEM_PROMPT = """
 
 ## 【量表任务最高优先级】
 如果本轮 system_suffix 中包含【量表进行中】或【量表评估】，必须优先执行量表任务。此时：
-1. 禁止推荐放松训练，禁止输出 [REC_BREATHING]、[REC_MUSCLE]、[REC_MEDITATION]、[REC_GAME]，除非用户出现明确危机风险（自杀/自残/脱逃）。
+1. 禁止推荐放松训练，禁止输出 [REC_BREATHING]、[REC_MUSCLE]、[REC_MEDITATION]、[REC_GAME]。
 2. 口语回复必须围绕量表题目展开，禁止偏离到放松训练、游戏、影视音乐等话题。
 3. 心理分析部分正常进行，但策略选择必须以量表追问为主。
 4. 量表任务完成前，忽略"焦虑→推荐放松训练""身体紧绷→推荐放松"等默认规则。
@@ -391,7 +395,7 @@ SYSTEM_PROMPT = """
 
 ## 禁止输出内部策略标签
 口语回复（|||右侧）中严禁出现任何内部策略标签、技术术语、分类标签，包括但不限于：
-高防御、低防御、无情感反映、情感反映、具体化开放式提问、具体化、开放式提问、PHQ、GAD、PCL、量表、评分、风险等级、内部策略、危机干预。
+高防御、低防御、无情感反映、情感反映、具体化开放式提问、具体化、开放式提问、PHQ、GAD、PCL、量表、评分、风险等级、内部策略。
 这些只能用于左侧心理分析，不能出现在用户能听到的口语回复中。
 如果检测到这些词出现在口语回复中，必须删除并用自然语言替代。
 
@@ -407,7 +411,6 @@ SYSTEM_PROMPT = """
 当用户表达"沮丧、难过、绝望、不想活、撑不住"等强情绪时，必须按以下结构输出口语回复：
 1. 先用一句话承接情感："听起来这份沮丧和绝望感已经很重了。"
 2. 再自然追问频率："这种感觉最近是偶尔一阵，还是大多数时间都会出现？"
-3. 如出现"绝望/不想活/活不下去"，补一句安全确认："当你说绝望的时候，有没有出现过伤害自己的念头？"
 不要只输出策略标签，不要跳过情感承接。
 
 ## 一、 心理分析逻辑（||| 左侧必填内容）
@@ -424,8 +427,7 @@ SYSTEM_PROMPT = """
 
 **分析部分标准格式：**
 `【情绪识别】...【状态评估】...【变革话语】...【策略选择】...`
-5.  **特殊标记【红色预警】**（最高优先级）：若检测到用户有自杀、自残、脱逃倾向，必须在心理分析开头标注此预警
-6.  **初始破冰原则**：用户仅打招呼（如“你好”“在吗”）时，禁止过度共情（如“能来这不容易”），应自然回礼并简单询问状态（如“你好呀，今儿感觉咋样？”）
+5.  **初始破冰原则**：用户仅打招呼（如“你好”“在吗”）时，禁止过度共情（如“能来这不容易”），应自然回礼并简单询问状态（如“你好呀，今儿感觉咋样？”）
 
 ## 二、 口语回复核心规则（||| 右侧内容）
 ### （一） 基础说话风格要求
@@ -471,19 +473,8 @@ SYSTEM_PROMPT = """
     - **禁止重复推荐**：若最近两轮已经推荐过且用户未采纳，**禁止再次推荐**，应转为共情或换个话题。
     - 训练后跟进：用户做完放松训练，主动问感受，示例“怎么样，做完感觉身上松快点了吗？"
 
-2.  **危机干预（最高优先级）**
-    - 触发条件：用户提及自杀、自残、脱逃倾向（如“想撞墙”“不想活了”“想跑出去”）
-    - 三步要求：
-      心理分析标注【红色预警】
-      口语回复：
-          - 首选：温和但坚定稳住对方，引导寻求管教帮助，示例“等等……你刚才说的这个，咱得认真说说。先别急，我陪你在这儿坐着。”
-         - 若用户拒绝找管教：转为**即时情感验证**与**安全承诺**，**禁止复读“陪你找管教”或“那我就坐着”**。
-           示例：“行，先不去。那咱俩就在这儿多待会儿。你刚才说那种念头，是因为最近碰上啥过不去的坎儿了吗？”
-           示例：“不去就不去。但我得确认你现在是安全的。咱们聊聊，到底是被什么事儿压得喘不过气了？”
-      禁止说教、刺激用户或**机械重复同一句安抚语**
-
-3.  **防御性退让模式**
-    - 触发条件：用户表现出攻击性、极度抗拒（如“别烦我”“滚”“你懂个屁”），且**无生命危险**
+2.  **防御性退让模式**
+     - 触发条件：用户表现出攻击性、极度抗拒（如“别烦我”“滚”“你懂个屁”）
     - 策略要求：**以此攻彼**或**简单确认**，避免陷入“我想帮你-我不需要”的循环。
     - 话术示例：“看来我现在说什么你都觉得烦。那行，我不说了，你什么时候想说了再开口。”（简单确认）
     - 话术示例：“你觉得我根本不懂你的处境，哪怕我坐在这儿也是多余的，是吧？”（放大反映）
@@ -504,11 +495,10 @@ SYSTEM_PROMPT = """
     - 正确示例：用户说”好多了” → 回复”嗯，能感觉到你松快了不少。以后感觉紧的时候，就像今天这样深呼吸，管用的。有事儿随时来找我唠。[END_GOAL_ACHIEVED]”
     - 禁止话术：“哪部分最有帮助？”“结束前你感觉如何？”等生硬提问
 
-3.  **结束标签（5选1，放口语回复末尾）**
+3.  **结束标签（4选1，放口语回复末尾）**
     - `[END_GOAL_ACHIEVED]` → 用户明确表示好转、问题缓解
     - `[END_QUIT]` → 用户主动说累了、想休息、不想聊了
     - `[END_TIME_LIMIT]` → 系统提示时间/轮次快到了
-    - `[END_SAFETY]` → 检测到自伤风险，已引导求助
     - `[END_INVALID]` → 用户恶意测试对话
 
 ## 三、 核心禁忌清单
@@ -527,20 +517,6 @@ SYSTEM_PROMPT = """
     - 2025年春节：1月29日（农历正月初一）
     - 2026年春节：2月17日（农历正月初一）
     - 当前年份：2025年或2026年（根据实际对话时间）
-"""
-
-# Crisis intervention suffix — injected into system prompt when risk_level >= 7
-CRISIS_INTERVENTION_SUFFIX = """
-【最高优先级 - 危机干预模式】
-系统检测到当前用户可能存在较高的心理危机风险。你必须立即切换至危机干预模式：
-1. 保持极其冷静、温暖、非评判的语调
-2. 优先确保安全——不做深入心理探索或创伤挖掘
-3. 温和但直接地询问：是否有具体的自伤/自杀计划或手段
-4. 如有具体计划：明确、坚定但温和地建议立即求助，提供热线电话
-5. 表达关心："我在乎你的安全"、"你的生命很重要"等
-6. 不要推荐任何放松训练
-7. 不要主动结束会话
-8. 不要使用任何语气标记或副语言标记
 """
 
 # Opening greeting message - AI introduces itself when session starts
@@ -730,30 +706,22 @@ SESSION_ENGINE_AUTHORITATIVE = (
 
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
-AGENT_MODEL = RUNTIME_MODELS.router
-AGENT_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
+AGENT_MODEL = _RUNTIME_MODELS.router
+AGENT_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
 AGENT_MODEL_SERVER = (
-    DEPLOYMENT_PROFILE.agent_base_url
-    if DEPLOYMENT_PROFILE.name == "a100_80g"
-    else os.environ.get("VOICECHAT_AGENT_BASE_URL", DEPLOYMENT_PROFILE.agent_base_url)
+    _DEPLOYMENT_PROFILE.agent_base_url
+    if _DEPLOYMENT_PROFILE.name == "a100_80g"
+    else os.environ.get("VOICECHAT_AGENT_BASE_URL", _DEPLOYMENT_PROFILE.agent_base_url)
 )
 AGENT_API_KEY = 'EMPTY'
-GUARD_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
-GUARD_MODEL = RUNTIME_MODELS.optional_guard
-GUARD_MODEL_SERVER = os.environ.get(
-    "VOICECHAT_GUARD_BASE_URL",
-    DEPLOYMENT_PROFILE.guard_base_url or "",
-)
 
 AGENT_INTENT_SYSTEM_MESSAGE = """你是心理咨询系统的意图分类器。系统有以下功能模块：
 1. 咨询对话（counseling）：核心功能，咨询师通过对话建立关系、共情、引导
 2. 放松训练（relaxation）：3种放松按钮——呼吸放松、肌肉放松、冥想放松
-3. 危机干预（crisis）：自杀/自残/逃跑倾向的紧急处理
-4. 娱乐互动（entertainment）：游戏等轻松互动
-5. 闲聊（chitchat）：打招呼、无关紧要的话
+3. 娱乐互动（entertainment）：游戏等轻松互动
+4. 闲聊（chitchat）：打招呼、无关紧要的话
 
 分类规则（按优先级从高到低判断）：
-- crisis: 任何自杀、自残、逃跑、暴力倾向的表达 → 最高优先级
 - relaxation: 用户提到想做放松、深呼吸、冥想、肌肉放松，或出现急性焦虑/身体紧绷症状需要放松干预
 - counseling: 用户表达情绪困扰（焦虑、抑郁、失眠、戒断、家庭问题等）或需要心理帮助
 - entertainment: 用户想玩游戏、找乐子
@@ -762,7 +730,6 @@ AGENT_INTENT_SYSTEM_MESSAGE = """你是心理咨询系统的意图分类器。�
 注意：
 - 用户说"我紧张""我心慌""我睡不着"→ counseling（不是relaxation，这些是倾诉情绪）
 - 用户说"我想做放松""教我深呼吸""有没有冥想"→ relaxation（主动请求放松训练）
-- 用户说"我不想活了""我想死"→ crisis（无论语气轻重）
 - 简短打招呼如"你好""在吗"→ chitchat
 
 只返回JSON：{"intent": "类别名", "confidence": 0.0-1.0, "reason": "简短理由"}"""
@@ -828,23 +795,6 @@ intensity根据情绪词汇的强烈程度评分：0.3(轻微) → 0.5(中等) �
 
 只返回JSON：{"emotion": "类别名", "intensity": 0.0-1.0, "keywords": ["触发词"]}"""
 
-AGENT_CRISIS_SYSTEM_MESSAGE = """你是一个心理危机风险评估器。分析用户输入，评估其危机风险等级。
-
-评估维度：
-1. 自杀意念：直接/间接表达结束生命的想法、不想活、死了算了
-2. 自伤行为：提及自残、割腕、伤害身体的行为或具体计划
-3. 暴力倾向：表达伤害他人、报复社会的意图
-4. 逃跑计划：提及逃离管教所/戒毒所的具体计划
-5. 严重心理崩溃：完全绝望、失去现实感、精神分裂症状
-
-评分标准：
-- 0-3分：低风险（普通倾诉，无危险信号）
-- 4-6分：中风险（有负面念头但无具体计划，需关注）
-- 7-8分：高风险（有具体自伤/自杀念头，需立即干预）
-- 9-10分：极高风险（有明确计划和手段，需紧急介入）
-
-只返回JSON：{"risk_level": 0-10整数, "indicators": ["检测到的风险指标列表"], "immediate_action": true/false}"""
-
 AGENT_SCALE_SYSTEM_MESSAGE = """你是心理咨询系统的量表触发器。根据用户对话内容，判断是否应该启动量表评估。
 
 可用量表：
@@ -897,7 +847,6 @@ INTENT_SCENE_MAP = {
     "entertainment":  ["entertainment"],  # 仅主动提出时
     "counseling":     [],  # 不推荐影音，由 72B 决定是否建议放松训练
     "chitchat":       [],
-    "crisis":         ["breathing_exercise"],
 }
 
 # 影音场景显示名
@@ -930,14 +879,6 @@ MEDIA_LIBRARY_PATH = os.path.join(APP_ROOT, "media_library")
 MUSIC_SCAN_DIRS = []
 MOVIE_SCAN_DIRS = []
 
-# ============== Crisis Resources ==============
-CRISIS_HOTLINES = {
-    "全国心理援助热线": "400-161-9995",
-    "北京危机干预中心": "010-82951332",
-    "生命热线": "400-821-1215",
-    "紧急求助": "110/120"
-}
-
 # ============== Report Generation Prompts ==============
 RESEARCHER_REPORT_PROMPT = """你是一位资深心理咨询督导。请基于以下对话记录，生成一份专业的心理咨询会话报告。
 
@@ -961,11 +902,6 @@ RESEARCHER_REPORT_PROMPT = """你是一位资深心理咨询督导。请基于�
     "trajectory": "情绪变化轨迹描述"
   }},
   "identified_issues": ["识别的主要问题..."],
-  "risk_assessment": {{
-    "level": "低/中/高",
-    "indicators": ["风险指标列表"],
-    "notes": "备注说明"
-  }},
   "intervention_record": {{
     "techniques_used": ["使用的咨询技术"],
     "effectiveness": "干预效果评估"

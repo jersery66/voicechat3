@@ -56,7 +56,7 @@ def test_normal_turn_flows_through_legacy_pipeline_and_is_journaled(tmp_path):
     assert len(pipeline.calls) == 1
     records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
     assert [record["type"] for record in records] == [
-        "safety_decision", "policy_decision", "turn_completed"
+        "policy_decision", "turn_completed"
     ]
     assert all("user_text" not in record["payload"] for record in records)
 
@@ -78,7 +78,7 @@ def test_router_reason_is_not_written_to_the_research_journal(tmp_path):
     assert policy["payload"]["reason"] == ""
 
 
-def test_emergency_turn_bypasses_dialogue_generation_and_uses_legacy_ui_event(tmp_path):
+def test_crisis_keyword_text_still_flows_through_legacy_pipeline(tmp_path):
     pipeline = FakePipeline()
     events = []
     coordinator = ConversationCoordinator(
@@ -87,19 +87,16 @@ def test_emergency_turn_bypasses_dialogue_generation_and_uses_legacy_ui_event(tm
     )
 
     result = coordinator.execute(
-        PipelineConfig(user_text="\u6211\u51c6\u5907\u4eca\u665a\u5272\u8155"),
+        PipelineConfig(user_text="我准备今晚割腕"),
         lambda *event: events.append(event),
     )
 
-    assert pipeline.calls == []
-    # Legacy risk handling opens the crisis UI without silently auto-ending a
-    # session. The new boundary preserves that behavior while bypassing LLM.
-    assert result.end_type is None
-    assert result.crisis_risk == 9
-    assert ("show_crisis", result.safety_payload) in events
+    assert len(pipeline.calls) == 1
+    assert result.full_response == "ok"
+    assert all(event[0] != "show_crisis" for event in events)
 
 
-def test_high_risk_voice_transcript_bypasses_dialogue_generation(tmp_path):
+def test_crisis_keyword_voice_transcript_is_transcribed_once_then_runs_pipeline(tmp_path):
     pipeline = VoiceCapableFakePipeline("我准备今晚割腕")
     events = []
     coordinator = ConversationCoordinator(pipeline=pipeline, journal=EventJournal(tmp_path / "events.jsonl"))
@@ -109,9 +106,50 @@ def test_high_risk_voice_transcript_bypasses_dialogue_generation(tmp_path):
     )
 
     assert pipeline.transcribe_calls == [[1]]
+    assert len(pipeline.calls) == 1
+    assert pipeline.calls[0].transcribed_text == "我准备今晚割腕"
+    assert result.full_response == "ok"
+    assert all(event[0] != "show_crisis" for event in events)
+
+
+def test_blank_voice_transcript_does_not_enter_pipeline_and_is_journaled(tmp_path):
+    pipeline = VoiceCapableFakePipeline("   \t")
+    journal_path = tmp_path / "events.jsonl"
+    coordinator = ConversationCoordinator(
+        pipeline=pipeline,
+        journal=EventJournal(journal_path),
+        session_id="research-session",
+    )
+
+    result = coordinator.execute(PipelineConfig(use_stt=True, audio_data=[1]), lambda *_event: None)
+
+    assert result == PipelineResult()
+    assert pipeline.transcribe_calls == [[1]]
     assert pipeline.calls == []
-    assert result.crisis_risk == 9
-    assert ("show_crisis", result.safety_payload) in events
+    records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["type"] for record in records] == ["turn_completed"]
+    assert records[0]["session_id"] == "research-session"
+
+
+def test_voice_transcript_preserves_original_pipeline_config_fields(tmp_path):
+    pipeline = VoiceCapableFakePipeline("transcribed")
+    coordinator = ConversationCoordinator(pipeline=pipeline)
+    config = PipelineConfig(
+        use_stt=True,
+        use_tts=True,
+        audio_data=[1],
+        user_text="caller-provided fallback",
+        extra_system_suffix="scale context",
+    )
+
+    coordinator.execute(config, lambda *_event: None)
+
+    assert len(pipeline.calls) == 1
+    forwarded = pipeline.calls[0]
+    assert forwarded.user_text == "caller-provided fallback"
+    assert forwarded.use_tts is True
+    assert forwarded.extra_system_suffix == "scale context"
+    assert forwarded.transcribed_text == "transcribed"
 
 
 def test_safe_voice_transcript_is_transcribed_once_then_runs_legacy_pipeline(tmp_path):
@@ -128,19 +166,23 @@ def test_safe_voice_transcript_is_transcribed_once_then_runs_legacy_pipeline(tmp
     assert result.full_response == "ok"
     records = [json.loads(line) for line in journal.path.read_text(encoding="utf-8").splitlines()]
     assert [record["type"] for record in records] == [
-        "safety_decision", "policy_decision", "turn_completed"
+        "policy_decision", "turn_completed"
     ]
     assert records[-1]["payload"] == {"input_mode": "voice", "end_type": None}
 
 
-def test_high_risk_compatibility_voice_transcript_is_blocked_before_ui_reply(tmp_path):
-    pipeline = FakePipeline()
-    events = []
-    coordinator = ConversationCoordinator(pipeline=pipeline, journal=EventJournal(tmp_path / "events.jsonl"))
+def test_decide_turn_returns_typed_policy_without_safety_journal(tmp_path):
+    journal_path = tmp_path / "events.jsonl"
+    coordinator = ConversationCoordinator(
+        pipeline=FakePipeline(),
+        journal=EventJournal(journal_path),
+    )
 
-    result = coordinator.assess_transcript("我准备今晚割腕", lambda *event: events.append(event))
+    decision = coordinator.decide_turn(
+        {"scale_action": "start", "scale": "phq9", "item": 2, "confidence": 0.91}
+    )
 
-    assert result is not None
-    assert pipeline.calls == []
-    assert result.crisis_risk == 9
-    assert ("show_crisis", result.safety_payload) in events
+    assert isinstance(decision, PolicyDecision)
+    assert decision.scale_action == ScaleAction.START
+    records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["type"] for record in records] == ["policy_decision"]

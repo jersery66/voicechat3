@@ -17,8 +17,10 @@ def test_config_exposes_vllm_endpoint_for_the_a100_profile(monkeypatch):
         assert config.AGENT_BACKEND == "vllm"
         assert config.AGENT_MODEL == "Qwen/Qwen2.5-3B-Instruct-AWQ"
         assert config.AGENT_MODEL_SERVER == "http://127.0.0.1:8001/v1"
-        assert config.GUARD_MODEL is None
-        assert config.GUARD_MODEL_SERVER == ""
+        assert not hasattr(config, "GUARD_MODEL")
+        assert not hasattr(config, "GUARD_MODEL_SERVER")
+        assert config.DEPLOYMENT_PROFILE.name == "a100_80g"
+        assert config.RUNTIME_MODELS.dialogue == config.OLLAMA_MODEL
     finally:
         sys.modules.pop("config", None)
         if original is not None:

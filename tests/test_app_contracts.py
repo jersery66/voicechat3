@@ -92,6 +92,11 @@ class TestRoundtrip:
 
 
 class TestRegistry:
+    def test_event_union_has_no_crisis_alert_kind(self):
+        from app.contracts import _EVENT_TYPES
+
+        assert "crisis_alert" not in _EVENT_TYPES
+
     def test_all_kinds_unique_commands(self):
         kinds = [c.model_fields["kind"].default for c in AnyCommand.__args__]
         assert len(kinds) == len(set(kinds))

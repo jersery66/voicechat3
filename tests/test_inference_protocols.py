@@ -1,8 +1,8 @@
-"""Inference adapters are swappable without importing a server SDK."""
+"""Dialogue/router adapters stay swappable; the legacy Guard is safety-owned."""
 
 from inference.dialogue_client import DialogueClient
-from inference.guard_client import GuardClient
 from inference.router_client import RouterClient
+from safety.guard_client import GuardClient
 from safety.types import SafetyDecision
 
 

@@ -30,7 +30,8 @@ def test_a100_stack_launcher_starts_two_loopback_services_with_bounded_budget():
     assert "8002" not in source
     assert "Wait-VoiceChatVllmModel" in source
     assert "scripts\\check_config.py" in source
-    assert "VOICECHAT_GUARD_MODEL" in source
+    assert "VOICECHAT_GUARD_MODEL" not in source
+    assert "VOICECHAT_GUARD_BASE_URL" not in source
 
 
 def test_vllm_health_check_uses_models_endpoint_not_ollama():

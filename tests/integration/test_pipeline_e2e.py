@@ -189,35 +189,24 @@ class TestEndTag:
         assert result.end_type is None
 
 
-class TestCrisisGate:
-    def test_keyword_crisis_injects_suffix_and_wins(self, ctx):
-        """Keyword path fires first: crisis suffix injected into the LLM
-        call, keyword risk level takes precedence, crisis lock engages."""
-        agent = FakeAgent()
-        agent.crisis_keyword_result = {
-            "risk_level": 9, "indicators": ["不想活"], "immediate_action": True,
-        }
-        p = ctx(agent=agent)
-        result, _ = run_turn(p, "我不想活了")
-        assert "危机干预" in p.llm.calls[-1]["system_suffix"]
-        assert result.crisis_risk == 9
-        assert "不想活" in result.crisis_indicators
+class TestDetachedCrisisRuntime:
+    def test_legacy_crisis_keyword_uses_the_ordinary_pipeline(self, ctx):
+        p = ctx()
+        result, emit = run_turn(p, "我不想活了")
 
-    def test_llm_reassessment_emits_alert(self, ctx):
-        """Without keyword hit, risky emotion triggers LLM reassessment;
-        its immediate_action result surfaces as show_crisis."""
+        assert result.spoken_text
+        assert not hasattr(result, "crisis_risk")
+        assert "show_crisis" not in emit.types()
+        assert "危机干预" not in p.llm.calls[-1]["system_suffix"]
+
+    def test_negative_emotion_does_not_trigger_a_third_crisis_call(self, ctx):
         agent = FakeAgent()
-        agent.crisis_keyword_result = {
-            "risk_level": 0, "indicators": [], "immediate_action": False,
-        }
-        agent.emotion_result = {"emotion": "depressed", "intensity": 0.95}
-        agent.crisis_llm_result = {
-            "risk_level": 8, "indicators": ["自杀意念"], "immediate_action": True,
-        }
         p = ctx(agent=agent)
-        result, emit = run_turn(p, "活着真的没什么意思")
-        assert result.crisis_risk == 8
-        assert "show_crisis" in emit.types()
+
+        run_turn(p, "最近很绝望，整个人都很累")
+
+        assert agent.intent_calls == 1
+        assert agent.emotion_calls == 1
 
 
 class TestShadowIndependence:

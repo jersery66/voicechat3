@@ -29,7 +29,7 @@ class TestParseReportJson:
 
     def test_wraps_invalid_json_in_structure(self, report_service):
         text = "这不是JSON，是纯文本分析"
-        result = report_service._parse_report_json(text, "被试003", EndType.SAFETY)
+        result = report_service._parse_report_json(text, "被试003", EndType.QUIT)
         assert result["session_info"]["subject_id"] == "被试003"
         assert result["raw_analysis"] == text
 

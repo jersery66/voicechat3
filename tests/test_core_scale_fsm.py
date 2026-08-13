@@ -35,7 +35,6 @@ class TestScaleStateDefaults:
         assert state.pause_turns == 0
         assert state.soft_paused is False
         assert state.resume_item == 1
-        assert state.crisis_lock_turns == 0
 
     def test_flow_defaults(self, state):
         assert state.scale_active is False
@@ -70,7 +69,6 @@ class TestScaleStateReset:
         state.pause_turns = 2
         state.soft_paused = True
         state.resume_item = 4
-        state.crisis_lock_turns = 3
         state.symptom_scores["PHQ-9"] = 5
         state.pending_scale_resume = True
 
@@ -85,7 +83,6 @@ class TestScaleStateReset:
         assert state.pause_turns == 0
         assert state.soft_paused is False
         assert state.resume_item == 1
-        assert state.crisis_lock_turns == 0
         assert state.symptom_scores == {name: 0 for name in SCALE_NAMES}
         assert state.pending_scale_resume is False
 

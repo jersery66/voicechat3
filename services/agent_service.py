@@ -27,7 +27,6 @@ from config import (
     AGENT_RELAXATION_SYSTEM_MESSAGE,
     AGENT_EMOTION_SYSTEM_MESSAGE,
     AGENT_SUMMARY_SYSTEM_MESSAGE,
-    AGENT_CRISIS_SYSTEM_MESSAGE,
     AGENT_TIMEOUT,
     AGENT_REPORT_TIMEOUT,
     AGENT_ENTERTAINMENT_KEYWORDS,
@@ -36,27 +35,6 @@ from config import (
 )
 
 logger = get_logger(__name__)
-
-# Crisis keywords for keyword fallback
-_CRISIS_KEYWORDS = [
-    "自杀", "不想活", "想死", "死了算了", "活不下去",
-    "自残", "割腕", "跳楼", "结束生命", "轻生",
-    "没有意义", "活着没意思", "不如死了",
-]
-
-_CRISIS_DENIAL_PATTERNS = [
-    "没有伤害自己", "没有自伤", "没有自残", "没有自杀",
-    "不想伤害自己", "不想自伤", "不想自残", "不想自杀",
-    "没想过伤害自己", "没想过自伤", "没想过自残", "没想过自杀",
-]
-
-_CRISIS_SIGNAL_TERMS = (
-    "自杀", "自伤", "自残", "伤害自己", "想死", "轻生", "不想活",
-    "活不下去", "结束生命", "死了算了", "不如死了", "死了一了百了",
-    # A method disclosed outside a denial clause is always a separate,
-    # high-consequence signal. Keep this list aligned with _critical below.
-    "跳楼", "割腕", "上吊", "喝农药", "安眠药", "马上去死", "现在就死",
-)
 
 # Relaxation keywords for keyword fallback
 _RELAXATION_KEYWORDS = [
@@ -136,7 +114,7 @@ class AgentService:
         """Call the 3B agent and parse a JSON response.
 
         Centralizes the request boilerplate for the various JSON-mode calls
-        (intent, RAG routing, relaxation, emotion, crisis). Raises on failure
+        (intent, RAG routing, relaxation and emotion). Raises on failure
         so each public caller can decide how to fall back.
         """
         timeout = timeout or AGENT_TIMEOUT
@@ -175,7 +153,7 @@ class AgentService:
     def classify_intent(self, user_text: str, timeout: float = None) -> Dict[str, Any]:
         """
         意图分类。返回:
-        {"intent": "counseling|entertainment|crisis|chitchat|relaxation",
+        {"intent": "counseling|entertainment|chitchat|relaxation",
          "confidence": 0.0-1.0,
          "reason": "简短理由"}
 
@@ -195,7 +173,7 @@ class AgentService:
 
             if "intent" not in result:
                 raise ValueError(f"Missing 'intent' key in response: {result}")
-            valid_intents = {"counseling", "entertainment", "crisis", "chitchat", "relaxation"}
+            valid_intents = {"counseling", "entertainment", "chitchat", "relaxation"}
             if result["intent"] not in valid_intents:
                 result["intent"] = "counseling"
             result.setdefault("confidence", 0.5)
@@ -209,11 +187,6 @@ class AgentService:
     def _keyword_classify(self, text: str) -> Dict[str, Any]:
         """纯关键词 fallback 分类。"""
         text_lower = text.lower()
-
-        # Crisis — highest priority
-        for kw in _CRISIS_KEYWORDS:
-            if kw in text_lower:
-                return {"intent": "crisis", "confidence": 0.95, "reason": f"keyword: {kw}"}
 
         # Relaxation
         for kw in _RELAXATION_KEYWORDS:
@@ -235,97 +208,6 @@ class AgentService:
 
         # Default: counseling
         return {"intent": "counseling", "confidence": 0.5, "reason": "default fallback"}
-
-    # ==================== Crisis Risk Assessment ====================
-
-    def assess_crisis_risk(self, text: str, timeout: float = None,
-                           use_llm: bool = True) -> Dict[str, Any]:
-        """
-        Assess crisis risk level from user text.
-        Returns {"risk_level": 0-10, "indicators": [...], "immediate_action": bool}
-        Falls back to keyword scoring on failure.
-        Set use_llm=False to skip the LLM call and use keyword scoring only.
-        """
-        if self._has_explicit_crisis_denial(text):
-            return {"risk_level": 0, "indicators": [], "immediate_action": False}
-        if not use_llm:
-            return self._keyword_crisis_risk(text)
-        timeout = timeout or AGENT_TIMEOUT
-        try:
-            result = self._call_json(
-                AGENT_CRISIS_SYSTEM_MESSAGE, text,
-                max_tokens=100, temperature=0.1, timeout=timeout,
-            )
-            result.setdefault("risk_level", 0)
-            result.setdefault("indicators", [])
-            result.setdefault("immediate_action", result["risk_level"] >= 7)
-            # Clamp risk_level to 0-10
-            result["risk_level"] = max(0, min(10, int(result["risk_level"])))
-            return result
-        except Exception as e:
-            logger.debug(f"Crisis risk assessment failed: {e}")
-            return self._keyword_crisis_risk(text)
-
-    def _keyword_crisis_risk(self, text: str) -> Dict[str, Any]:
-        """Keyword-based crisis risk scoring fallback."""
-        if self._has_explicit_crisis_denial(text):
-            return {"risk_level": 0, "indicators": [], "immediate_action": False}
-        risk_level = 0
-        indicators = []
-
-        # Level 9-10: Direct suicide with method
-        _critical = ["跳楼", "割腕", "上吊", "喝农药", "安眠药", "结束生命",
-                      "马上去死", "现在就死", "不想活了马上"]
-        for kw in _critical:
-            if kw in text:
-                risk_level = max(risk_level, 9)
-                indicators.append(f"危急关键词: {kw}")
-
-        # Level 7-8: Suicide ideation, self-harm
-        _severe = ["自杀", "自伤", "自残", "伤害自己", "想死", "死了算了",
-                    "活不下去", "轻生", "不想活", "活着没意思", "不如死了",
-                    "死了一了百了"]
-        for kw in _severe:
-            if kw in text:
-                risk_level = max(risk_level, 7)
-                indicators.append(f"严重关键词: {kw}")
-
-        # Level 4-6: Violence, escape plans
-        _moderate = ["杀了", "打死", "弄死", "报复", "逃跑", "逃出去",
-                      "活够了", "撑不下去了", "没有意义"]
-        for kw in _moderate:
-            if kw in text:
-                risk_level = max(risk_level, 5)
-                indicators.append(f"中等关键词: {kw}")
-
-        # Level 1-3: General distress
-        _mild = ["绝望", "崩溃", "撑不住", "受不了了", "一点希望都没有",
-                  "看不到希望", "走投无路"]
-        for kw in _mild:
-            if kw in text:
-                risk_level = max(risk_level, 3)
-                indicators.append(f"关注关键词: {kw}")
-
-        return {
-            "risk_level": risk_level,
-            "indicators": indicators,
-            "immediate_action": risk_level >= 7,
-        }
-
-    @staticmethod
-    def _has_explicit_crisis_denial(text: str) -> bool:
-        """Recognize a clear denial without hiding a separate positive signal."""
-        compact = "".join((text or "").lower().split())
-        if not any(pattern in compact for pattern in _CRISIS_DENIAL_PATTERNS):
-            return False
-
-        # A person may deny current intent while disclosing prior/current ideation
-        # elsewhere in the same utterance.  Remove only the denial clauses before
-        # deciding whether it is safe to suppress the LLM reassessment.
-        non_denial_text = compact
-        for pattern in _CRISIS_DENIAL_PATTERNS:
-            non_denial_text = non_denial_text.replace(pattern, "")
-        return not any(term in non_denial_text for term in _CRISIS_SIGNAL_TERMS)
 
     # ==================== Report Generation ====================
 
@@ -703,7 +585,7 @@ class AgentService:
         relaxation_done: bool = False,
         timeout: float = None,
     ) -> dict:
-        """Unified routing decision for scale/relaxation/crisis per turn.
+        """Unified routing decision for scale/relaxation per turn.
 
         Uses direct API call WITHOUT response_format=json_object. We
         deliberately avoid json_object mode here so the routing model remains
@@ -736,8 +618,6 @@ class AgentService:
   "scale": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
   "target_item": null 或 "Q1"-"Q9",
   "intervention_type": null 或 "breathing" 或 "muscle_relaxation" 或 "mindfulness" 或 "game" 或 "media",
-  "urgency": 0-10,
-  "risk_level": 0-10,
   "confidence": 0.0-1.0,
   "reason": "15字以内"
 }
@@ -763,13 +643,13 @@ class AgentService:
 注意：start_scale 时不需要指定 target_item，由系统自动决定。
 
 示例1：用户连续表达低落（第3轮）
-{"action":"start_scale","scale":"PHQ-9","target_item":null,"intervention_type":null,"urgency":2,"risk_level":0,"confidence":0.75,"reason":"持续低落情绪"}
+{"action":"start_scale","scale":"PHQ-9","target_item":null,"intervention_type":null,"confidence":0.75,"reason":"持续低落情绪"}
 
 示例2：用户单次说"睡不好"（第1轮）
-{"action":"chat","scale":null,"target_item":null,"intervention_type":null,"urgency":1,"risk_level":0,"confidence":0.5,"reason":"单次睡眠提及"}
+{"action":"chat","scale":null,"target_item":null,"intervention_type":null,"confidence":0.5,"reason":"单次睡眠提及"}
 
 示例3：用户焦虑且已有PHQ-9在进行
-{"action":"continue_scale","scale":"PHQ-9","target_item":null,"intervention_type":null,"urgency":2,"risk_level":0,"confidence":0.7,"reason":"继续采样"}"""
+{"action":"continue_scale","scale":"PHQ-9","target_item":null,"intervention_type":null,"confidence":0.7,"reason":"继续采样"}"""
 
         timeout = timeout or AGENT_TIMEOUT
         try:
@@ -845,8 +725,6 @@ class AgentService:
                 "recommend_media": raw_action == "recommend_media",
                 "media_type": intervention if raw_action == "recommend_media" else None,
                 "exit_intent": raw_action == "exit",
-                "risk_level": result.get("risk_level", 0),
-                "immediate_crisis": result.get("immediate_crisis", False),
                 "confidence": result.get("confidence", 0.0),
                 "reason": result.get("reason", ""),
             }
@@ -861,8 +739,6 @@ class AgentService:
                 "probe_hint": "",
                 "recommend_relaxation": False,
                 "relaxation_type": None,
-                "risk_level": 0,
-                "immediate_crisis": False,
                 "confidence": 0.0,
                 "reason": f"agent fallback: {e}",
             }

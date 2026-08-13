@@ -76,12 +76,15 @@ class TestRealServicesConform:
 
     def test_agent_service(self):
         from services.agent_service import AgentService
-        for name in ("is_available", "route_conversation_actions",
-                     "classify_intent", "detect_emotion",
-                     "assess_crisis_risk", "_keyword_crisis_risk",
-                     "generate_greeting", "generate_post_relaxation_greeting",
-                     "generate_fill_info_prompt"):
+        for name in (
+            "is_available",
+            "route_conversation_actions",
+            "classify_intent",
+            "detect_emotion",
+        ):
             assert callable(getattr(AgentService, name, None)), name
+        assert not hasattr(AgentService, "assess_crisis_risk")
+        assert not hasattr(AgentService, "_keyword_crisis_risk")
 
     def test_rag_service(self):
         from services.rag_service import RAGService

@@ -46,7 +46,7 @@ from app.contracts import (
 logger = logging.getLogger(__name__)
 
 # End types that must NEVER be intercepted by a forced relaxation.
-_NO_FORCE_END_TYPES = (EndType.SAFETY, EndType.INVALID, EndType.QUIT)
+_NO_FORCE_END_TYPES = (EndType.INVALID, EndType.QUIT)
 
 
 class SessionEngine:
@@ -230,7 +230,7 @@ class SessionEngine:
         """End request. Mirrors legacy MainWindow._handle_session_end:
 
         1. duplicate end attempts are rejected by the guard;
-        2. unless forbidden (explicit exit / SAFETY / INVALID / QUIT, or a
+        2. unless forbidden (explicit exit / INVALID / QUIT, or a
            relaxation video was already played/recommended), the end is
            intercepted by one forced relaxation recommendation;
         3. if the FSM cannot enter SESSION_ENDING right now (a relaxation

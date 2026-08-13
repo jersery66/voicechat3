@@ -25,7 +25,7 @@ from services.logger import get_logger
 logger = get_logger(__name__)
 
 from config import (
-    APP_NAME, CRISIS_HOTLINES, GREETING_MESSAGE, GREETING_VARIANTS,
+    APP_NAME, GREETING_MESSAGE, GREETING_VARIANTS,
     POST_RELAXATION_MESSAGE, FILL_INFO_PROMPT, TRANSITION_PROMPT,
     SUGGESTIONS_PROMPT, CONTINUE_CHAT_MESSAGE, MIN_ROUNDS_FOR_RELAXATION,
 )
@@ -34,7 +34,7 @@ from .control_panel import ControlPanel
 from .chat_panel import ChatPanel
 from .loading_screen import LoadingScreen
 from .dialogs import (
-    CrisisDialog, ContinueOrEndDialog,
+    ContinueOrEndDialog,
     WarningDialog, EndSessionDecisionDialog
 )
 from .styles import get_style
@@ -453,13 +453,6 @@ class MainWindow(QMainWindow):
                         self.processing_queue.put(("status", "无法识别内容"))
                         return
 
-                coordinator = getattr(self, "conversation_coordinator", None)
-                if coordinator is None:
-                    raise RuntimeError("Conversation coordinator is unavailable; model loading did not complete")
-                blocked = coordinator.assess_transcript(user_text, safe_put)
-                if blocked is not None:
-                    return
-
                 self._post_relaxation_feedback_consumed = True
                 logger.warning(f"[RelaxResume] consume post-relaxation feedback: {user_text!r}")
 
@@ -567,8 +560,7 @@ class MainWindow(QMainWindow):
         if result.end_type:
             et = get_end_type_enum(result.end_type)
             # Hand off the end request to the GUI thread (consistent with the
-            # "auto_end_session" path). SAFETY is handled directly on the GUI
-            # thread; other END tags go through the unified readiness check.
+            # "auto_end_session" path) through the unified readiness check.
             self.processing_queue.put(("end_session_request", (et, result.relaxation_rec)))
             return
 
@@ -643,13 +635,7 @@ class MainWindow(QMainWindow):
 
                 elif msg_type == "end_session_request":
                     et, relaxation_rec = content
-                    if et == EndType.SAFETY:
-                        self._handle_session_end(et, relaxation_rec)
-                    else:
-                        self._request_end_with_readiness_check(et, source="model_end_tag")
-
-                elif msg_type == "show_crisis":
-                    self._show_crisis_dialog(content)
+                    self._request_end_with_readiness_check(et, source="model_end_tag")
 
                 elif msg_type == "highlight_relax":
                     # Map Chinese tags to English keys for control_panel
@@ -900,13 +886,10 @@ class MainWindow(QMainWindow):
             # one coordinator. The legacy pipeline remains the compatibility
             # implementation behind it while voice streaming is migrated.
             from conversation.coordinator import ConversationCoordinator
-            from config import DEPLOYMENT_PROFILE, RUNTIME_MODELS
-            from inference.factory import build_safety_gate
             from research.event_journal import EventJournal
             journal_root = self.data_manager.data_root / "research_events"
             self.conversation_coordinator = ConversationCoordinator(
                 pipeline=self.pipeline,
-                safety_gate=build_safety_gate(DEPLOYMENT_PROFILE, RUNTIME_MODELS),
                 journal=EventJournal(journal_root / "events.jsonl"),
             )
 
@@ -1044,12 +1027,6 @@ class MainWindow(QMainWindow):
             self.data_manager.start_new_session()
         if self.report_service:
             self.report_service.start_session()
-
-    def _show_crisis_dialog(self, risk_data=None):
-        risk_level = risk_data.get("risk_level", 0) if risk_data else 0
-        indicators = risk_data.get("indicators", []) if risk_data else []
-        dialog = CrisisDialog(self, CRISIS_HOTLINES, risk_level, indicators)
-        dialog.exec()
 
     def _highlight_relax_safe(self, relax_key: str):
         """Highlight relaxation button with logging and safety checks."""
@@ -2142,9 +2119,6 @@ class MainWindow(QMainWindow):
                         logger.warning(f"Visitor feedback generation failed: {e}")
                         full_feedback = "今天的聊天到此结束，希望对你有所帮助。有事儿随时来找我唠。"
                     self.processing_queue.put(("finish_streaming", None))
-
-                if end_type == EndType.SAFETY:
-                    self.processing_queue.put(("show_crisis", None))
 
                 self.orchestrator.transition_to(SessionState.SESSION_ENDED)
 

@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Protocol
-
 from safety.crisis_policy import CrisisPolicy
+from safety.guard_client import GuardClient
 from safety.types import SafetyDecision
-
-
-class GuardClient(Protocol):
-    """Optional model guard contract; no provider is required by the core."""
-
-    def assess_input(self, text: str) -> SafetyDecision: ...
 
 
 class SafetyGate:

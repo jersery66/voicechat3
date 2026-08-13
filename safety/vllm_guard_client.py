@@ -1,4 +1,8 @@
-"""Optional Qwen3Guard adapter served through vLLM's OpenAI API."""
+"""Legacy Qwen3Guard adapter served through vLLM's OpenAI API.
+
+This adapter is retained for offline safety experiments only.  The production
+conversation runtime does not import or construct it.
+"""
 
 from __future__ import annotations
 
@@ -11,12 +15,7 @@ from safety.types import EvidenceSpan, SafetyAction, SafetyDecision
 
 
 class VLLMGuardClient:
-    """Map a Qwen3Guard prompt-classification response to ``SafetyDecision``.
-
-    The deterministic crisis policy remains the primary safety boundary.  This
-    client provides only an optional second opinion and never raises into the
-    conversation path when its separately managed vLLM service is unavailable.
-    """
+    """Map a Qwen3Guard prompt-classification response to ``SafetyDecision``."""
 
     _SAFETY_LABEL = re.compile(r"Safety\s*:\s*(Safe|Unsafe|Controversial)", re.IGNORECASE)
     _CATEGORIES = re.compile(r"Categories?\s*:\s*(.+)", re.IGNORECASE)
@@ -72,7 +71,7 @@ class VLLMGuardClient:
         )
 
     def assess_input(self, text: str) -> SafetyDecision:
-        """Classify a user turn, preserving deterministic safety on failure."""
+        """Classify a user turn without raising into a caller's runtime."""
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
@@ -86,3 +85,6 @@ class VLLMGuardClient:
             return self._parse(content)
         except Exception:
             return SafetyDecision(uncertainty=True, source="guard_model")
+
+
+__all__ = ["VLLMGuardClient"]

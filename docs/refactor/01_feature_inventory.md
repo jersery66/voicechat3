@@ -10,7 +10,7 @@
 | F03 | 文字输入（键盘发送） | chat_panel.ChatInput, main_window._on_text_submitted | 冒烟 | 文字能进入对话 |
 | F04 | Agent 统一路由（chat/start_scale/continue_scale/recommend_relaxation/recommend_game/exit） | agent_service.route_conversation_actions, pipeline | 冒烟 | 3B 模型决定何时进入量表/放松；超时不阻塞主流程 |
 | F05 | Agent 关键词兜底（模型不可用时） | agent_service._keyword_* | 冒烟 | 关闭 Ollama 3B 后对话仍可继续 |
-| F06 | 危机干预：风险评估 + 红色预警 + 危机弹窗 + 热线 | agent_service.assess_crisis_risk, dialogs.CrisisDialog, CRISIS_INTERVENTION_SUFFIX | 冒烟 | 说"不想活了"触发危机流程 |
+| F06 | 危机/安全链路 | `safety/**` legacy source | 暂时脱离生产；Phase 1 boundary test 保证 main import graph 不可达 |
 | F07 | RAG 知识检索（同义词扩展 + 加权评分 + 注入） | rag_service.py | 自动 test_rag.py | 提到失眠/戒断时注入知识 |
 | F08 | RAG 截断策略（量表期 500 字 / 常规 1200 字） | pipeline 调用 rag_service | 自动（需补） | 量表问答期间上下文变短 |
 | F09 | LLM 流式对话（Ollama, num_predict=1024） | llm_service.chat | 冒烟 | 流式气泡逐字显示 |

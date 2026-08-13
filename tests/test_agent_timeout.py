@@ -3,6 +3,7 @@
 from services.agent_service import AgentService
 from config import AGENT_TIMEOUT
 import config
+from deployment.profiles import get_deployment_profile
 from types import SimpleNamespace
 
 
@@ -12,12 +13,12 @@ def test_agent_client_uses_configured_timeout():
 
 
 def test_default_agent_model_matches_local_deployment_model():
-    profile = config.DEPLOYMENT_PROFILE
+    profile = get_deployment_profile()
     assert config.AGENT_MODEL == profile.agent_model
 
 
 def test_agent_uses_profile_selected_vllm_endpoint():
-    profile = config.DEPLOYMENT_PROFILE
+    profile = get_deployment_profile()
 
     assert config.AGENT_BACKEND == profile.runtime_backend
     assert config.AGENT_MODEL_SERVER == profile.agent_base_url

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     DIALOGUE_BACKEND, OLLAMA_MODEL,
     MAX_CONVERSATION_ROUNDS, MAX_CONVERSATION_MINUTES, TIME_WARNING_MINUTES,
-    CRISIS_HOTLINES, RESEARCHER_REPORT_PROMPT, VISITOR_FEEDBACK_PROMPT,
+    RESEARCHER_REPORT_PROMPT, VISITOR_FEEDBACK_PROMPT,
     SESSION_SUMMARY_PROMPT, AGENT_REPORT_TIMEOUT
 )
 from services.logger import get_logger
@@ -32,11 +32,10 @@ class ReportService:
     Report generation service for voice chat sessions.
     
     Supports:
-    - Four end type detection (goal/time/safety/invalid)
+    - End type tracking (goal/time/invalid)
     - Round/time tracking with warnings
     - Researcher report generation (JSON)
     - Visitor feedback generation (oral style for TTS)
-    - Safety resources output
     """
     
     def __init__(self, llm_service=None, agent_service=None):
@@ -541,19 +540,6 @@ class ReportService:
             logger.error(f"generate_suggestions failed: {e}")
             # Fallback suggestions
             return "睡不着时试试深呼吸。心里堵得慌就写两句。作息尽量规律。有空多走走晒太阳。"
-    
-    # ==================== Safety Resources ====================
-    
-    def get_crisis_resources(self) -> str:
-        """Get formatted crisis hotline resources."""
-        lines = ["紧急求助资源："]
-        for name, number in CRISIS_HOTLINES.items():
-            lines.append(f"• {name}: {number}")
-        return "\n".join(lines)
-    
-    def get_crisis_resources_for_tts(self) -> str:
-        """Get crisis resources in TTS-friendly format."""
-        return "如果你感觉撑不住，可以拨打心理援助热线，电话是400-161-9995，24小时都有人接听。"
     
     # ==================== Relaxation Recommendation ====================
     

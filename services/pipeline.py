@@ -257,7 +257,6 @@ def get_end_type_enum(string_name: str):
     _map = {
         'goal_achieved': EndType.GOAL_ACHIEVED,
         'time_limit': EndType.TIME_LIMIT,
-        'safety': EndType.SAFETY,
         'invalid': EndType.INVALID,
         'quit': EndType.QUIT,
     }
@@ -324,14 +323,6 @@ class PipelineResult:
     relaxation_rec: Optional[str] = None    # 'breathing', 'muscle', 'meditation', 'game'
     intent: str = "counseling"
     emotion_result: dict = field(default_factory=dict)
-    crisis_risk: int = 0
-    crisis_indicators: list = field(default_factory=list)
-    # New coordinator boundary may stop dialogue before model generation.
-    # The legacy UI consumes this payload through the existing ``show_crisis``
-    # queue event during the migration period.
-    safety_payload: dict = field(default_factory=dict)
-    # Raw legacy router output is retained only in memory. The coordinator
-    # converts it to a typed, de-identified research event at the boundary.
     agent_route: dict = field(default_factory=dict)
     scale_tags: dict = field(default_factory=dict)
     scale_active: bool = False             # True when a scale is currently being administered
@@ -376,7 +367,6 @@ class ConversationPipeline:
     _scale_pause_turns = delegate_property("pause_turns")
     _scale_soft_paused = delegate_property("soft_paused")
     _scale_resume_item = delegate_property("resume_item")
-    _crisis_lock_turns = delegate_property("crisis_lock_turns")
     scale_active = delegate_property("scale_active")
     scale_name = delegate_property("scale_name")
     scale_current_item = delegate_property("scale_current_item")
@@ -425,7 +415,7 @@ class ConversationPipeline:
         self.exit_requested: bool = False
         self.finish_mode: bool = False
 
-        # Shared executor for parallel intent / emotion / crisis classification.
+        # Shared executor for parallel intent / emotion classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
         self._executor = ThreadPoolExecutor(
@@ -708,8 +698,8 @@ class ConversationPipeline:
     def transcribe(self, audio_data: Any, emit: Callable[[str, Any], None]) -> str:
         """Convert one audio turn to text without starting dialogue processing.
 
-        The coordinator owns the safety boundary between this operation and the
-        rest of ``execute``.  Keeping ASR here preserves the existing STT
+        The coordinator owns the ordinary voice/text boundary between this
+        operation and the rest of ``execute``.  Keeping ASR here preserves the existing STT
         provider and UI status callback while preventing duplicate audio work.
         """
         if audio_data is None or len(audio_data) == 0:
@@ -827,14 +817,14 @@ class ConversationPipeline:
         # Round gate
         current_rounds = self.report.get_round_count() if self.report else 0
 
-        # --- Agent unified routing (3B model decides scale/relaxation/crisis) ---
+        # --- Agent unified routing (3B model decides scale/relaxation) ---
         _AGENT_FALLBACK = {
             "scale_action": "none", "scale": None, "item": None,
             "probe_hint": "", "recommend_relaxation": False,
             "relaxation_type": None, "recommend_game": False,
             "game_type": None, "recommend_media": False,
             "media_type": None, "exit_intent": False,
-            "risk_level": 0, "confidence": 0.0, "reason": "agent fallback",
+            "confidence": 0.0, "reason": "agent fallback",
         }
         agent_route = None
         if not AGENT_ROUTE_ENABLED:
@@ -860,7 +850,6 @@ class ConversationPipeline:
                     f"scale={agent_route.get('scale')} "
                     f"item={agent_route.get('item')} "
                     f"confidence={agent_route.get('confidence')} "
-                    f"risk={agent_route.get('risk_level')} "
                     f"reason={agent_route.get('reason', '')[:60]}"
                 )
             except Exception as e:
@@ -870,34 +859,7 @@ class ConversationPipeline:
 
         result.agent_route = dict(agent_route or _AGENT_FALLBACK)
 
-        # Hard safety: crisis keywords always take priority (not dependent on agent)
-        if self.agent:
-            quick_crisis = self.agent._keyword_crisis_risk(result.user_text)
-            if quick_crisis.get("immediate_action"):
-                from config import CRISIS_INTERVENTION_SUFFIX
-                if system_suffix:
-                    system_suffix += "\n" + CRISIS_INTERVENTION_SUFFIX
-                else:
-                    system_suffix = CRISIS_INTERVENTION_SUFFIX
-                self._crisis_lock_turns = 4
-                self._active_scale = None
-                self._active_scale_q = 1
-                self._active_scale_waiting_answer = False
-                self._scale_queue.clear()
-                logger.warning(f"[Pipeline] Crisis keywords detected: risk={quick_crisis.get('risk_level')}, lock=4 turns")
-                # Override agent route for safety
-                if agent_route:
-                    agent_route["immediate_crisis"] = True
-                    agent_route["scale_action"] = "pause"
-
-        # Gate: block scale logic during crisis lock
-        if self._crisis_lock_turns > 0:
-            self._crisis_lock_turns -= 1
-            self._active_scale = None
-            allow_new_scale = False
-            logger.warning(f"[CrisisDebug] crisis lock active, remaining={self._crisis_lock_turns}")
-        else:
-            allow_new_scale = True
+        allow_new_scale = True
 
         # --- Soft pause recovery ---
         # If scale was soft paused and user mentions symptoms again, resume
@@ -1170,7 +1132,7 @@ class ConversationPipeline:
         # This saves 1-3s of agent wait time before first LLM token.
         emit("start_ai_message", None)
         agent_future = self._executor.submit(
-            self._classify_intent_emotion_crisis, result.user_text
+            self._classify_intent_emotion, result.user_text
         )
 
         try:
@@ -1432,15 +1394,14 @@ class ConversationPipeline:
             latency_ms = (time.perf_counter() - pipeline_started) * 1000.0
             logger.warning(f"[Latency] input→TTS: {latency_ms:.0f}ms | spoken_len={len(result.spoken_text)}")
 
-        # Agent results + emotion tracking + crisis (parallel with TTS)
+        # Agent results + emotion tracking (parallel with TTS)
         try:
             agent_done = agent_future.result(timeout=10)
-            result.intent, result.emotion_result, crisis_keyword_result = agent_done
+            result.intent, result.emotion_result = agent_done
         except Exception as e:
             logger.warning(f"Agent classification failed: {e}")
             result.intent = "counseling"
             result.emotion_result = {"emotion": "neutral", "intensity": 0.0}
-            crisis_keyword_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
 
         if game_recommended:
             result.intent = "entertainment"
@@ -1471,30 +1432,7 @@ class ConversationPipeline:
         if self.emotion_tracker:
             self.emotion_tracker.add_emotion(result.emotion_result)
 
-        crisis_result = crisis_keyword_result
-        if self.agent and crisis_result.get("risk_level", 0) < 7:
-            emotion = result.emotion_result.get("emotion", "neutral")
-            intensity = result.emotion_result.get("intensity", 0.0)
-            # Only trigger LLM crisis reassessment for negative/risk emotions
-            # or very high intensity. Positive emotions like "happy" should NOT
-            # trigger an extra LLM call.
-            _risk_emotions = {
-                "sad", "depressed", "hopeless", "angry", "fearful",
-                "anxious", "stressed", "traumatized", "desperate",
-            }
-            if emotion in _risk_emotions or intensity >= 0.85:
-                with metrics.timer("agent.crisis"):
-                    crisis_result = self.agent.assess_crisis_risk(
-                        result.user_text, use_llm=True)
-        result.crisis_risk = crisis_result.get("risk_level", 0)
-        result.crisis_indicators = crisis_result.get("indicators", [])
-        if crisis_result.get("immediate_action"):
-            emit("show_crisis", crisis_result)
-
-        logger.info(
-            f"[Pipeline] RAG suffix: {bool(final_suffix)} "
-            f"| Crisis risk: {result.crisis_risk}"
-        )
+        logger.info(f"[Pipeline] RAG suffix: {bool(final_suffix)}")
 
         # Don't block pipeline waiting for TTS — let it play in background.
         # Use a callback to log errors without holding up the UI.
@@ -1515,21 +1453,14 @@ class ConversationPipeline:
         except Exception as e:
             logger.warning(f"TTS error: {e}")
 
-    def _classify_intent_emotion_crisis(self, text: str) -> tuple:
-        """Parallel 3B calls for intent + emotion + crisis keyword check.
-
-        Returns (intent_str, emotion_dict, crisis_keyword_result).
-        Uses the long-lived ``self._executor`` instead of constructing a fresh
-        ``ThreadPoolExecutor`` on every turn.
-        """
+    def _classify_intent_emotion(self, text: str) -> tuple[str, dict]:
+        """Run the ordinary intent and emotion classifiers in parallel."""
         intent_result = {"intent": "counseling", "confidence": 1.0}
         emotion_result = {"emotion": "neutral", "intensity": 0.0}
-        crisis_result = {"risk_level": 0, "indicators": [], "immediate_action": False}
         if self.agent:
             futures = {
                 self._executor.submit(self.agent.classify_intent, text): "intent",
                 self._executor.submit(self.agent.detect_emotion, text): "emotion",
-                self._executor.submit(self.agent._keyword_crisis_risk, text): "crisis",
             }
             for future in as_completed(futures):
                 tag = futures[future]
@@ -1537,21 +1468,18 @@ class ConversationPipeline:
                     res = future.result()
                     if tag == "intent":
                         intent_result = res
-                    elif tag == "emotion":
+                    else:
                         emotion_result = res
                         self.session_emotions.append({"role": "user", **emotion_result})
-                    elif tag == "crisis":
-                        crisis_result = res
                 except Exception as e:
                     logger.warning(f"{tag} detection failed: {e}")
         intent = intent_result.get("intent", "counseling")
         logger.debug(
             f"Intent: {intent} ({intent_result.get('confidence', 0):.2f}) "
             f"| Emotion: {emotion_result.get('emotion', 'neutral')} "
-            f"({emotion_result.get('intensity', 0):.2f}) "
-            f"| Crisis keyword: {crisis_result.get('risk_level', 0)}"
+            f"({emotion_result.get('intensity', 0):.2f})"
         )
-        return intent, emotion_result, crisis_result
+        return intent, emotion_result
 
     def _build_active_scale_prompt(self, scale_name: str, q_num: int,
                                     waiting_answer: bool) -> str:

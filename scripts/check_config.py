@@ -9,9 +9,7 @@ a critical dependency fails (dialogue backend unreachable, data root not
 writable); their launcher may still continue for troubleshooting. The
 ``a100_80g`` production profile additionally requires its 3B Agent endpoint,
 because the production startup script treats a failed check as a hard stop.
-Missing converted knowledge base, relaxation videos, and unselected optional
-Guard servers remain warnings. The deterministic crisis policy is always the
-authoritative safety boundary.
+Missing converted knowledge base and relaxation videos remain warnings.
 
 Usage:
     python scripts/check_config.py          # standalone
@@ -28,6 +26,8 @@ import requests
 # Ensure project root is on sys.path
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, APP_ROOT)
+
+from deployment.profiles import get_deployment_profile
 
 
 def _ok(label: str) -> None:
@@ -117,7 +117,7 @@ def _check_openai_compatible_model(label: str, base_url: str,
 
 def check_agent_backend() -> bool:
     """Check the Agent endpoint, enforcing it for the production A100 profile."""
-    from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER, DEPLOYMENT_PROFILE
+    from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER
 
     if AGENT_BACKEND == "ollama":
         available = _check_openai_compatible_model("Agent Ollama", AGENT_MODEL_SERVER, AGENT_MODEL)
@@ -126,27 +126,9 @@ def check_agent_backend() -> bool:
     else:
         available = _fail("Agent Backend", f"unsupported backend: {AGENT_BACKEND}")
     if not available:
-        if DEPLOYMENT_PROFILE.name == "a100_80g":
+        if get_deployment_profile().name == "a100_80g":
             return _fail("Agent", "required by the a100_80g production profile")
         _warn("Agent", "unavailable; deterministic keyword routing remains active")
-    return True
-
-
-def check_guard_backend() -> bool:
-    """Check the optional guard endpoint without making it a startup blocker."""
-    from config import GUARD_BACKEND, GUARD_MODEL, GUARD_MODEL_SERVER
-
-    if not GUARD_MODEL:
-        _ok("Guard model (not configured)")
-        return True
-    if GUARD_BACKEND == "vllm":
-        available = _check_openai_compatible_model("Guard vLLM", GUARD_MODEL_SERVER, GUARD_MODEL)
-    elif GUARD_BACKEND == "ollama":
-        available = _check_openai_compatible_model("Guard Ollama", GUARD_MODEL_SERVER, GUARD_MODEL)
-    else:
-        available = _fail("Guard Backend", f"unsupported backend: {GUARD_BACKEND}")
-    if not available:
-        _warn("Guard", "unavailable; deterministic crisis policy remains authoritative")
     return True
 
 
@@ -308,7 +290,6 @@ def run_check() -> bool:
         check_offline_model_root(),
         check_dialogue_backend(),
         check_agent_backend(),
-        check_guard_backend(),
         check_funasr(),
         check_cosyvoice(),
         check_voxcpm(),
