@@ -9,7 +9,9 @@ CRITICAL check fails (dialogue backend unreachable, data root not writable). The
 launcher (main.py) currently only prints the result and does NOT abort the
 startup, so a non-critical failure is reported but the app still launches.
 Non-critical gaps (missing converted knowledge base, missing relaxation
-videos) are emitted as WARN and still return True.
+videos, optional Agent or Guard servers) are emitted as WARN and still return
+True.  The Agent falls back to deterministic routing when unavailable; the
+Guard never replaces the deterministic crisis policy.
 
 Usage:
     python scripts/check_config.py          # standalone
@@ -89,6 +91,61 @@ def check_dialogue_backend() -> bool:
         return True
     except Exception as exc:
         return _fail("vLLM", f"cannot reach {DIALOGUE_BASE_URL}: {exc}")
+
+
+def _check_openai_compatible_model(label: str, base_url: str,
+                                   model: str | None) -> bool:
+    """Verify one profile-owned vLLM endpoint serves its configured model."""
+    if not model:
+        _ok(f"{label} (not configured)")
+        return True
+    if not base_url:
+        return _fail(label, "configured model has no endpoint")
+    try:
+        url = urljoin(base_url.rstrip("/") + "/", "models")
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        available = [item.get("id") for item in data.get("data", []) if item.get("id")]
+        if model not in available:
+            return _fail(label, f"model '{model}' not served by {url}")
+        _ok(f"{label} ({len(available)} models, using '{model}')")
+        return True
+    except Exception as exc:
+        return _fail(label, f"cannot reach {base_url}: {exc}")
+
+
+def check_agent_backend() -> bool:
+    """Check the optional Agent endpoint without blocking dialogue startup."""
+    from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER
+
+    if AGENT_BACKEND == "ollama":
+        available = _check_openai_compatible_model("Agent Ollama", AGENT_MODEL_SERVER, AGENT_MODEL)
+    elif AGENT_BACKEND == "vllm":
+        available = _check_openai_compatible_model("Agent vLLM", AGENT_MODEL_SERVER, AGENT_MODEL)
+    else:
+        available = _fail("Agent Backend", f"unsupported backend: {AGENT_BACKEND}")
+    if not available:
+        _warn("Agent", "unavailable; deterministic keyword routing remains active")
+    return True
+
+
+def check_guard_backend() -> bool:
+    """Check the optional guard endpoint without making it a startup blocker."""
+    from config import GUARD_BACKEND, GUARD_MODEL, GUARD_MODEL_SERVER
+
+    if not GUARD_MODEL:
+        _ok("Guard model (not configured)")
+        return True
+    if GUARD_BACKEND == "vllm":
+        available = _check_openai_compatible_model("Guard vLLM", GUARD_MODEL_SERVER, GUARD_MODEL)
+    elif GUARD_BACKEND == "ollama":
+        available = _check_openai_compatible_model("Guard Ollama", GUARD_MODEL_SERVER, GUARD_MODEL)
+    else:
+        available = _fail("Guard Backend", f"unsupported backend: {GUARD_BACKEND}")
+    if not available:
+        _warn("Guard", "unavailable; deterministic crisis policy remains authoritative")
+    return True
 
 
 def check_funasr() -> bool:
@@ -248,6 +305,8 @@ def run_check() -> bool:
     results = [
         check_offline_model_root(),
         check_dialogue_backend(),
+        check_agent_backend(),
+        check_guard_backend(),
         check_funasr(),
         check_cosyvoice(),
         check_voxcpm(),

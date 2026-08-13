@@ -1,9 +1,9 @@
 """
-Agent Service — 3B 模型意图分类 + 报告生成
+Agent Service — 独立路由模型意图分类 + 报告生成
 
-使用 openai SDK 调用 Ollama 的 /v1/chat/completions 端点，
-将 qwen2.5:3b-instruct 用于意图分类和报告生成，
-释放 72B 模型专注心理咨询对话。
+使用 OpenAI 兼容 API 调用由部署 profile 指定的语言模型服务。
+在 vLLM profile 下，路由模型是独立的 vLLM 实例，
+不会降级到 Ollama。
 
 Fallback 策略：3B 模型故障时自动降级到关键词分类 / 72B 报告生成。
 """
@@ -18,6 +18,7 @@ from openai import OpenAI
 from services.logger import get_logger
 from config import (
     AGENT_MODEL,
+    AGENT_BACKEND,
     AGENT_MODEL_SERVER,
     AGENT_API_KEY,
     AGENT_INTENT_SYSTEM_MESSAGE,
@@ -87,6 +88,7 @@ class AgentService:
             max_retries=0,
         )
         self.model = AGENT_MODEL
+        self.backend = AGENT_BACKEND
         self._available: Optional[bool] = None
         self._last_check_ts: float = 0.0
 
@@ -103,15 +105,19 @@ class AgentService:
         ):
             return self._available
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=5,
-                timeout=AGENT_TIMEOUT,
-            )
-            self._available = resp.choices is not None and len(resp.choices) > 0
+            served_models = self.client.models.list()
+            served_data = (
+                served_models.get("data", [])
+                if isinstance(served_models, dict)
+                else getattr(served_models, "data", [])
+            ) or []
+            available_ids = [
+                getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
+                for item in served_data
+            ]
+            self._available = self.model in available_ids
         except Exception as e:
-            logger.debug(f"3B model not available: {e}")
+            logger.debug(f"Agent model not available at {AGENT_MODEL_SERVER}: {e}")
             self._available = False
         self._last_check_ts = now
         return self._available
@@ -700,9 +706,8 @@ class AgentService:
         """Unified routing decision for scale/relaxation/crisis per turn.
 
         Uses direct API call WITHOUT response_format=json_object. We
-        deliberately avoid json_object mode here (unlike the other `_call_json`
-        routes) because small local models on Ollama frequently reject or
-        mangle the `response_format` argument. The loose JSON parser
+        deliberately avoid json_object mode here so the routing model remains
+        compatible with every profile-selected OpenAI-compatible server. The loose JSON parser
         (`_parse_json_loose`) handles undecorated JSON output robustly.
         """
         # Build context for the agent

@@ -6,7 +6,9 @@ import os
 from typing import Optional
 
 from deployment.profiles import DeploymentProfile, RuntimeModels
+from inference.vllm_guard_client import VLLMGuardClient
 from inference.vllm_client import VLLMOpenAIClient
+from safety.safety_gate import SafetyGate
 
 
 def build_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
@@ -27,3 +29,23 @@ def build_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
         system_role_mode=profile.vllm_system_role_mode,
         max_tokens=profile.dialogue_max_tokens,
     )
+
+
+def build_guard_client(profile: DeploymentProfile, models: RuntimeModels,
+                       *, timeout: float = 3.0) -> Optional[VLLMGuardClient]:
+    """Build the optional guard only for a vLLM profile that selects one."""
+    if profile.runtime_backend != "vllm" or not models.optional_guard:
+        return None
+    base_url = os.environ.get("VOICECHAT_GUARD_BASE_URL", profile.guard_base_url or "")
+    if not base_url:
+        return None
+    return VLLMGuardClient(
+        model=models.optional_guard,
+        base_url=base_url,
+        timeout=timeout,
+    )
+
+
+def build_safety_gate(profile: DeploymentProfile, models: RuntimeModels) -> SafetyGate:
+    """Construct the one safety boundary used by the conversation coordinator."""
+    return SafetyGate(guard_client=build_guard_client(profile, models))

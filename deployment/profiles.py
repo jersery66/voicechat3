@@ -22,7 +22,10 @@ class DeploymentProfile:
     dialogue_model: str
     dialogue_base_url: str
     router_model: str
+    agent_model: str
+    agent_base_url: str
     optional_guard_model: Optional[str]
+    guard_base_url: Optional[str]
     enable_streaming_tts: bool
     notes: str = ""
     vllm_request_mode: str = "chat"
@@ -48,7 +51,10 @@ _PROFILES = {
         dialogue_model="qwen2.5:3b",
         dialogue_base_url="http://localhost:11434",
         router_model="qwen2.5:3b",
+        agent_model="qwen2.5:3b",
+        agent_base_url="http://localhost:11434/v1",
         optional_guard_model=None,
+        guard_base_url=None,
         enable_streaming_tts=False,
         notes="Local UI and smoke-test profile; it is not a production capacity target.",
     ),
@@ -59,7 +65,10 @@ _PROFILES = {
         dialogue_model="gemma-2b-awq",
         dialogue_base_url="http://127.0.0.1:18000/v1",
         router_model="qwen2.5:3b",
+        agent_model="qwen2.5:3b",
+        agent_base_url="http://127.0.0.1:18001/v1",
         optional_guard_model=None,
+        guard_base_url=None,
         enable_streaming_tts=False,
         vllm_request_mode="completion",
         dialogue_max_tokens=96,
@@ -75,8 +84,11 @@ _PROFILES = {
         runtime_backend="vllm",
         dialogue_model="Qwen/Qwen2.5-72B-Instruct-AWQ",
         dialogue_base_url="http://127.0.0.1:8000/v1",
-        router_model="qwen2.5:3b",
-        optional_guard_model="qwen3guard:4b",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        optional_guard_model="Qwen/Qwen3Guard-Gen-4B",
+        guard_base_url="http://127.0.0.1:8002/v1",
         enable_streaming_tts=True,
         notes="Single A100 80GB profile. Qwen2.5 72B AWQ runs behind vLLM.",
     ),

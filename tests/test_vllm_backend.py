@@ -13,7 +13,8 @@ def test_a100_profile_uses_vllm_for_dialogue_and_keeps_router_explicit():
 
     assert profile.runtime_backend == "vllm"
     assert models.dialogue == "Qwen/Qwen2.5-72B-Instruct-AWQ"
-    assert models.router == "qwen2.5:3b"
+    assert models.router == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+    assert profile.agent_base_url == "http://127.0.0.1:8001/v1"
 
 
 def test_vllm_client_streams_openai_compatible_chunks_and_preserves_messages():

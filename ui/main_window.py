@@ -893,10 +893,13 @@ class MainWindow(QMainWindow):
             # one coordinator. The legacy pipeline remains the compatibility
             # implementation behind it while voice streaming is migrated.
             from conversation.coordinator import ConversationCoordinator
+            from config import DEPLOYMENT_PROFILE, RUNTIME_MODELS
+            from inference.factory import build_safety_gate
             from research.event_journal import EventJournal
             journal_root = self.data_manager.data_root / "research_events"
             self.conversation_coordinator = ConversationCoordinator(
                 pipeline=self.pipeline,
+                safety_gate=build_safety_gate(DEPLOYMENT_PROFILE, RUNTIME_MODELS),
                 journal=EventJournal(journal_root / "events.jsonl"),
             )
 

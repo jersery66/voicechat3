@@ -730,8 +730,18 @@ SESSION_ENGINE_AUTHORITATIVE = (
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
 AGENT_MODEL = RUNTIME_MODELS.router
-AGENT_MODEL_SERVER = OLLAMA_HOST.rstrip('/') + '/v1'
+AGENT_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
+AGENT_MODEL_SERVER = os.environ.get(
+    "VOICECHAT_AGENT_BASE_URL",
+    DEPLOYMENT_PROFILE.agent_base_url,
+)
 AGENT_API_KEY = 'EMPTY'
+GUARD_BACKEND = DEPLOYMENT_PROFILE.runtime_backend
+GUARD_MODEL = RUNTIME_MODELS.optional_guard
+GUARD_MODEL_SERVER = os.environ.get(
+    "VOICECHAT_GUARD_BASE_URL",
+    DEPLOYMENT_PROFILE.guard_base_url or "",
+)
 
 AGENT_INTENT_SYSTEM_MESSAGE = """你是心理咨询系统的意图分类器。系统有以下功能模块：
 1. 咨询对话（counseling）：核心功能，咨询师通过对话建立关系、共情、引导
