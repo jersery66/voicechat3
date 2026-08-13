@@ -33,3 +33,45 @@ def test_cleanup_stops_audio_releases_model_and_clears_cuda_cache(monkeypatch):
     assert service.model is None
     assert service.model_kwargs == {}
     assert cache_cleared == [True]
+
+
+def test_load_model_normalizes_a_mixed_dtype_checkpoint(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    class Parameter:
+        def __init__(self, dtype):
+            self.dtype = dtype
+
+    class MixedModel:
+        def __init__(self):
+            self.float_called = False
+            self.eval_called = False
+
+        def parameters(self):
+            return [Parameter("float32"), Parameter("bfloat16")]
+
+        def float(self):
+            self.float_called = True
+            return self
+
+        def eval(self):
+            self.eval_called = True
+            return self
+
+    mixed = MixedModel()
+
+    class FunASRNano:
+        @staticmethod
+        def from_pretrained(**_kwargs):
+            return mixed, {}
+
+    monkeypatch.setitem(sys.modules, "model", types.SimpleNamespace(FunASRNano=FunASRNano))
+    monkeypatch.setattr("services.stt_service.torch.nn.Module.to", lambda module, *_a, **_k: module)
+
+    service = STTService(model_path=str(tmp_path), device="cpu")
+    service.load_model()
+
+    assert mixed.float_called is True
+    assert mixed.eval_called is True
+    assert service.model_kwargs["language"] == "zh"

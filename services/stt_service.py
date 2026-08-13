@@ -136,6 +136,22 @@ class STTService:
                 torch.nn.Module.to = _orig_module_to
 
             self.model_kwargs['language'] = 'zh'
+            # The bundled Fun-ASR-Nano checkpoint mixes bf16 LLM weights with
+            # fp32 audio-encoder/adaptor weights.  Its inference path does
+            # not enter a single autocast region before the audio adaptor,
+            # so the mixed modules otherwise fail at the first Linear layer
+            # (Float/BFloat16 mismatch).  Use a uniform dtype for this local
+            # application service; accuracy is preferable to the small memory
+            # saving on the development GPU, and the actual A100 host has
+            # ample capacity for the same safe path.
+            parameter_dtypes = {parameter.dtype for parameter in self.model.parameters()}
+            if len(parameter_dtypes) > 1:
+                logger.warning(
+                    "FunASR checkpoint has mixed parameter dtypes %s; "
+                    "normalizing to float32 for compatible inference.",
+                    sorted(str(dtype) for dtype in parameter_dtypes),
+                )
+                self.model = self.model.float()
             self.model.eval()
             
         except Exception as e:
