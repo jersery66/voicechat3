@@ -43,8 +43,8 @@ GAD7_POSITIVE_KEYWORDS_BY_ITEM = {
 def infer_scale_score_from_text(text: str, scale_name: str, item: int = None) -> Optional[int]:
     """Fallback: infer a scale score from the user's plain-text answer.
 
-    Used when the LLM fails to output a [SCALE:...] tag.  Returns None if
-    the text doesn't match any known option pattern.
+    Used by the deterministic answer interpreter on the user's plain-text
+    answer.  Returns None if the text doesn't match any known option pattern.
 
     When item is provided, frequency words only apply if the text also
     contains symptom keywords for that item. This prevents "没有，在戒毒所

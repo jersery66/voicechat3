@@ -23,8 +23,6 @@ from config import (
     AGENT_API_KEY,
     AGENT_INTENT_SYSTEM_MESSAGE,
     AGENT_REPORT_SYSTEM_MESSAGE,
-    AGENT_RAG_ROUTING_SYSTEM_MESSAGE,
-    AGENT_RELAXATION_SYSTEM_MESSAGE,
     AGENT_EMOTION_SYSTEM_MESSAGE,
     AGENT_SUMMARY_SYSTEM_MESSAGE,
     AGENT_TIMEOUT,
@@ -42,16 +40,6 @@ _RELAXATION_KEYWORDS = [
     "放松训练", "呼吸训练", "肌肉放松", "冥想",
     "深呼吸", "放松一下", "做个放松",
 ]
-
-# Emotional phrases for RAG routing fallback
-_EMOTIONAL_PHRASES = [
-    "睡不着", "失眠", "做噩梦", "焦虑", "抑郁", "害怕", "恐惧",
-    "生气", "愤怒", "伤心", "难过", "委屈", "孤独", "无助",
-    "压力大", "紧张", "烦躁", "心慌", "头疼", "难受", "痛苦",
-    "想哭", "崩溃", "绝望", "迷茫", "困惑", "瘾来了", "犯瘾",
-    "想吸毒", "复吸", "渴求", "戒断", "家庭", "欺负", "创伤",
-]
-
 
 class AgentService:
     """3B 模型 Agent 服务，负责意图分类和报告生成。"""
@@ -251,76 +239,6 @@ class AgentService:
         for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
-
-    # ==================== RAG Intent Routing ====================
-
-    def classify_rag_intent(self, user_text: str, timeout: float = None) -> bool:
-        """
-        判断用户输入是否需要检索知识库。
-        返回 True 表示需要 RAG 检索。
-        失败时 fallback 到关键词匹配。
-        """
-        timeout = timeout or AGENT_TIMEOUT
-        try:
-            result = self._call_json(
-                AGENT_RAG_ROUTING_SYSTEM_MESSAGE, user_text,
-                max_tokens=50, temperature=0.1, timeout=timeout,
-            )
-            need_rag = result.get("need_rag", False)
-            reason = result.get("reason", "")
-            logger.debug(f"RAG routing: {need_rag} ({reason})")
-            return bool(need_rag)
-        except Exception as e:
-            logger.debug(f"RAG routing failed: {e}")
-            return self._keyword_rag_routing(user_text)
-
-    def _keyword_rag_routing(self, text: str) -> bool:
-        """RAG 路由的关键词 fallback。"""
-        for phrase in _EMOTIONAL_PHRASES:
-            if phrase in text:
-                return True
-        return False
-
-    # ==================== Relaxation Tag Inference ====================
-
-    def infer_relaxation_tag(self, spoken_text: str, timeout: float = None) -> Optional[str]:
-        """
-        从AI回复文本中推断放松训练类型。
-        返回 "[REC_BREATHING]" / "[REC_MUSCLE]" / "[REC_MEDITATION]" / "[REC_GAME]" / None
-        失败时 fallback 到关键词匹配。
-        """
-        timeout = timeout or AGENT_TIMEOUT
-        try:
-            result = self._call_json(
-                AGENT_RELAXATION_SYSTEM_MESSAGE, spoken_text,
-                max_tokens=30, temperature=0.1, timeout=timeout,
-            )
-            tag_name = result.get("tag", "NONE")
-            tag_map = {
-                "BREATHING": "[REC_BREATHING]",
-                "MUSCLE": "[REC_MUSCLE]",
-                "MEDITATION": "[REC_MEDITATION]",
-                "GAME": "[REC_GAME]",
-            }
-            tag = tag_map.get(tag_name)
-            if tag:
-                logger.debug(f"Relaxation tag inferred: {tag}")
-            return tag
-        except Exception as e:
-            logger.debug(f"Relaxation inference failed: {e}")
-            return self._keyword_relaxation_tag(spoken_text)
-
-    def _keyword_relaxation_tag(self, text: str) -> Optional[str]:
-        """放松标签的关键词 fallback。"""
-        if "游戏" in text:
-            return "[REC_GAME]"
-        if "呼吸" in text:
-            return "[REC_BREATHING]"
-        if "肌肉" in text:
-            return "[REC_MUSCLE]"
-        if "冥想" in text:
-            return "[REC_MEDITATION]"
-        return None
 
     # ==================== Emotion Detection ====================
 

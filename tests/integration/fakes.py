@@ -2,9 +2,9 @@
 
 These fakes implement exactly the call surface the pipeline uses
 (verified against services/pipeline.py), so the full turn logic —
-ASR-correction skip (text mode), agent routing, RAG suffix, crisis
-keyword gate, ||| parsing, scale state machine, tag detection — runs
-for real without GPU / Ollama / audio hardware.
+ASR-correction skip (text mode), agent routing, decision-gated RAG,
+ScaleRuntime flow, and legacy-output compatibility boundaries — runs for
+real without GPU / Ollama / audio hardware.
 
 Fakes record every call so tests can assert on what the pipeline sent.
 """
@@ -99,7 +99,7 @@ class FakeAgent:
 
 
 class FakeRAG:
-    """Records queries; returns a scripted suffix."""
+    """Records decision-approved queries; returns a scripted suffix."""
 
     def __init__(self, suffix: str = ""):
         self.suffix = suffix
@@ -109,7 +109,9 @@ class FakeRAG:
         self.queries.append(query)
         return self.suffix
 
-    def get_system_suffix(self, query: str) -> str:
+    def get_system_suffix(self, query: str, *, enabled: bool = False) -> str:
+        if not enabled:
+            return ""
         self.queries.append(query)
         return self.suffix
 

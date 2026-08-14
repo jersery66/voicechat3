@@ -42,6 +42,26 @@ _RE_PIPE_TAG = re.compile(r'<\|[^|]+\|>')
 _RE_BREATH_LAUGH = re.compile(r'\[(?:breath|laughter)\]')
 _RE_THINK = re.compile(r'<think>[\s\S]*?</think>')
 
+
+def split_legacy_response(text: str) -> tuple[str, str]:
+    """Return ``(legacy_analysis, spoken)`` for historical transcripts.
+
+    New providers return plain spoken text and therefore take the fast path.
+    The delimiter adapter remains in this compatibility module solely so old
+    fixtures and persisted transcripts can still be rendered safely. Its
+    result is never an executable action or score.
+    """
+    raw = str(text or "").strip()
+    if "|||" not in raw:
+        return "", raw
+    left, right = (part.strip() for part in raw.split("|||", 1))
+    analysis_markers = ("【情绪识别】", "【状态评估】", "【变革话语】", "【策略选择】")
+    left_is_analysis = any(marker in left for marker in analysis_markers)
+    right_is_analysis = any(marker in right for marker in analysis_markers)
+    if right_is_analysis and not left_is_analysis:
+        return right, left
+    return left, right
+
 # Compile END_PATTERNS / REC_TAGS once for fast detection
 _COMPILED_END_PATTERNS = [(re.compile(p), name) for p, name in END_PATTERNS.items()]
 _COMPILED_REC_TAGS = [(re.compile(p), name) for p, name in REC_TAGS.items()]

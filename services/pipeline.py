@@ -71,6 +71,7 @@ from core.scoring import (  # noqa: F401  (re-exported for backward compatibilit
 # Scale administration state is owned by assessment.ScaleRuntime.  This
 # module only re-exports pure scoring helpers and keeps observation counters.
 from assessment import ScaleAnswerInterpreter, ScaleRuntime
+from conversation.response_builder import ResponseBuilder
 from services.scales import get_scale_manager
 from conversation.contracts import (
     RouterProposal,
@@ -808,8 +809,8 @@ class ConversationPipeline:
                 f"【量表补问 - {scale_name}】\n"
                 f"已答 {info['answered']}/{info['total']} 题，还需问以下题目：\n"
                 f"{questions_text}\n"
-                f"评分标准：{options_text}\n"
-                f"记录规则：以 [SCALE:{scale_name}:Q题号:S分数] 格式嵌入回复末尾。"
+                f"回答范围仅供系统内部解释：{options_text}\n"
+                "请只自然地询问当前列出的第一项，不要输出评分或协议文本。"
             )
         return "\n\n".join(parts)
 
@@ -936,7 +937,9 @@ class ConversationPipeline:
             ]
             spoken = random.choice(_GREETING_REPLIES)
             analysis = "【情绪】平静【状态】开放【策略】破冰回应"
-            full = f"{analysis}|||{spoken}"
+            # Keep the old analysis as a derived audit field, but send/store
+            # only the language that the participant can hear.
+            full = spoken
             result.full_response = full
             result.analysis_text = analysis
             result.spoken_text = spoken
@@ -947,10 +950,10 @@ class ConversationPipeline:
             emit("stream_text", result.clean_spoken)
             emit("finish_streaming", None)
             if self.data:
-                self.data.save_assistant_message(None, full, sample_rate=48000)
+                self.data.save_assistant_message(None, result.clean_spoken, sample_rate=48000)
             if self.llm and hasattr(self.llm, "conversation_history"):
                 self.llm.conversation_history.append({"role": "user", "content": result.user_text})
-                # Only store spoken text in history, not analysis|||spoken
+                # Only store normalized participant-facing text in history.
                 self.llm.conversation_history.append({"role": "assistant", "content": clean_for_display(spoken)})
             if config.use_tts and self.tts and result.tts_text:
                 emit("status", "正在播放...")
@@ -1050,6 +1053,12 @@ class ConversationPipeline:
                 allow_user_relaxation=(decision.reason == "user_relaxation_request"),
             )
 
+        decision_context = self._build_decision_language_context(decision, runtime)
+        if decision_context:
+            system_suffix = "\n".join(
+                part for part in (decision_context, system_suffix) if part
+            )
+
         if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
             hint = self._build_scale_context_hint(
                 runtime.active_scale or decision.scale_name,
@@ -1146,20 +1155,20 @@ class ConversationPipeline:
             if "LLM_NO_FINAL_CONTENT" in str(e):
                 logger.warning(f"[Pipeline] LLM thinking-only, no content, asking retry")
                 result.spoken_text = "不好意思，刚才没组织好语言。[breath]你能再说一遍吗？"
-                result.analysis_text = "【情绪】待确认【状态】需要重试【策略】请求重述"
-                result.full_response = f"{result.analysis_text}|||{result.spoken_text}"
+                result.analysis_text = ""
+                result.full_response = result.spoken_text
                 emit("stream_text", clean_for_display(result.spoken_text))
             else:
                 logger.exception(f"[Pipeline] LLM RuntimeError: {e}")
                 result.spoken_text = "系统出了点小问题。[breath]你能再说一遍吗？"
-                result.analysis_text = "【情绪】待确认【状态】需要重试【策略】系统错误"
-                result.full_response = f"{result.analysis_text}|||{result.spoken_text}"
+                result.analysis_text = ""
+                result.full_response = result.spoken_text
                 emit("stream_text", clean_for_display(result.spoken_text))
         except Exception as e:
             logger.exception(f"[Pipeline] LLM failed: {e}")
             result.spoken_text = "系统出了点小问题。[breath]你能再说一遍吗？"
-            result.analysis_text = "【情绪】待确认【状态】需要重试【策略】系统错误"
-            result.full_response = f"{result.analysis_text}|||{result.spoken_text}"
+            result.analysis_text = ""
+            result.full_response = result.spoken_text
             emit("stream_text", clean_for_display(result.spoken_text))
         emit("finish_streaming", None)
 
@@ -1181,36 +1190,20 @@ class ConversationPipeline:
         emit("clean_last_ai", result.clean_spoken)
         result.tts_text = clean_for_tts(result.spoken_text)
 
-        # --- Tag detection ---
-        raw_end_type = detect_tag(result.full_response, END_PATTERNS)
-        # Legacy tags are response metadata only.  They never create or
-        # replace the authoritative decision formed before the 72B call.
-        if raw_end_type and result.turn_decision and result.turn_decision.action is not TurnAction.END_SESSION:
-            logger.warning(
-                f"[EndDebug] ignored non-authoritative END tag {raw_end_type!r} "
-                f"for decision={result.turn_decision.action.value}"
-            )
-
-        # A relaxation event is emitted only when the Decision authorized it;
-        # an LLM REC tag by itself is ignored.
-        llm_rec = detect_tag(result.full_response, REC_TAGS)
+        # Model tags are no longer parsed on the live path.  A legacy tag is
+        # cleaned defensively by ResponseBuilder, but it cannot affect an
+        # already-formed decision or any mutable runtime owner.
         if result.turn_decision and result.turn_decision.action is TurnAction.RECOMMEND_RELAXATION:
             result.relaxation_rec = _normalize_relaxation_type(
                 result.turn_decision.intervention_type
             )
             logger.warning(f"[RelaxDebug] relaxation authorized by TurnDecision: {result.relaxation_rec}")
-        elif llm_rec:
-            logger.warning(
-                f"[RelaxDebug] ignored non-authoritative REC tag {llm_rec!r} "
-                f"for decision={result.turn_decision.action.value if result.turn_decision else 'none'}"
-            )
         # Preserve this turn's recommendation until the asynchronous intent
         # classification has completed below.
         game_recommended = bool(
             result.turn_decision
             and result.turn_decision.action is TurnAction.RECOMMEND_GAME
         )
-        parsed_scale_tags = parse_scale_tags(result.full_response)
         runtime = self.scale_runtime.snapshot()
         allowed_scale = (
             runtime.active_scale
@@ -1221,55 +1214,35 @@ class ConversationPipeline:
             else None
         )
         result.scale_tags = {}
-        if parsed_scale_tags:
-            logger.warning(
-                f"[ScaleDebug] SCALE tags are candidates only: {parsed_scale_tags}"
-            )
         accepted_update = None
         accepted_item = None
         accepted_score = None
         if allowed_scale and runtime.current_item:
             current_item = runtime.current_item
-            tag_score = parsed_scale_tags.get(allowed_scale, {}).get(current_item)
-            if tag_score is not None and self._scale_manager.validate_answer(
-                allowed_scale, item=current_item, score=tag_score
-            ):
+            interpretation = self.answer_interpreter.interpret(
+                result.user_text,
+                scale_name=allowed_scale,
+                item=current_item,
+            )
+            if interpretation.status == "accepted" and interpretation.score is not None:
                 accepted_update = self.scale_runtime.accept_answer(
                     scale_name=allowed_scale,
                     item=current_item,
-                    score=tag_score,
+                    score=interpretation.score,
                 )
                 if accepted_update.accepted:
-                    accepted_item, accepted_score = current_item, tag_score
-                    result.scale_tags = {allowed_scale: {current_item: tag_score}}
-            elif parsed_scale_tags.get(allowed_scale):
-                logger.warning(
-                    f"[ScaleDebug] ignored tag not matching current Runtime item: "
-                    f"{parsed_scale_tags.get(allowed_scale)}"
-                )
-
-            if accepted_update is None or not accepted_update.accepted:
-                interpretation = self.answer_interpreter.interpret(
-                    result.user_text,
-                    scale_name=allowed_scale,
-                    item=current_item,
-                )
-                if interpretation.status == "accepted" and interpretation.score is not None:
-                    accepted_update = self.scale_runtime.accept_answer(
-                        scale_name=allowed_scale,
-                        item=current_item,
-                        score=interpretation.score,
-                    )
-                    if accepted_update.accepted:
-                        accepted_item, accepted_score = current_item, interpretation.score
-                        result.scale_tags = {
-                            allowed_scale: {current_item: interpretation.score}
-                        }
-                elif interpretation.status == "ambiguous":
+                    accepted_item, accepted_score = current_item, interpretation.score
+                    # ``scale_tags`` is retained as a compatibility-shaped
+                    # reporting projection.  The value came from the pure
+                    # interpreter and Runtime, never from model output.
+                    result.scale_tags = {
+                        allowed_scale: {current_item: interpretation.score}
+                    }
+            elif interpretation.status == "ambiguous":
+                self.scale_runtime.request_clarification()
+            elif interpretation.status in {"pause", "refusal", "unmatched"}:
+                if not self.scale_runtime.snapshot().paused:
                     self.scale_runtime.request_clarification()
-                elif interpretation.status in {"pause", "refusal", "unmatched"}:
-                    if not self.scale_runtime.snapshot().paused:
-                        self.scale_runtime.request_clarification()
 
         # Runtime is the only transition owner for answer acceptance and
         # progression.  Clarification text is derived from the unchanged
@@ -1353,17 +1326,16 @@ class ConversationPipeline:
 
         # --- Save assistant message ---
         if self.data:
-            self.data.save_assistant_message(None, result.full_response, sample_rate=48000)
+            self.data.save_assistant_message(None, result.clean_spoken, sample_rate=48000)
 
         # --- TTS + Agent post-processing (concurrent) ---
         # TTS doesn't need agent results. Run both in parallel to save 1-3s.
-        # Skip normal response TTS when END tag is detected — the session-end
-        # flow will generate and play its own farewell TTS. Playing both causes
-        # overlapping audio and stuttering.
+        # Skip normal response TTS when the authoritative decision ends the
+        # session; the session-end flow owns the farewell audio.
         tts_future = None
         skip_normal_tts = bool(result.end_type)
         if skip_normal_tts:
-            logger.info("[TTS] Skipping normal response TTS — END tag detected, session-end TTS will handle farewell.")
+            logger.info("[TTS] Skipping normal response TTS — authoritative session-end flow handles farewell.")
         if config.use_tts and self.tts and result.tts_text and not skip_normal_tts:
             emit("status", "正在播放...")
             tts_future = self._executor.submit(self._play_tts, result.tts_text)
@@ -1498,18 +1470,12 @@ class ConversationPipeline:
 像正常聊天一样自然地问，不要像在做问卷。
 """
         else:
-            # Already asked — the LLM should continue the conversation naturally.
-            # Background scoring will happen via [SCALE:] tags.
-            # Hint: if user's response clearly maps to a score, output the tag.
-            options_text = " / ".join(
-                f"{score}-{label}" for score, label in scale_def.options
-            )
+            # The answer is interpreted outside the language model.  The model
+            # only keeps the current natural question in conversational view.
             return f"""
-【后台提示】来访者正在回应关于"{natural_q}"的了解。
-如果回答足够判断频率/程度，在回复末尾输出 [SCALE:{scale_name}:Q{q_num}:S分数]。
-评分标准：{options_text}
-如果回答模糊，不要猜分数，自然追问一句。
-口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来"。
+【当前表达任务】来访者正在回应：{natural_q}
+请先承接这句话；如果频率或程度仍不清楚，只温和追问这一点。
+不要自行打分、推进下一项或输出内部协议文本。
 """
 
     def _make_scale_clarify_reply(self, scale_name: str, item: int, user_text: str) -> str:
@@ -1698,6 +1664,40 @@ class ConversationPipeline:
             lines.append(f"{role}: {content}")
         return "\n".join(lines)
 
+    def _build_decision_language_context(
+        self, decision: TurnDecision, runtime: Any
+    ) -> str:
+        """Describe an approved action for language realization only."""
+        action_text = {
+            TurnAction.CHAT: "自然回应来访者",
+            TurnAction.START_SCALE: "自然提出系统选定的当前了解问题",
+            TurnAction.CONTINUE_SCALE: "自然承接并继续系统选定的当前了解问题",
+            TurnAction.PAUSE_SCALE: "温和确认暂停，不继续追问",
+            TurnAction.RECOMMEND_RELAXATION: "自然表达已经批准的放松安排",
+            TurnAction.RECOMMEND_GAME: "自然表达已经批准的游戏安排",
+            TurnAction.END_SESSION: "按照会话流程自然完成结束表达",
+        }.get(decision.action, "自然回应来访者")
+        lines = [
+            "【本轮已确定的表达任务】",
+            f"系统已经确定：{action_text}。不要重新选择其他任务，也不要自行推进状态。",
+        ]
+        if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
+            scale_name = runtime.active_scale or decision.scale_name or "当前了解内容"
+            item = runtime.current_item
+            question = NATURAL_SCALE_QUESTIONS.get((scale_name, item or 1), "")
+            if question:
+                lines.append(f"当前需要自然表达的问题是：{question}")
+            lines.append("只围绕这个问题说话；回答的解释和进度由系统处理。")
+        elif decision.action is TurnAction.RECOMMEND_RELAXATION:
+            lines.append("只说明已经批准的放松方式，邀请来访者自愿尝试，不要追加其他建议。")
+        elif decision.action is TurnAction.RECOMMEND_GAME:
+            lines.append("只说明已经批准的游戏安排，等待来访者回应，不要自行开始其他活动。")
+        elif decision.action is TurnAction.PAUSE_SCALE:
+            lines.append("尊重来访者的暂停请求，保持简短，不要求回答当前问题。")
+        elif decision.action is TurnAction.END_SESSION:
+            lines.append("保持温和简短，不补问量表，不强行安排其他活动。")
+        return "\n".join(lines)
+
     def _build_system_suffix(
         self,
         text: str,
@@ -1706,9 +1706,7 @@ class ConversationPipeline:
         round_count: int | None = None,
         allow_user_relaxation: bool = False,
     ) -> str:
-        """Build system suffix with round warning + RAG context."""
-        from config import MIN_ROUNDS_FOR_RELAXATION
-
+        """Build decision-approved language context plus optional RAG text."""
         system_suffix = ""
         current_rounds = (
             int(round_count)
@@ -1716,13 +1714,9 @@ class ConversationPipeline:
             else (self.report.get_round_count() if self.report else 0)
         )
 
-        if current_rounds < MIN_ROUNDS_FOR_RELAXATION and not allow_user_relaxation:
-            system_suffix = (
-                f"【系统警告】当前仅第{current_rounds}轮对话"
-                f"（少于{MIN_ROUNDS_FOR_RELAXATION}轮）。"
-                f"无论用户说了什么，你绝对禁止推荐放松训练！"
-                f"继续通过对话建立关系。"
-            )
+        # Eligibility and lifecycle rules belong to TurnPolicy/SessionEngine;
+        # the language model receives no round-count policy warning.
+        del current_rounds, allow_user_relaxation
 
         if needs_rag and self.rag:
             # Use multi-turn context for RAG retrieval
@@ -1741,7 +1735,12 @@ class ConversationPipeline:
                         else:
                             cleaned_recent.append(r)
                     rag_text = "\n".join(cleaned_recent + [text])
-            rag_suffix = self.rag.get_system_suffix(rag_text)
+            try:
+                rag_suffix = self.rag.get_system_suffix(rag_text, enabled=True)
+            except TypeError:
+                # Legacy test doubles/adapters still expose the one-argument
+                # surface; the caller has already enforced the decision gate.
+                rag_suffix = self.rag.get_system_suffix(rag_text)
             # Truncate RAG — tighter when active scale or positive_pending
             runtime = self.scale_runtime.snapshot()
             _rag_active = runtime.active_scale or (
@@ -1764,63 +1763,24 @@ class ConversationPipeline:
 
     def _stream_llm(self, text: str, system_suffix: Optional[str],
                     emit: Callable[[str, Any], None]):
+        """Stream provider text and normalize it without business parsing.
+
+        ``ResponseBuilder`` keeps a narrow adapter for historical tagged
+        transcripts, but the live pipeline treats the generated value as
+        language only.  No model text can become an action, score, or command.
+        Returns ``(generated_text, legacy_analysis, tts_ready_text)``.
         """
-        Stream LLM response, split on |||, filter tags, emit stream_text.
-        Returns (full_response, analysis_text, spoken_text).
-        """
-        full_response = ""
-        analysis_text = ""
-        spoken_text = ""
-
-        llm_gen = self.llm.chat(text, system_suffix=system_suffix)
-
-        for chunk in llm_gen:
-            full_response += chunk
-
-        if '|||' in full_response:
-            parts = full_response.split('|||', 1)
-            left = parts[0].strip()
-            right = parts[1].strip()
-
-            # Detect reversed format: if left side has no analysis tags but right does,
-            # the LLM output is spoken|||analysis instead of analysis|||spoken
-            _analysis_tags = ['【情绪识别】', '【状态评估】', '【变革话语】', '【策略选择】']
-            left_has_analysis = any(t in left for t in _analysis_tags)
-            right_has_analysis = any(t in right for t in _analysis_tags)
-
-            if not left_has_analysis and right_has_analysis:
-                # Reversed format: spoken on left, analysis on right
-                analysis_text = right
-                spoken_text = left
-            else:
-                # Normal format: analysis on left, spoken on right
-                analysis_text = left
-                spoken_text = right
-
-            # If LLM duplicated output, take only the first spoken segment
-            if '|||' in spoken_text:
-                spoken_text = spoken_text.split('|||', 1)[0].strip()
-            # Also truncate if duplicate analysis tags appear in spoken text
-            for _tag in _analysis_tags:
-                if _tag in spoken_text:
-                    spoken_text = spoken_text.split(_tag)[0].strip()
-        else:
-            spoken_text = full_response.strip()
-
-        # Final safety: if spoken_text is still empty or only contains analysis
-        # tags that will be stripped by clean_for_display, use a safe fallback.
-        if not clean_for_display(spoken_text).strip():
+        generated_text = "".join(
+            chunk for chunk in self.llm.chat(text, system_suffix=system_suffix)
+        )
+        built = ResponseBuilder.build(generated_text)
+        if not built.tts_text.strip():
             logger.warning(
-                f"spoken_text empty after final cleaning. full_response_head={full_response[:300]!r}"
+                f"generated text empty after normalization; head={generated_text[:300]!r}"
             )
-            spoken_text = make_safe_fallback_reply(text)
+            generated_text = make_safe_fallback_reply(text)
+            built = ResponseBuilder.build(generated_text)
 
-        # The response protocol permits the model to produce spoken|||analysis
-        # in reverse. Buffer a tagged response until that orientation is known;
-        # otherwise private analysis could briefly appear in the UI before the
-        # final cleanup pass corrects it.
-        display_text = clean_for_display(spoken_text)
-        if display_text:
-            emit("stream_text", display_text)
-
-        return full_response, analysis_text, spoken_text
+        if built.spoken_text:
+            emit("stream_text", built.spoken_text)
+        return generated_text, built.analysis_text, built.tts_text

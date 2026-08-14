@@ -1,7 +1,6 @@
 # LLM Service - Ollama Integration
 
 import os
-import re
 import sys
 import time
 from typing import Generator, List, Dict, Any, Optional
@@ -262,43 +261,12 @@ class LLMService:
 
     @staticmethod
     def _history_visible_text(text: str) -> str:
-        """Strip analysis, tags, and ||| separator — only keep spoken content for history.
-
-        Mirrors the reversal handling used in pipeline._stream_llm: the spoken
-        half is the side WITHOUT internal strategy markers. If the model emitted
-        the reversed "spoken|||analysis" format, we keep the left side, not the
-        right. We also strip any leaked internal strategy terms so they never
-        enter the conversation history fed back to the model next turn.
-        """
+        """Store the normalized spoken projection in new conversation history."""
         if not text:
             return ""
-        if "|||" in text:
-            parts = text.split("|||")
-            # Pick the half that does NOT contain internal strategy leakage;
-            # the analysis half is the one carrying 内部策略 markers / bracket
-            # tags. Fall back to the right side only if detection is ambiguous.
-            left, right = parts[0], parts[-1]
-            _analysis_markers = ("【", "[SCALE:", "[REC_", "[END_", "高防御", "量表", "问卷")
-            left_is_analysis = any(m in left for m in _analysis_markers)
-            right_is_analysis = any(m in right for m in _analysis_markers)
-            if left_is_analysis and not right_is_analysis:
-                text = right          # 正常格式 分析|||口语
-            elif right_is_analysis and not left_is_analysis:
-                text = left           # 反转格式 口语|||分析
-            else:
-                # 两侧都无法确定（ambiguous）：默认取右侧（常规格式）
-                text = right
-        # Strip control tags and leaked internal strategy terms
-        text = re.sub(r'<think>[\s\S]*?</think>', '', text)
-        text = re.sub(r'\[SCALE:[^\]]+\]', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\[REC_[A-Z_]+\]', '', text)
-        text = re.sub(r'\[END_[A-Z_]+\]', '', text)
-        text = re.sub(r'【.*?】', '', text)
-        text = re.sub(r'\[(?:breath|laughter)\]', '', text)
-        from core.tags import _FORBIDDEN_INTERNAL_TERMS
-        for term in _FORBIDDEN_INTERNAL_TERMS:
-            text = text.replace(term, "")
-        return text.strip()
+        from core.tags import clean_for_display
+
+        return clean_for_display(text).strip()
 
     def _fallback_reply(self, user_message: str) -> str:
         """Safe spoken fallback when Ollama returns empty output."""

@@ -44,10 +44,10 @@ class RAGService:
     RAG (Retrieval-Augmented Generation) Service for psychology counseling.
 
     Features:
-    - Intent routing with jieba segmentation
+    - Curated-core retrieval gated by the caller's TurnDecision
     - Keyword + content hybrid search
     - Synonym expansion for better recall
-    - Lazy loading for large datasets
+    - No live second-model routing or converted-corpus loader
     """
 
     # Expanded synonym map: colloquial -> professional terms
@@ -254,21 +254,16 @@ class RAGService:
 
     # Core knowledge files (loaded immediately)
     CORE_FILES = ["knowledge.json"]
-    # Large dataset files (loaded lazily on first search)
-    LAZY_FILES = [
-        "cpsycounr_converted.json",
-        "psyqa_converted.json",
-        "emollm_single_turn_1.json",
-        "emollm_single_turn_2.json",
-        "emollm_multi_turn.json",
-    ]
+    # Converted corpora are offline curation/evaluation inputs, never live
+    # production retrieval sources.  Keep the public attribute for adapters
+    # and tests, but make the runtime allowlist explicit and empty.
+    LAZY_FILES: list[str] = []
 
     def __init__(self, knowledge_base_path: str = None):
         self.knowledge_base_path = Path(knowledge_base_path) if knowledge_base_path else self._get_default_kb_path()
         self.knowledge_base: List[Dict[str, str]] = []
         self._core_count = 0  # Track how many entries are from core knowledge
         self._lazy_loaded = False
-        self._lazy_files_loaded: Set[str] = set()  # Track which lazy files are loaded
         self._jieba = None
         self._query_cache: OrderedDict[str, Set[str]] = OrderedDict()  # Cache expanded queries
         self._search_cache: OrderedDict[str, List[Dict]] = OrderedDict()  # Cache search results
@@ -318,45 +313,16 @@ class RAGService:
         self._core_count = len(self.knowledge_base)
         logger.info(f"RAG: Core knowledge base size: {self._core_count}")
 
-    def _load_lazy_file(self, filename: str) -> int:
-        """Load a single lazy file. Returns number of entries added."""
-        if filename in self._lazy_files_loaded:
-            return 0
-
-        file_path = self.knowledge_base_path / filename
-        if not file_path.exists():
-            self._lazy_files_loaded.add(filename)
-            return 0
-
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                valid_entries = []
-                for entry in data:
-                    if isinstance(entry, dict) and 'content' in entry:
-                        valid_entries.append({
-                            "id": entry.get('id', f"entry_{len(self.knowledge_base)+1}"),
-                            "keywords": entry.get('keywords', []),
-                            "title": entry.get('title', ''),
-                            "content": entry['content']
-                        })
-                self.knowledge_base.extend(valid_entries)
-                self._lazy_files_loaded.add(filename)
-                logger.info(f"RAG: Lazy-loaded {len(valid_entries)} entries from {filename}")
-                return len(valid_entries)
-        except Exception as e:
-            logger.warning(f"RAG: Failed to lazy-load {filename}: {e}")
-            self._lazy_files_loaded.add(filename)
-        return 0
 
     def _ensure_lazy_loaded(self):
-        """Load all remaining lazy files."""
+        """Retained no-op hook for callers that used the old warmup API.
+
+        Production retrieval has an explicit curated-core allowlist, so there
+        are no runtime corpora to load here.
+        """
         if self._lazy_loaded:
             return
         self._lazy_loaded = True
-        for filename in self.LAZY_FILES:
-            self._load_lazy_file(filename)
 
     def _create_default_knowledge_base(self):
         """Create default knowledge base with psychology intervention techniques.
@@ -429,7 +395,7 @@ class RAGService:
             logger.warning(f"RAG: Failed to save knowledge base: {e}")
 
     def warmup(self):
-        """Warmup the RAG service (preload all knowledge including lazy files)."""
+        """Warm up the curated production knowledge index."""
         self._ensure_lazy_loaded()
         logger.info(f"RAG Service warmed up: {len(self.knowledge_base)} entries loaded")
         return True
@@ -467,57 +433,6 @@ class RAGService:
         self._query_cache[text] = expanded
         return expanded
 
-    # Common emotional expressions for intent routing (broader than SYNONYM_MAP)
-    _EMOTIONAL_PHRASES = [
-        "心情不好", "心情差", "心情糟糕", "不开心", "高兴不起来",
-        "不舒服", "不痛快", "不对劲", "不好受", "不高兴",
-        "心里不舒服", "心里难受", "心里不痛快", "心里堵得慌",
-        "浑身不自在", "浑身没劲", "浑身难受", "浑身无力",
-        "什么都不想干", "什么都不想做", "啥都不想干", "啥都不想做",
-        "干啥都没意思", "做啥都没意思", "活着没意思", "活着没劲",
-        "不想活", "想死", "想不开", "活够了", "死了算了",
-        "想家", "想回去", "想回家", "想爸妈", "想孩子",
-        "睡不着", "睡不好", "睡不踏实", "失眠", "做噩梦",
-        "心里慌", "心慌", "喘不过气", "胸闷",
-        "脾气大", "想发火", "忍不住", "控制不住",
-        "头疼", "胃疼", "肚子疼", "浑身疼",
-        "压力大", "压力好大", "太累了", "好累",
-        "没人理", "没人关心", "孤独", "一个人",
-        "被人欺负", "有人欺负", "受欺负", "被欺负",
-        "瘾来了", "犯瘾", "想吸毒", "忍不住想",
-    ]
-
-    def _intent_routing(self, text: str) -> bool:
-        """
-        Determine if knowledge base search is needed.
-        Uses synonym map + emotional phrases + jieba for broad coverage.
-        Returns True if search should be performed.
-        """
-        # 1. Check synonym map keys (covers colloquial expressions)
-        for colloquial in self.SYNONYM_MAP.keys():
-            if colloquial in text:
-                return True
-
-        # 2. Check common emotional phrases (substring match)
-        for phrase in self._EMOTIONAL_PHRASES:
-            if phrase in text:
-                return True
-
-        # 3. Check jieba segments against psychology terms
-        segments = self._segment_text(text)
-        psychology_indicators = {
-            "焦虑", "抑郁", "失眠", "幻觉", "戒断", "复吸", "渴求", "自杀",
-            "自残", "恐惧", "愤怒", "冲动", "解离", "躯体化", "创伤",
-            "放松", "冥想", "呼吸", "量表", "评估", "家庭", "孤独",
-            "压力", "紧张", "害怕", "担心", "心慌", "头疼", "难受",
-            "痛苦", "绝望", "无助", "烦躁", "生气", "愤怒", "心情",
-            "欺负", "委屈", "噩梦", "累", "烦", "闷", "慌",
-        }
-        for seg in segments:
-            if seg in psychology_indicators:
-                return True
-
-        return False
 
     def _score_entry(self, entry: Dict, expanded_keywords: Set[str], query: str) -> float:
         """Score a single knowledge entry against the expanded query.
@@ -530,11 +445,11 @@ class RAGService:
 
         # Domain boost: knowledge.json entries are highest quality
         if not entry_id or entry_id.startswith("entry_"):
-            domain_boost = 3.0  # knowledge.json (no id or default id)
-        elif entry_id.startswith("cpsycounr"):
-            domain_boost = 0.3  # case studies
+            domain_boost = 3.0  # curated knowledge.json entries
         else:
-            domain_boost = 0.0  # psyqa, emollm - lower priority
+            # Non-core records are accepted by the pure scorer for historical
+            # report/evaluation fixtures, but are never loaded by production.
+            domain_boost = 0.0
 
         has_keyword_hit = False
         has_title_hit = False
@@ -605,14 +520,10 @@ class RAGService:
         return results
 
     def _simple_search(self, query: str, top_k: int = 3) -> List[Dict[str, str]]:
-        """Keyword-based search with synonym expansion and content matching.
-        Core knowledge is preferred; lazy files only supplement when core has no strong match."""
+        """Search the curated production knowledge with deterministic ranking."""
         query_lower = query.lower()
 
-        # Check search cache. The cache key includes the lazy-loaded flag so
-        # that an early hit (before lazy files were loaded) doesn't shadow a
-        # later, richer result set.
-        cache_key = f"{query_lower}:{top_k}:{int(self._lazy_loaded)}"
+        cache_key = f"{query_lower}:{top_k}"
         if cache_key in self._search_cache:
             self._search_cache.move_to_end(cache_key)
             return self._search_cache[cache_key]
@@ -622,56 +533,17 @@ class RAGService:
         if not expanded_keywords:
             expanded_keywords = {query_lower}
 
-        # Phase 1: Search core knowledge (knowledge.json entries)
+        # Production RAG searches only the entries loaded from knowledge.json.
         core_results = self._search_entries(
             self.knowledge_base[:self._core_count], expanded_keywords, query_lower
         )
-
-        # If core has good matches (score >= 3.0 = at least one keyword hit), use those
-        if core_results and core_results[0]["score"] >= 3.0:
-            result = core_results[:top_k]
-            if len(self._search_cache) >= self._MAX_CACHE_SIZE:
-                self._search_cache.popitem(last=False)
-            self._search_cache[cache_key] = result
-            return result
-
-        # Phase 2: Search lazy-loaded files to supplement
-        for filename in self.LAZY_FILES:
-            self._load_lazy_file(filename)
-
-        extended_results = []
-        seen_titles = set()
-        for entry in self.knowledge_base[self._core_count:]:
-            entry_title = entry.get("title", "")
-            if entry_title in seen_titles:
-                continue
-            seen_titles.add(entry_title)
-            score = self._score_entry(entry, expanded_keywords, query_lower)
-            if score > 3.0:  # Require at least a keyword-level hit
-                extended_results.append({
-                    "title": entry.get("title", ""),
-                    "content": entry.get("content", ""),
-                    "score": score,
-                    "id": entry.get("id", "")
-                })
-        extended_results.sort(key=lambda x: x["score"], reverse=True)
-
-        # Merge: prefer core, supplement with extended
-        merged = list(core_results[:top_k])  # Include all core results even if low score
-        for ext in extended_results:
-            if len(merged) >= top_k:
-                break
-            # Don't duplicate if core already has same title
-            if not any(m["title"] == ext["title"] for m in merged):
-                merged.append(ext)
-
-        result = merged[:top_k]
+        result = core_results[:top_k]
         if len(self._search_cache) >= self._MAX_CACHE_SIZE:
             self._search_cache.popitem(last=False)
         self._search_cache[cache_key] = result
         return result
 
-    def get_context(self, user_text: str) -> Optional[str]:
+    def get_context(self, user_text: str, *, enabled: bool = False) -> Optional[str]:
         """
         Core method: get reference knowledge for the user query.
 
@@ -681,7 +553,10 @@ class RAGService:
         Returns:
             Context string to inject into LLM prompt, or None if not needed
         """
-        # Debug trigger
+        if not enabled:
+            return None
+
+        # Debug trigger remains deterministic and uses only the curated core.
         if "知识库测试" in user_text:
             results = self._simple_search("失眠 焦虑 戒断", top_k=3)
             logger.warning(f"[RagDebug] DEBUG trigger '知识库测试' results="
@@ -690,28 +565,9 @@ class RAGService:
                 return "\n\n".join(f"【{r['title']}】\n{r['content']}" for r in results)
             return None
 
-        # Fast rule-based check first, then 3B agent for ambiguous cases
-        if self._intent_routing(user_text):
-            pass  # Rule-based matched, proceed to search
-        else:
-            # Pre-filter: skip 3B call for trivial inputs
-            stripped = user_text.strip()
-            if len(stripped) < 5:
-                return None
-            # Common casual responses that don't need RAG
-            _CASUAL = {"嗯", "好的", "是的", "对", "不是", "没有", "好吧", "知道了", "明白", "哦", "嗯嗯", "哈哈", "呵呵"}
-            if stripped in _CASUAL:
-                return None
-            # Rule-based didn't match — try 3B agent for implicit emotions
-            try:
-                from services.agent_service import get_agent_service
-                agent = get_agent_service()
-                if not agent.classify_rag_intent(user_text):
-                    return None
-            except Exception as e:
-                logger.warning(f"Agent RAG routing failed: {e}")
-                return None
-
+        # ``enabled`` is supplied by TurnDecision.needs_rag.  Once it is true,
+        # retrieval is deterministic; no keyword gate or second model may
+        # override the decision.
         results = self._simple_search(user_text, top_k=3)
 
         logger.warning(f"[RagDebug] query={user_text!r} results="
@@ -727,7 +583,7 @@ class RAGService:
         context = "\n\n".join(context_parts)
         return context
 
-    def get_system_suffix(self, user_text: str) -> Optional[str]:
+    def get_system_suffix(self, user_text: str, *, enabled: bool = False) -> Optional[str]:
         """
         Get formatted system suffix with RAG context.
 
@@ -739,24 +595,17 @@ class RAGService:
         Returns:
             Formatted system suffix string, or None if not needed
         """
-        rag_context = self.get_context(user_text)
+        rag_context = self.get_context(user_text, enabled=enabled)
 
         if not rag_context:
             return None
 
-        rag_instruction = f"""
-
-【后台专家知识库提示】
-刚刚检索到以下与来访者问题相关的临床心理学知识：
-{rag_context}
-
-【强制使用要求】
-1. 必须在|||左侧【策略选择】中写出"知识库依据：检索到的标题/技术"。
-2. |||右侧口语回复必须把知识库内容转化为一个具体动作、具体观察点或具体追问方向。
-3. 禁止只做普通共情而不使用知识库。
-4. 禁止照本宣科，禁止使用"心理学认为""专业建议"等专家化表达。
-"""
-        return rag_instruction
+        return (
+            "【相关背景】\n"
+            "以下内容仅供本轮已经确定的表达任务参考；请用自然中文转述，"
+            "不要新增任务、诊断或强制建议。\n"
+            f"{rag_context}"
+        )
 
 
 # Singleton instance

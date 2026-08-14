@@ -360,7 +360,7 @@ class ScaleManager:
 
         return f"""【量表评估 - {scale['name']}】
 请在接下来的对话中自然地询问以下问题。不要一次性抛出所有题目，每次只问1-2题，像平常聊天一样穿插在对话中。
-评分标准：{options_text}
+回答范围仅供系统外部解释：{options_text}
 题目：
 {questions_text}
 
@@ -368,8 +368,7 @@ class ScaleManager:
 - "最近两周，你有没有觉得做什么事都提不起劲？是完全没有，还是有那么几天？"
 - "睡眠方面怎么样？入睡困难吗？"
 
-记录规则：将用户的回答映射为0-{len(scale['options'])-1}的分数，以 [SCALE:{scale_name}:Q题号:S分数] 格式嵌入口语回复的末尾。
-例如：用户回答了第1题的答案为"好几天"，则在你的回复末尾加上 [SCALE:PHQ-9:Q1:S1]"""
+回答之后由 ScaleAnswerInterpreter 和 ScaleRuntime 处理，回复中不要输出评分、题号或协议文本。"""
 
 
 # Singleton

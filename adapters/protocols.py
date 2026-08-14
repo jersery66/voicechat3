@@ -67,7 +67,7 @@ class AgentBackend(Protocol):
 class RAGBackend(Protocol):
     """Knowledge-base retrieval producing system-prompt suffixes."""
 
-    def get_system_suffix(self, user_text: str) -> Optional[str]: ...
+    def get_system_suffix(self, user_text: str, *, enabled: bool = False) -> Optional[str]: ...
 
 
 @runtime_checkable
