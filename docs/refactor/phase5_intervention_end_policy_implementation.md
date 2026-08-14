@@ -7,13 +7,14 @@
   (`refactor: unify relaxation game end and timeout routing`).
 - Phase 5 design baseline: `da708a4068520de27bee086d14724570810b6ef0`.
 - Branch: `codex/a100-vllm-safety`.
-- Remote push/HEAD verification: pending while the current environment cannot
-  connect to GitHub; no remote result is claimed until a push succeeds.
+- Implementation push remote HEAD: `b9fcb4c17ed1bb2ccf316c94c447e631d6e2f844`.
+- Final documentation close-out is the follow-up commit containing this
+  record; its own remote HEAD naturally supersedes the implementation-push
+  HEAD and is verified separately after it is pushed.
 
 This record is intentionally separate from the production implementation
-commit. It records the verified local result and will be finalized after the
-implementation push. The Phase 5 specification and inventory remain the
-authoritative design documents.
+commit. The Phase 5 specification and inventory remain the authoritative
+design documents.
 
 ## Scope implemented
 
@@ -119,11 +120,11 @@ RouterProposal -> TurnPolicy -> exactly one TurnDecision
 ## Git result
 
 - Local production commit: `95c8bb42134e9a7ff0eaa7a2d1fa6a812eb49fb8`.
-- Implementation push and remote HEAD: **pending GitHub connectivity** at the
-  time this record was created; finalize this field only after successful
-  `git push` and `git fetch` verification.
-- The final working-tree status must be clean after this record is committed;
-  no unrelated files are to be staged.
+- Implementation push remote HEAD verified: `b9fcb4c17ed1bb2ccf316c94c447e631d6e2f844`.
+- Verification after push: local HEAD and `origin/codex/a100-vllm-safety`
+  matched, `ahead/behind = 0/0`, and `git status --short` was empty.
+- The final working-tree status is clean after this record is committed; no
+  unrelated files were staged.
 
 ## Phase boundary
 
