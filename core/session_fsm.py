@@ -4,16 +4,12 @@
 # The only adaptations for the core/ boundary:
 #   - uses stdlib logging directly (services.logger is a thin wrapper over it,
 #     so log records are identical once setup_logging() configures the root)
-#   - EndType is imported from core.types instead of a lazy services import
-#     (no circular dependency is possible: core.types has no imports)
 # services/session_orchestrator.py re-exports every name for compatibility.
 
 import logging
 from enum import Enum, auto
 from typing import Optional
 from dataclasses import dataclass, field
-
-from core.types import EndType
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +31,7 @@ class SessionContext:
     state: SessionState = SessionState.IDLE
     session_emotions: list = field(default_factory=list)
     current_relaxation_type: Optional[str] = None
-    has_forced_relaxation_rec: bool = False
     post_relaxation_timed_out: bool = False
-    relaxation_used: bool = False  # set when the pipeline already ran a relaxation this session
 
 
 class SessionOrchestrator:
@@ -105,38 +99,15 @@ class SessionOrchestrator:
         )
 
     def evaluate_session_end(self, end_type, relaxation_tag=None, relaxation_used: bool = False):
+        """Transition an already-approved end request to report generation.
+
+        ``TurnPolicy`` owns intervention eligibility.  This compatibility
+        facade therefore ignores legacy relaxation arguments and only applies
+        the lifecycle transition for callers that still use the old method.
         """
-        Decide what to do when session end is detected.
-
-        Args:
-            relaxation_used: whether the pipeline already ran a relaxation this
-                session (its own ``relaxation_used`` flag). When True, the
-                forced-relaxation intercept is skipped so the "at most once per
-                session" rule holds even when the relaxation was not driven
-                through the FSM's ``current_relaxation_type``.
-
-        Returns:
-            (action, data) where action is:
-            - "force_relaxation": intercept end, recommend relaxation first
-            - "generate_reports": proceed to report generation
-        """
-        effective_relaxation_used = relaxation_used or self.ctx.relaxation_used
-        should_force = (
-            end_type not in (EndType.INVALID, EndType.QUIT)
-            and not self.ctx.current_relaxation_type
-            and not self.ctx.has_forced_relaxation_rec
-            and not effective_relaxation_used
-        )
-
-        if should_force:
-            self.ctx.has_forced_relaxation_rec = True
-            self.transition_to(SessionState.RELAXATION_RECOMMENDED)
-            return ("force_relaxation", {
-                "relaxation_tag": relaxation_tag or "呼吸"
-            })
-        else:
-            self.transition_to(SessionState.SESSION_ENDING)
-            return ("generate_reports", {})
+        del end_type, relaxation_tag, relaxation_used
+        self.transition_to(SessionState.SESSION_ENDING)
+        return ("generate_reports", {})
 
     def reset(self):
         """Reset for new session."""

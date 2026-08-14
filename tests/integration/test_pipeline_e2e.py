@@ -234,7 +234,7 @@ class TestCumulativeSymptomTrigger:
 
 
 class TestAgentRecommendationNormalization:
-    def test_agent_game_recommendation_survives_parallel_intent_classification(self, ctx):
+    def test_explicit_game_request_survives_parallel_intent_classification(self, ctx):
         agent = FakeAgent()
         agent.route_script = [{
             "scale_action": "none", "scale": None, "item": None,
@@ -243,11 +243,12 @@ class TestAgentRecommendationNormalization:
         }]
         p = ctx(agent=agent)
 
-        result, _ = run_turn(p, "有点无聊")
+        result, _ = run_turn(p, "我想玩个游戏")
 
         assert result.intent == "entertainment"
+        assert result.turn_decision.action.value == "recommend_game"
 
-    def test_agent_relaxation_type_is_normalized_for_ui_and_video(self, ctx):
+    def test_explicit_relaxation_request_is_normalized_for_ui_and_video(self, ctx):
         agent = FakeAgent()
         agent.route_script = [{
             "scale_action": "none", "scale": None, "item": None,
@@ -257,7 +258,7 @@ class TestAgentRecommendationNormalization:
         }]
         p = ctx(agent=agent)
 
-        result, _ = run_turn(p, "我浑身紧绷")
+        result, _ = run_turn(p, "我想做个肌肉放松，我浑身紧绷")
 
         assert result.relaxation_rec == "muscle"
         assert result.scale_active is False

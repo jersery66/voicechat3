@@ -399,12 +399,13 @@ class ConversationPipeline:
             name: 0 for name in self._scale_manager.get_scale_names()
         }
         self.symptom_turns = 0
-        self._post_scale_relaxation_done: bool = False  # True after post-scale relaxation recommended
-        self._relaxation_recommended_this_session: set = set()  # track which types recommended
-        self._game_recommended_this_session: bool = False  # track if game was recommended
-        self._pending_relaxation_after_scale: Optional[str] = None  # hold relaxation until scale done
-        self._relaxation_candidate: Optional[str] = None  # agent-proposed candidate for current turn
-        self._game_candidate: bool = False  # agent-proposed game for current turn
+        # Read-only policy fact surfaced in TurnStateSnapshot.  It is distinct
+        # from ReportService.completed_relaxation: an offer can be rejected or
+        # media can fail after the proactive allowance has been consumed.
+        self._proactive_relaxation_offered: bool = False
+        # A completed scale may provide a typed candidate for a later policy
+        # turn. It is an observation, not an approved intervention.
+        self._proactive_relaxation_candidate: Optional[str] = None
         self._agent_route_cooldown: int = 0         # cooldown after agent route failure
 
         # Shared executor for parallel intent / emotion classification.
@@ -429,12 +430,8 @@ class ConversationPipeline:
         }
         self.symptom_turns = 0
         self._agent_route_cooldown = 0
-        self._post_scale_relaxation_done = False
-        self._relaxation_recommended_this_session.clear()
-        self._game_recommended_this_session = False
-        self._pending_relaxation_after_scale = None
-        self._relaxation_candidate = None
-        self._game_candidate = False
+        self._proactive_relaxation_offered = False
+        self._proactive_relaxation_candidate = None
 
     def _session_state_name(self, configured: str = "CHATTING") -> str:
         """Return the current lifecycle state without owning that state."""
@@ -464,6 +461,7 @@ class ConversationPipeline:
             waiting_for_answer=runtime.waiting_for_answer,
             completed_scales=self._completed_scale_names(),
             relaxation_used=bool(getattr(self.report, "completed_relaxation", None)),
+            proactive_relaxation_offered=self._proactive_relaxation_offered,
             game_active=False,
             time_limit_reached=bool(time_limit_reached),
         )
@@ -538,11 +536,12 @@ class ConversationPipeline:
             if self.scale_runtime.snapshot().active_scale:
                 self.scale_runtime.pause()
         elif decision.action is TurnAction.RECOMMEND_RELAXATION:
-            self._relaxation_candidate = _normalize_relaxation_type(decision.intervention_type)
-            self._pending_relaxation_after_scale = None
-        elif decision.action is TurnAction.RECOMMEND_GAME:
-            self._game_candidate = True
-            self._game_recommended_this_session = True
+            self._proactive_relaxation_candidate = None
+            if decision.reason == "proactive_relaxation_accepted":
+                self._proactive_relaxation_offered = True
+            runtime = self.scale_runtime.snapshot()
+            if runtime.active_scale and not runtime.paused:
+                self.scale_runtime.pause()
         elif decision.action is TurnAction.END_SESSION:
             result.end_type = {
                 "time_limit": "time_limit",
@@ -607,6 +606,25 @@ class ConversationPipeline:
             logger.warning(
                 f"[ScaleDebug] restore rejected: {scale_name} "
                 f"{update.reason or update.status}"
+            )
+            return None
+        return self.get_active_scale_question_text()
+
+    def resume_scale_after_relaxation(self) -> Optional[str]:
+        """Resume a paused Runtime scale and return its actual next question.
+
+        This adapter is intentionally narrow: it resumes only when the
+        Runtime itself reports a paused active scale.  It never accepts a UI
+        item hint or infers a new scale, so the Runtime remains the sole
+        questionnaire state owner.
+        """
+        runtime = self.scale_runtime.snapshot()
+        if not runtime.active_scale or not runtime.paused:
+            return None
+        update = self.scale_runtime.resume()
+        if update.status == "rejected":
+            logger.warning(
+                f"[ScaleDebug] post-relaxation resume rejected: {update.reason or update.status}"
             )
             return None
         return self.get_active_scale_question_text()
@@ -822,7 +840,13 @@ class ConversationPipeline:
         if self.report:
             self.report.increment_round()
             duration_getter = getattr(self.report, "get_session_duration_minutes", None)
-            if callable(duration_getter):
+            if (
+                callable(duration_getter)
+                and not (
+                    result.turn_decision
+                    and result.turn_decision.action is TurnAction.END_SESSION
+                )
+            ):
                 emit("time_limit_check", float(duration_getter()))
 
     def execute(self, config: PipelineConfig,
@@ -887,7 +911,10 @@ class ConversationPipeline:
             proposal = RouterProposal.fallback("greeting_fast_path")
             snapshot = self._build_turn_snapshot(
                 round_count=current_rounds,
-                time_limit_reached=bool(self.report and self.report.is_over_limit()),
+                # Timeout markers are owned by SessionEngine.  The pipeline
+                # must not read ReportService's legacy marker as a second
+                # action policy.
+                time_limit_reached=False,
                 session_state=config.session_state,
             )
             decision = self.turn_policy.decide(
@@ -976,7 +1003,9 @@ class ConversationPipeline:
         if snapshot is None:
             snapshot = self._build_turn_snapshot(
                 round_count=current_rounds,
-                time_limit_reached=bool(self.report and self.report.is_over_limit()),
+                # Timeout markers are owned by SessionEngine; this turn path
+                # only carries ordinary conversation policy inputs.
+                time_limit_reached=False,
                 session_state=config.session_state,
             )
         result.turn_state_snapshot = snapshot
@@ -984,7 +1013,7 @@ class ConversationPipeline:
             result.user_text,
             snapshot,
             deterministic_scale_candidate=deterministic_candidate,
-            legacy_relaxation_candidate=self._pending_relaxation_after_scale,
+            proactive_relaxation_candidate=self._proactive_relaxation_candidate,
         )
         decision = config.turn_decision
         if decision is None:
@@ -1018,6 +1047,7 @@ class ConversationPipeline:
                 result.user_text,
                 needs_rag=decision.needs_rag,
                 round_count=current_rounds,
+                allow_user_relaxation=(decision.reason == "user_relaxation_request"),
             )
 
         if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
@@ -1029,11 +1059,12 @@ class ConversationPipeline:
             if hint:
                 system_suffix += hint
         elif decision.action is TurnAction.RECOMMEND_RELAXATION:
+            relax_type = _normalize_relaxation_type(decision.intervention_type)
             relax_hint = {
                 "breathing": "你可以试试旁边的呼吸放松训练，跟着做几分钟，身体会松一些。",
                 "muscle": "你可以试试旁边的肌肉放松训练，让身体缓一缓。",
                 "meditation": "你可以试试旁边的冥想训练，静一静对睡眠也有帮助。",
-            }.get(self._relaxation_candidate or "breathing", "你可以试试旁边的放松训练。")
+            }.get(relax_type, "你可以试试旁边的放松训练。")
             system_suffix += f"\n【建议放松】{relax_hint} 把这句话自然地融入你的回复里，不要原样照搬。"
         elif decision.action is TurnAction.RECOMMEND_GAME:
             system_suffix += "\n【建议游戏】你可以试试旁边的小游戏，换换心情。把这句话自然地融入你的回复里，不要原样照搬。"
@@ -1164,7 +1195,7 @@ class ConversationPipeline:
         # an LLM REC tag by itself is ignored.
         llm_rec = detect_tag(result.full_response, REC_TAGS)
         if result.turn_decision and result.turn_decision.action is TurnAction.RECOMMEND_RELAXATION:
-            result.relaxation_rec = self._relaxation_candidate or _normalize_relaxation_type(
+            result.relaxation_rec = _normalize_relaxation_type(
                 result.turn_decision.intervention_type
             )
             logger.warning(f"[RelaxDebug] relaxation authorized by TurnDecision: {result.relaxation_rec}")
@@ -1173,12 +1204,12 @@ class ConversationPipeline:
                 f"[RelaxDebug] ignored non-authoritative REC tag {llm_rec!r} "
                 f"for decision={result.turn_decision.action.value if result.turn_decision else 'none'}"
             )
-        self._relaxation_candidate = None
-
         # Preserve this turn's recommendation until the asynchronous intent
         # classification has completed below.
-        game_recommended = self._game_candidate
-        self._game_candidate = False
+        game_recommended = bool(
+            result.turn_decision
+            and result.turn_decision.action is TurnAction.RECOMMEND_GAME
+        )
         parsed_scale_tags = parse_scale_tags(result.full_response)
         runtime = self.scale_runtime.snapshot()
         allowed_scale = (
@@ -1257,14 +1288,12 @@ class ConversationPipeline:
                     f"[ScaleDebug] completed {completed_name}; "
                     f"completed={runtime_after.completed_scales}"
                 )
-                if not self._post_scale_relaxation_done:
-                    rec_type = (
-                        self._pending_relaxation_after_scale
-                        or self._choose_post_scale_relaxation(completed_name)
-                    )
-                    self._pending_relaxation_after_scale = None
-                    if rec_type:
-                        self._pending_relaxation_after_scale = rec_type
+                rec_type = (
+                    self._proactive_relaxation_candidate
+                    or self._choose_post_scale_relaxation(completed_name)
+                )
+                if rec_type:
+                    self._proactive_relaxation_candidate = rec_type
             elif runtime_after.active_scale:
                 logger.warning(
                     f"[ScaleDebug] accepted {completed_name} Q{accepted_item}="
@@ -1321,10 +1350,6 @@ class ConversationPipeline:
             f"paused={runtime_after.paused} "
             f"tags={result.scale_tags}"
         )
-
-        # --- Auto-end on time/round limit ---
-        if not result.end_type and self.report and self.report.is_over_limit():
-            emit("time_limit_ask", None)
 
         # --- Save assistant message ---
         if self.data:
@@ -1656,7 +1681,10 @@ class ConversationPipeline:
 
     def _get_relaxation_done(self) -> bool:
         """Check if relaxation training was completed this session."""
-        return bool(self._relaxation_recommended_this_session)
+        return bool(
+            self._proactive_relaxation_offered
+            or getattr(self.report, "completed_relaxation", None)
+        )
 
     def _get_recent_dialogue_text(self, max_turns: int = 6) -> str:
         """Get recent dialogue text for agent context."""
@@ -1676,6 +1704,7 @@ class ConversationPipeline:
         *,
         needs_rag: bool = True,
         round_count: int | None = None,
+        allow_user_relaxation: bool = False,
     ) -> str:
         """Build system suffix with round warning + RAG context."""
         from config import MIN_ROUNDS_FOR_RELAXATION
@@ -1687,7 +1716,7 @@ class ConversationPipeline:
             else (self.report.get_round_count() if self.report else 0)
         )
 
-        if current_rounds < MIN_ROUNDS_FOR_RELAXATION:
+        if current_rounds < MIN_ROUNDS_FOR_RELAXATION and not allow_user_relaxation:
             system_suffix = (
                 f"【系统警告】当前仅第{current_rounds}轮对话"
                 f"（少于{MIN_ROUNDS_FOR_RELAXATION}轮）。"

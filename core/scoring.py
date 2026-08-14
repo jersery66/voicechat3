@@ -137,7 +137,7 @@ def is_user_explicit_end_text(text: str) -> bool:
 
     explicit_end = [
         "不想聊了", "今天不聊了", "今天先这样", "先到这吧", "先这样吧",
-        "我要结束", "结束吧", "不说了", "我想休息了", "我累了想睡了",
+        "我要结束", "结束", "结束吧", "不说了", "我想休息了", "我累了想睡了",
         "可以结束了", "聊完了", "退出",
     ]
     return any(x in t for x in explicit_end)

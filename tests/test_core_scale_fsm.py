@@ -158,12 +158,8 @@ class TestPipelineRuntimeOwnership:
         pipeline.scale_runtime.accept_answer(scale_name="PHQ-9", item=1, score=1)
         pipeline.symptom_scores["PHQ-9"] = 3
         pipeline._agent_route_cooldown = 2
-        pipeline._post_scale_relaxation_done = True
-        pipeline._relaxation_recommended_this_session.add("breathing")
-        pipeline._game_recommended_this_session = True
-        pipeline._pending_relaxation_after_scale = "muscle"
-        pipeline._relaxation_candidate = "meditation"
-        pipeline._game_candidate = True
+        pipeline._proactive_relaxation_offered = True
+        pipeline._proactive_relaxation_candidate = "muscle"
 
         pipeline.reset_session()
 
@@ -173,12 +169,8 @@ class TestPipelineRuntimeOwnership:
         assert not hasattr(pipeline, "relaxation_used")
         assert not hasattr(pipeline, "exit_requested")
         assert pipeline._agent_route_cooldown == 0
-        assert pipeline._post_scale_relaxation_done is False
-        assert pipeline._relaxation_recommended_this_session == set()
-        assert pipeline._game_recommended_this_session is False
-        assert pipeline._pending_relaxation_after_scale is None
-        assert pipeline._relaxation_candidate is None
-        assert pipeline._game_candidate is False
+        assert pipeline._proactive_relaxation_offered is False
+        assert pipeline._proactive_relaxation_candidate is None
 
     def test_get_active_scale_state_reads_runtime(self, pipeline):
         assert pipeline.get_active_scale_state() is None

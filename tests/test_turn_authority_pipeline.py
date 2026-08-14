@@ -100,3 +100,22 @@ def test_legacy_end_and_relaxation_tags_cannot_override_chat_decision():
     assert result.end_type is None
     assert result.relaxation_rec is None
     assert not hasattr(pipeline, "relaxation_used")
+
+
+def test_explicit_end_does_not_enqueue_a_competing_timeout_check():
+    class TimedReport(FakeReport):
+        def get_session_duration_minutes(self):
+            return 45.0
+
+    pipeline = build_pipeline(report=TimedReport(start_round=8))
+    events = []
+    try:
+        result = pipeline.execute(
+            PipelineConfig(user_text="结束"),
+            lambda kind, content: events.append((kind, content)),
+        )
+    finally:
+        pipeline.shutdown()
+
+    assert result.turn_decision.action is TurnAction.END_SESSION
+    assert "time_limit_check" not in [kind for kind, _ in events]

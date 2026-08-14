@@ -96,3 +96,24 @@ def test_pipeline_has_no_legacy_scale_state_container_or_delegate_properties():
         "_active_scale = delegate_property",
     )
     assert all(marker not in source for marker in forbidden)
+
+
+def test_pipeline_resume_after_relaxation_uses_runtime_actual_item():
+    pipeline = build_pipeline()
+    try:
+        pipeline.scale_runtime.start("PHQ-9")
+        pipeline.scale_runtime.accept_answer(
+            scale_name="PHQ-9", item=1, score=2
+        )
+        pipeline.scale_runtime.pause()
+
+        question = pipeline.resume_scale_after_relaxation()
+
+        snapshot = pipeline.scale_runtime.snapshot()
+        assert snapshot.active_scale == "PHQ-9"
+        assert snapshot.current_item == 2
+        assert snapshot.waiting_for_answer is True
+        assert snapshot.paused is False
+        assert question == pipeline.get_active_scale_question_text()
+    finally:
+        pipeline.shutdown()

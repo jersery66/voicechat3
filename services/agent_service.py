@@ -633,7 +633,7 @@ class AgentService:
 - 单次轻微信号（如"还好""不太开心"）不触发量表，继续观察
 - 当前已有量表时不要切换量表，由系统根据状态继续当前题目
 - 用户焦虑/紧张/失眠/疲惫且量表已部分完成：action="recommend_relaxation"
-- 用户想玩/无聊时：action="recommend_game"
+- 用户明确提出想玩游戏时：action="recommend_game"；仅说无聊/没意思时保持 action="chat"
 - 用户明确想退出时：action="end_session"
 
 症状→量表映射：

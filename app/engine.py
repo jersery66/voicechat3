@@ -40,7 +40,6 @@ from app.contracts import (
     PlayRelaxationCommand,
     PlayGameCommand,
     RelaxationFinishedCommand,
-    RelaxationRecommendedEvent,
     SessionEndedEvent,
     SessionEndingEvent,
     StartSessionCommand,
@@ -54,10 +53,6 @@ from app.contracts import (
 )
 
 logger = logging.getLogger(__name__)
-
-# End types that must NEVER be intercepted by a forced relaxation.
-_NO_FORCE_END_TYPES = (EndType.INVALID, EndType.QUIT)
-
 
 @dataclass(frozen=True)
 class SessionLifecycleSnapshot:
@@ -302,17 +297,12 @@ class SessionEngine:
         self._emit_state()
 
     def _handle_end_session(self, command: EndSessionCommand) -> None:
-        """End request. Mirrors legacy MainWindow._handle_session_end:
+        """Execute an already-approved end command.
 
-        1. duplicate end attempts are rejected by the guard;
-        2. unless forbidden (explicit exit / INVALID / QUIT, or a
-           relaxation video was already played/recommended), the end is
-           intercepted by one forced relaxation recommendation;
-        3. if the FSM cannot enter SESSION_ENDING right now (a relaxation
-           video is playing), the request is deferred until the video ends;
-           the guard is released meanwhile so the resumed flow can acquire it;
-        4. otherwise the end flow starts (SESSION_ENDING + SessionEndingEvent
-           so the client runs farewell/report generation).
+        Eligibility and intervention policy are decided before this boundary.
+        ``allow_force_relaxation`` is retained only as a wire-compatible
+        legacy field; this writer never turns it into a recommendation.  The
+        engine only validates lifecycle state and defers while media is active.
         """
         if not self._guard.begin().accepted:
             logger.info("SessionEngine: end request ignored (already ending)")
@@ -325,36 +315,9 @@ class SessionEngine:
 
         self._exit_requested = command.end_type is EndType.QUIT
 
-        force_allowed = (
-            command.allow_force_relaxation
-            and command.end_type not in _NO_FORCE_END_TYPES
-            # legacy gate: if the AI reply already recommended a relaxation,
-            # do not force another one
-            and not command.ai_relaxation_tag
-            # legacy gate: ANY played relaxation (completed or not) blocks
-            # the forced recommendation — read the FSM context, not a local flag
-            and not self._orchestrator.ctx.current_relaxation_type
-            and not self._orchestrator.ctx.has_forced_relaxation_rec
-            # pipeline-level flag: honor "at most once per session" even when
-            # the relaxation was driven outside the FSM (M10)
-            and not command.relaxation_used
-        )
-
-        if force_allowed:
-            self._pending_end = command
-            self._orchestrator.ctx.has_forced_relaxation_rec = True
-            self._orchestrator.transition_to(SessionState.RELAXATION_RECOMMENDED)
-            self._guard.defer_for_relaxation()
-            self._emit_state()
-            self._emit(RelaxationRecommendedEvent(
-                relaxation=command.relaxation_hint or "breathing",
-                forced=True,
-            ))
-            return
-
         if self._orchestrator.state == SessionState.VIDEO_PLAYING:
-            # Defer until the video finishes; relaxations gate is already
-            # satisfied at that point, so the flow proceeds to reports.
+            # Defer until active media finishes; no new intervention policy is
+            # invented at this lifecycle boundary.
             self._pending_end = command
             self._guard.defer_for_relaxation()
             logger.info("SessionEngine: end deferred until relaxation video ends")

@@ -147,6 +147,10 @@ class TurnStateSnapshot(_FrozenContract):
     waiting_for_answer: bool = False
     completed_scales: tuple[str, ...] = ()
     relaxation_used: bool = False
+    # Policy fact: a proactive recommendation has already been offered in
+    # this session.  This is distinct from ``relaxation_used`` (a completed
+    # intervention/report fact) and is read-only at the turn boundary.
+    proactive_relaxation_offered: bool = False
     game_active: bool = False
     time_limit_reached: bool = False
 
@@ -157,7 +161,10 @@ class TurnSignals(_FrozenContract):
     explicit_end_requested: bool = False
     active_scale_pause_requested: bool = False
     active_scale_refusal: bool = False
+    explicit_relaxation_requested: bool = False
+    explicit_game_requested: bool = False
     deterministic_scale_candidate: Optional[str] = None
+    proactive_relaxation_candidate: Optional[str] = None
     legacy_relaxation_candidate: Optional[str] = None
     legacy_game_candidate: bool = False
 

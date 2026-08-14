@@ -59,15 +59,15 @@ class TestCapabilityChecks:
 
 
 class TestEvaluateSessionEnd:
-    def test_goal_achieved_forces_relaxation_once(self, orchestrator):
+    def test_goal_achieved_goes_straight_to_reports(self, orchestrator):
         action, data = orchestrator.evaluate_session_end(EndType.GOAL_ACHIEVED)
-        assert action == "force_relaxation"
-        assert data["relaxation_tag"] == "呼吸"
-        assert orchestrator.state == SessionState.RELAXATION_RECOMMENDED
+        assert action == "generate_reports"
+        assert data == {}
+        assert orchestrator.state == SessionState.SESSION_ENDING
 
     def test_second_end_goes_straight_to_reports(self, orchestrator):
         orchestrator.evaluate_session_end(EndType.GOAL_ACHIEVED)
-        # back to chatting, then end again — no second forced relaxation
+        # back to chatting, then end again — no secondary policy
         orchestrator.ctx.state = SessionState.CHATTING
         action, _ = orchestrator.evaluate_session_end(EndType.GOAL_ACHIEVED)
         assert action == "generate_reports"
@@ -82,9 +82,9 @@ class TestEvaluateSessionEnd:
         action, _ = orchestrator.evaluate_session_end(EndType.GOAL_ACHIEVED)
         assert action == "generate_reports"
 
-    def test_custom_relaxation_tag_passthrough(self, orchestrator):
+    def test_legacy_relaxation_tag_is_ignored_by_lifecycle(self, orchestrator):
         _, data = orchestrator.evaluate_session_end(EndType.TIME_LIMIT, relaxation_tag="肌肉")
-        assert data["relaxation_tag"] == "肌肉"
+        assert data == {}
 
 
 class TestReset:
@@ -95,10 +95,8 @@ class TestReset:
         assert orch.state == SessionState.CHATTING
 
     def test_reset_clears_context(self, orchestrator):
-        orchestrator.ctx.has_forced_relaxation_rec = True
         orchestrator.ctx.current_relaxation_type = "冥想"
         orchestrator.reset()
-        assert orchestrator.ctx.has_forced_relaxation_rec is False
         assert orchestrator.ctx.current_relaxation_type is None
 
 

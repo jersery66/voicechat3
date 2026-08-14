@@ -89,12 +89,13 @@ class StopRecordingCommand(Command):
 class EndSessionCommand(Command):
     """Request session end.
 
-    allow_force_relaxation=False is used for explicit user exits (退出程序),
-    matching the legacy `_handle_session_end(..., allow_force_relaxation=...)`.
+    ``allow_force_relaxation`` is retained as a wire-compatible, ignored
+    legacy field.  Phase 5 routes intervention approval through TurnPolicy;
+    SessionEngine never invents a relaxation during end execution.
     """
     kind: Literal["end_session"] = "end_session"
     end_type: EndType = EndType.GOAL_ACHIEVED
-    allow_force_relaxation: bool = True
+    allow_force_relaxation: bool = False
     source: str = ""
     # Relaxation type suggested by the AI reply tags; used only when the end
     # flow forces one last relaxation. None -> engine default ("breathing").

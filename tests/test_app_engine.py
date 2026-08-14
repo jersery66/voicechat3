@@ -14,7 +14,6 @@ from app.contracts import (
     ErrorEvent,
     PlayRelaxationCommand,
     RelaxationFinishedCommand,
-    RelaxationRecommendedEvent,
     SessionEndingEvent,
     StartSessionCommand,
     StateChangedEvent,
@@ -56,30 +55,25 @@ class TestStartSession:
 
 
 class TestEndSession:
-    def test_goal_achieved_forces_relaxation(self, engine, events):
+    def test_goal_achieved_does_not_invent_relaxation(self, engine, events):
         start(engine)
         engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
-        recs = [e for e in events if isinstance(e, RelaxationRecommendedEvent)]
-        assert len(recs) == 1
-        assert recs[0].forced is True
-        assert recs[0].relaxation == "breathing"
-        assert engine.state == SessionState.RELAXATION_RECOMMENDED
-        # guard was released so the post-relaxation end can proceed
-        assert not engine.is_ending
+        assert any(isinstance(e, SessionEndingEvent) for e in events)
+        assert engine.state == SessionState.SESSION_ENDING
 
-    def test_relaxation_hint_respected(self, engine, events):
+    def test_relaxation_hint_does_not_trigger_media(self, engine, events):
         start(engine)
         engine.process_command(EndSessionCommand(
             end_type=EndType.GOAL_ACHIEVED, relaxation_hint="meditation"))
-        recs = [e for e in events if isinstance(e, RelaxationRecommendedEvent)]
-        assert recs[0].relaxation == "meditation"
+        assert any(isinstance(e, SessionEndingEvent) for e in events)
+        assert engine.state == SessionState.SESSION_ENDING
 
     def test_second_end_proceeds_to_reports(self, engine, events):
         start(engine)
         engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
         events.clear()
         engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
-        assert any(isinstance(e, SessionEndingEvent) for e in events)
+        assert not any(isinstance(e, SessionEndingEvent) for e in events)
         assert engine.state == SessionState.SESSION_ENDING
 
     @pytest.mark.parametrize("kwargs", [
@@ -108,7 +102,7 @@ class TestEndSession:
         events.clear()
         engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
         assert any(isinstance(e, SessionEndingEvent) for e in events)
-        assert not any(isinstance(e, RelaxationRecommendedEvent) for e in events)
+        assert not any(getattr(e, "kind", "") == "relaxation_recommended" for e in events)
 
     def test_played_relaxation_blocks_force_exited_early(self, engine, events):
         """completed=False (user exited the video early) must also block the
@@ -119,7 +113,7 @@ class TestEndSession:
         events.clear()
         engine.process_command(EndSessionCommand(end_type=EndType.GOAL_ACHIEVED))
         assert any(isinstance(e, SessionEndingEvent) for e in events)
-        assert not any(isinstance(e, RelaxationRecommendedEvent) for e in events)
+        assert not any(getattr(e, "kind", "") == "relaxation_recommended" for e in events)
 
 
 class TestEndDuringVideo:
@@ -270,7 +264,7 @@ class TestLegacyParityGates:
         engine.process_command(EndSessionCommand(
             end_type=EndType.GOAL_ACHIEVED, ai_relaxation_tag="呼吸"))
         assert any(isinstance(e, SessionEndingEvent) for e in events)
-        assert not any(isinstance(e, RelaxationRecommendedEvent) for e in events)
+        assert not any(getattr(e, "kind", "") == "relaxation_recommended" for e in events)
 
     def test_acknowledge_time_limit_command_suppresses_ask(self, engine):
         start(engine)
