@@ -111,10 +111,10 @@ new authoritative state source. No Phase 3 or Phase 4 work is included.
 
 ## Final Git result
 
-To be filled after the independent Phase 2 implementation commit and push:
-
-- Implementation commit: pending
-- Remote branch HEAD: pending
+- Implementation commit: `3fa975b97217e4a7ce3f23f6d2ffabf211885349`
+- Remote branch HEAD: `3fa975b97217e4a7ce3f23f6d2ffabf211885349`
 - Full pytest count: `351 passed`, `0 failed`, `0 skipped`
-- Working tree: pending until the implementation commit is created
-- Remote/local synchronization: pending
+- Working tree after implementation commit: clean
+- Remote/local synchronization after push: `0 ahead / 0 behind`
+- Local runtime smoke: `NOT RUN / environment unavailable` for live A100/vLLM,
+  STT, and TTS; ports 8000/8001 were not listening on the development host.
