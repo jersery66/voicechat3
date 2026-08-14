@@ -1,14 +1,9 @@
-# core.scale_fsm — scale STATE CONTAINER / snapshot (pure logic).
+# core.scale_fsm — legacy scale-state compatibility helpers.
 #
-# NOTE: this module is intentionally NOT a state machine. The authoritative
-# transition logic (start / advance / complete / resume, scale
-# deferral, etc.) still lives in services/pipeline.py, which is the single
-# owner of scale flow. ScaleState here is the one place that OWNS all
-# scale-related mutable state that used to be scattered across the pipeline
-# class (~25 fields); ConversationPipeline keeps backward-compatible property
-# aliases via delegate_property() so its ~120 internal call sites work
-# untouched. Treat ScaleState as the source of truth for scale state VALUES,
-# and the pipeline as the source of truth for scale TRANSITIONS.
+# Production scale administration is owned by assessment.ScaleRuntime.  This
+# module remains importable for historical integrations and pure legacy tests,
+# but it is deliberately not imported by ConversationPipeline and cannot be a
+# production source of active-item, answer, pause, or completion state.
 #
 # If this module ever grows transition methods, they must mirror the
 # pipeline's invariants exactly (e.g. "at most one active scale", "resume
@@ -16,7 +11,9 @@
 
 from typing import Dict, List, Optional
 
-SCALE_NAMES = ("PHQ-9", "GAD-7", "PCL-5")
+from services.scales import SCALES
+
+SCALE_NAMES = tuple(SCALES.keys())
 
 
 def fresh_symptom_scores() -> Dict[str, int]:
@@ -25,10 +22,9 @@ def fresh_symptom_scores() -> Dict[str, int]:
 
 
 class ScaleState:
-    """Single owner of all scale-related mutable session state.
+    """Legacy value container retained for compatibility-only callers.
 
-    Field groups (names chosen to be self-explanatory; the pipeline's
-    legacy attribute names are mapped via delegate_property):
+    Field groups mirror the historical API for compatibility tests only.
 
     - core FSM: administered / answers / active_scale / active_item /
       waiting_answer / queue / pause_turns / soft_paused / resume_item

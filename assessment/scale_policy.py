@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-
-_SCALE_NAMES = {"PHQ-9", "GAD-7", "PCL-5"}
+from services.scales import get_scale_manager
 
 
 @dataclass(frozen=True)
@@ -30,8 +29,8 @@ class ScalePolicy:
         if active_scale and action == "continue":
             return ScaleDirective("continue", active_scale, active_item)
         if not active_scale and action == "start" and requested_scale:
-            # Item progression is owned by the legacy scale executor during
-            # Phase 2; Router item hints are intentionally ignored.
+            # Item progression is owned by ScaleRuntime; Router item hints
+            # are intentionally ignored.
             return ScaleDirective("start", requested_scale, 1)
         if action == "pause" and active_scale:
             return ScaleDirective("pause", active_scale, active_item)
@@ -43,4 +42,4 @@ class ScalePolicy:
             return None
         normalized = str(value).upper().replace(" ", "")
         normalized = normalized.replace("PHQ9", "PHQ-9").replace("GAD7", "GAD-7").replace("PCL5", "PCL-5")
-        return normalized if normalized in _SCALE_NAMES else None
+        return normalized if normalized in get_scale_manager().get_scale_names() else None

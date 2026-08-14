@@ -101,13 +101,8 @@ class TestRagInjection:
 
 
 class TestScaleFlow:
-    def test_scale_start_retroactive_scoring_and_tag_answer(self, ctx):
-        """Real legacy semantics (verified by execution):
-        1. agent starts PHQ-9; the TRIGGERING utterance itself is scored
-           retroactively against the current item, then the pointer advances;
-        2. a later [SCALE:...] tag in the LLM reply records the answer for
-           the item being asked.
-        """
+    def test_scale_start_uses_runtime_item_and_rejects_out_of_order_tag(self, ctx):
+        """Runtime, not the Router or an LLM tag, owns the current item."""
         agent = FakeAgent()
         agent.route_script = [
             {"scale_action": "start", "scale": "PHQ-9", "item": 1,
@@ -121,18 +116,20 @@ class TestScaleFlow:
         ])
         p = ctx(agent=agent, llm=llm)
 
-        # Turn 1: symptom text starts PHQ-9 and gets scored retroactively
+        # Turn 1: symptom text starts PHQ-9 but is not an answer to Q1.
         result1, _ = run_turn(p, "最近一直睡不着，心里难受")
         assert result1.scale_active is True
-        assert p._active_scale == "PHQ-9"
-        assert p._administered_scales and "PHQ-9" in p._administered_scales
-        # triggering utterance produced at least one recorded answer
-        assert p._scale_answers.get("PHQ-9"), "retroactive scoring did not record anything"
+        runtime1 = p.scale_runtime.snapshot()
+        assert runtime1.active_scale == "PHQ-9"
+        assert "PHQ-9" in runtime1.administered_scales
+        assert dict(runtime1.answers_by_scale.get("PHQ-9", {})) == {}
 
-        # Turn 2: LLM reply carries the SCALE tag for the current item
-        result2, _ = run_turn(p, "好几天了")
-        assert result2.scale_tags.get("PHQ-9", {}).get(2) == 1
-        assert p._scale_answers.get("PHQ-9", {}).get(2) == 1
+        # Turn 2: a tag for Q2 cannot bypass Runtime's current Q1.
+        result2, _ = run_turn(p, "做什么都没劲，好几天了")
+        runtime2 = p.scale_runtime.snapshot()
+        assert result2.scale_tags.get("PHQ-9", {}).get(1) == 1
+        assert dict(runtime2.answers_by_scale["PHQ-9"]) == {1: 1}
+        assert 2 not in runtime2.answers_by_scale["PHQ-9"]
 
     def test_short_answer_inferred_without_tag(self, ctx):
         """The trigger text deliberately contains NO frequency word, so
@@ -154,10 +151,10 @@ class TestScaleFlow:
         p = ctx(agent=agent, llm=llm)
         # no frequency word here -> nothing retroactively scored in turn 1
         run_turn(p, "最近睡不着")
-        assert p._scale_answers.get("PHQ-9", {}).get(1) is None
+        assert p.scale_runtime.snapshot().answers_by_scale.get("PHQ-9", {}).get(1) is None
         # Q1 symptom keyword + frequency word, but no SCALE tag in the reply
         run_turn(p, "做什么都没劲，几乎每天")
-        assert p._scale_answers.get("PHQ-9", {}).get(1) == 3
+        assert p.scale_runtime.snapshot().answers_by_scale["PHQ-9"].get(1) == 3
 
 
 class TestRelaxationTag:
@@ -229,10 +226,10 @@ class TestCumulativeSymptomTrigger:
 
         for _ in range(4):
             result, _ = run_turn(p, "最近一直睡不着")
-            assert p._active_scale is None
+            assert p.scale_runtime.snapshot().active_scale is None
 
         result, _ = run_turn(p, "最近一直睡不着")
-        assert p._active_scale == "PHQ-9"
+        assert p.scale_runtime.snapshot().active_scale == "PHQ-9"
         assert result.scale_active is True
 
 

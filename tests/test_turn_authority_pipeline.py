@@ -16,11 +16,12 @@ class SpyPolicy(TurnPolicy):
         self.calls.append(kwargs)
         pipeline = getattr(self, "pipeline", None)
         if pipeline is not None:
+            runtime = pipeline.scale_runtime.snapshot()
             self.state_at_call.append(
                 (
-                    pipeline._active_scale,
-                    pipeline._active_scale_waiting_answer,
-                    pipeline._scale_soft_paused,
+                    runtime.active_scale,
+                    runtime.waiting_for_answer,
+                    runtime.paused,
                 )
             )
         return super().decide(**kwargs)
@@ -69,9 +70,9 @@ def test_router_proposal_does_not_mutate_scale_before_policy():
     agent.route_script = [{"action": "chat", "confidence": 0.4}]
     policy = SpyPolicy()
     pipeline = build_pipeline(agent=agent, policy=policy)
-    pipeline._active_scale = "PHQ-9"
-    pipeline._active_scale_q = 3
-    pipeline._active_scale_waiting_answer = True
+    pipeline.scale_runtime.start("PHQ-9")
+    pipeline.scale_runtime.accept_answer(scale_name="PHQ-9", item=1, score=1)
+    pipeline.scale_runtime.present_current_item()
     try:
         result = pipeline.execute(
             PipelineConfig(user_text="别问了，我想聊点别的"), lambda *_: None

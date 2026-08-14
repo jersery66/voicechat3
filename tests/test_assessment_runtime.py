@@ -5,7 +5,7 @@ from assessment.scale_runtime import ScaleRuntime
 
 def test_scale_runtime_advances_to_the_first_unanswered_item():
     runtime = ScaleRuntime()
-    runtime.start("PHQ-9", item=1)
+    runtime.start("PHQ-9")
     runtime.record_answer(1, 2)
     runtime.record_answer(3, 1)
 
@@ -14,6 +14,6 @@ def test_scale_runtime_advances_to_the_first_unanswered_item():
 
 def test_scale_runtime_rejects_answers_for_non_current_items():
     runtime = ScaleRuntime()
-    runtime.start("GAD-7", item=2)
+    runtime.start("GAD-7")
 
-    assert runtime.record_answer(1, 2) is False
+    assert runtime.accept_answer(item=2, score=2).accepted is False

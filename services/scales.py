@@ -1,6 +1,7 @@
 # Scales - Standard psychological assessment scales (PHQ-9, GAD-7, PCL-5)
 
-from typing import Optional, List, Dict, Any
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any, Tuple
 
 
 SCALES: Dict[str, Dict[str, Any]] = {
@@ -93,6 +94,43 @@ SCALES: Dict[str, Dict[str, Any]] = {
 }
 
 
+@dataclass(frozen=True)
+class ScaleDefinition:
+    """Immutable, validated view over one canonical ``SCALES`` entry."""
+
+    scale_name: str
+    title: str
+    questions: Tuple[str, ...]
+    options: Tuple[Tuple[int, str], ...]
+    legal_scores: Tuple[int, ...]
+    max_score: int
+    scoring: Tuple[Tuple[int, int, str], ...]
+
+    @property
+    def item_count(self) -> int:
+        return len(self.questions)
+
+
+def _definition_from_mapping(scale_name: str, scale: Dict[str, Any]) -> ScaleDefinition:
+    """Build a defensive view without duplicating the scale registry."""
+    options = tuple(
+        (int(option["score"]), str(option.get("label", "")))
+        for option in scale.get("options", [])
+    )
+    return ScaleDefinition(
+        scale_name=scale_name,
+        title=str(scale.get("name", scale_name)),
+        questions=tuple(str(question) for question in scale.get("questions", [])),
+        options=options,
+        legal_scores=tuple(score for score, _label in options),
+        max_score=int(scale.get("max_score", 0)),
+        scoring=tuple(
+            (int(low), int(high), str(label))
+            for low, high, label in scale.get("scoring", [])
+        ),
+    )
+
+
 class ScaleManager:
     """Manages standard psychological assessment scales."""
 
@@ -118,6 +156,32 @@ class ScaleManager:
         """Return a copy of the scale definition (questions + options + metadata)."""
         return SCALES.get(scale_name)
 
+    def get_scale_definition(self, scale_name: str) -> Optional[ScaleDefinition]:
+        """Return the immutable canonical definition view for ``scale_name``."""
+        scale = SCALES.get(scale_name)
+        if not scale:
+            return None
+        return _definition_from_mapping(scale_name, scale)
+
+    def get_item_count(self, scale_name: str) -> int:
+        """Return the canonical number of items, or ``0`` if unknown."""
+        definition = self.get_scale_definition(scale_name)
+        return definition.item_count if definition else 0
+
+    def get_legal_scores(self, scale_name: str) -> Tuple[int, ...]:
+        """Return legal scores derived from the canonical options."""
+        definition = self.get_scale_definition(scale_name)
+        return definition.legal_scores if definition else ()
+
+    def validate_answer(self, scale_name: str, *, item: int, score: int) -> bool:
+        """Validate one item answer against the canonical definition."""
+        definition = self.get_scale_definition(scale_name)
+        if definition is None or isinstance(item, bool) or isinstance(score, bool):
+            return False
+        if not isinstance(item, int) or not 1 <= item <= definition.item_count:
+            return False
+        return isinstance(score, int) and score in definition.legal_scores
+
     def get_scale_names(self) -> List[str]:
         """Return all available scale names."""
         return list(SCALES.keys())
@@ -128,13 +192,30 @@ class ScaleManager:
         answers: list of integer scores (0-indexed option indices or raw scores).
         Returns {"total": int, "severity": str, "items": int, "max_score": int}
         """
-        scale = SCALES.get(scale_name)
-        if not scale:
+        definition = self.get_scale_definition(scale_name)
+        if not definition:
             return {"total": 0, "severity": "未知量表", "items": 0, "max_score": 0, "error": f"Unknown scale: {scale_name}"}
+
+        invalid_scores = [
+            score
+            for score in answers
+            if isinstance(score, bool)
+            or not isinstance(score, int)
+            or score not in definition.legal_scores
+        ]
+        if invalid_scores:
+            return {
+                "total": None,
+                "severity": "未分类",
+                "items": 0,
+                "max_score": definition.max_score,
+                "error": "invalid_score",
+                "invalid_scores": tuple(invalid_scores),
+            }
 
         total = sum(answers)
         severity = "未分类"
-        for low, high, label in scale["scoring"]:
+        for low, high, label in definition.scoring:
             if low <= total <= high:
                 severity = label
                 break
@@ -143,7 +224,7 @@ class ScaleManager:
             "total": total,
             "severity": severity,
             "items": len(answers),
-            "max_score": scale["max_score"],
+            "max_score": definition.max_score,
         }
 
     def recommend_scale_candidates(self, user_text: str,

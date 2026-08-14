@@ -1,9 +1,13 @@
 """Tests for core.scale_fsm — scale state container and pipeline delegation."""
 
 import pytest
+from pathlib import Path
 
 from core.scale_fsm import SCALE_NAMES, ScaleState, delegate_property, fresh_symptom_scores
 from services.pipeline import ConversationPipeline
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -124,37 +128,34 @@ class TestDelegateProperty:
         assert h._scale_state.answers == {}
 
 
-class TestPipelineDelegation:
-    """ConversationPipeline legacy names must read/write the container."""
+class TestPipelineRuntimeOwnership:
+    """Pipeline exposes Runtime read models, never a second state container."""
 
-    def test_legacy_underscore_names(self, pipeline):
-        assert pipeline._active_scale is None
-        pipeline._active_scale = "PHQ-9"
-        pipeline._active_scale_q = 3
-        pipeline._active_scale_waiting_answer = True
-        assert pipeline._scale_state.active_scale == "PHQ-9"
-        assert pipeline._scale_state.active_item == 3
-        assert pipeline._scale_state.waiting_answer is True
+    def test_runtime_commands_own_scale_state(self, pipeline):
+        assert pipeline.scale_runtime.snapshot().active_scale is None
+        pipeline.scale_runtime.start("PHQ-9")
+        snapshot = pipeline.scale_runtime.snapshot()
+        assert snapshot.active_scale == "PHQ-9"
+        assert snapshot.current_item == 1
+        assert snapshot.waiting_for_answer is True
 
-    def test_legacy_container_names(self, pipeline):
-        pipeline._administered_scales.add("GAD-7")
-        pipeline._scale_answers["GAD-7"] = {1: 1}
-        pipeline._scale_queue.append("PCL-5")
-        assert pipeline._scale_state.administered == {"GAD-7"}
-        assert pipeline._scale_state.answers == {"GAD-7": {1: 1}}
-        assert pipeline._scale_state.queue == ["PCL-5"]
+    def test_runtime_answers_are_immutable_to_pipeline_callers(self, pipeline):
+        pipeline.scale_runtime.start("GAD-7")
+        pipeline.scale_runtime.accept_answer(scale_name="GAD-7", item=1, score=1)
+        snapshot = pipeline.scale_runtime.snapshot()
+        assert dict(snapshot.answers_by_scale["GAD-7"]) == {1: 1}
+        with pytest.raises(TypeError):
+            snapshot.answers_by_scale["GAD-7"][1] = 2
 
-    def test_legacy_flow_names(self, pipeline):
-        pipeline.scale_active = True
-        pipeline.symptom_scores = {"PHQ-9": 4, "GAD-7": 0, "PCL-5": 0}
-        pipeline.pending_scale_resume = True
-        assert pipeline._scale_state.scale_active is True
-        assert pipeline._scale_state.symptom_scores["PHQ-9"] == 4
-        assert pipeline._scale_state.pending_scale_resume is True
+    def test_pipeline_no_longer_imports_legacy_container(self):
+        source = (ROOT / "services" / "pipeline.py").read_text(encoding="utf-8")
+        assert "from core.scale_fsm import" not in source
+        assert "delegate_property(" not in source
+        assert "self._scale_state" not in source
 
-    def test_reset_session_resets_scale_and_relaxation(self, pipeline):
-        pipeline._active_scale = "PHQ-9"
-        pipeline._administered_scales.add("PHQ-9")
+    def test_reset_session_resets_runtime_and_observations(self, pipeline):
+        pipeline.scale_runtime.start("PHQ-9")
+        pipeline.scale_runtime.accept_answer(scale_name="PHQ-9", item=1, score=1)
         pipeline.symptom_scores["PHQ-9"] = 3
         pipeline.relaxation_used = True
         pipeline.exit_requested = True
@@ -168,8 +169,8 @@ class TestPipelineDelegation:
 
         pipeline.reset_session()
 
-        assert pipeline._active_scale is None
-        assert pipeline._administered_scales == set()
+        assert pipeline.scale_runtime.snapshot().active_scale is None
+        assert pipeline.scale_runtime.snapshot().answers_by_scale == {}
         assert pipeline.symptom_scores == {name: 0 for name in SCALE_NAMES}
         assert pipeline.relaxation_used is False
         assert pipeline.exit_requested is False
@@ -181,9 +182,9 @@ class TestPipelineDelegation:
         assert pipeline._relaxation_candidate is None
         assert pipeline._game_candidate is False
 
-    def test_get_active_scale_state_reads_container(self, pipeline):
+    def test_get_active_scale_state_reads_runtime(self, pipeline):
         assert pipeline.get_active_scale_state() is None
-        pipeline._active_scale = "GAD-7"
-        pipeline._active_scale_q = 2
+        pipeline.scale_runtime.start("GAD-7")
+        pipeline.scale_runtime.accept_answer(scale_name="GAD-7", item=1, score=1)
         snapshot = pipeline.get_active_scale_state()
         assert snapshot == {"scale_name": "GAD-7", "item": 2, "incomplete": True}

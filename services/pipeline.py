@@ -61,14 +61,13 @@ from core.scoring import (  # noqa: F401  (re-exported for backward compatibilit
     PHQ_POSITIVE_KEYWORDS_BY_ITEM,
     GAD7_POSITIVE_KEYWORDS_BY_ITEM,
     FREQUENCY_WORDS,
-    infer_scale_score_from_text,
-    detect_phq_item_from_text,
     score_symptom_signals,
 )
 
-# Scale state container (core.scale_fsm). The pipeline delegates all
-# scale-related fields to it via properties below — call sites unchanged.
-from core.scale_fsm import ScaleState, delegate_property
+# Scale administration state is owned by assessment.ScaleRuntime.  This
+# module only re-exports pure scoring helpers and keeps observation counters.
+from assessment import ScaleAnswerInterpreter, ScaleRuntime
+from services.scales import get_scale_manager
 from conversation.contracts import (
     RouterProposal,
     TurnAction,
@@ -80,8 +79,8 @@ from conversation.turn_signals import collect_turn_signals
 
 
 # Natural-language versions of scale questions for conversational delivery.
-# Keys are (scale_name, question_number).  Used by the programmatic question
-# branch so the TTS reads like a casual follow-up rather than a questionnaire.
+# Keys are (scale_name, question_number).  Used only for natural prompt
+# phrasing after Runtime has selected the current item.
 NATURAL_SCALE_QUESTIONS = {
     ("PHQ-9", 1): "这段时间，你平时会觉得一些原本还能做的事，现在也提不起劲吗？",
     ("PHQ-9", 2): "这种不好受的状态，是偶尔冒出来，还是这两周里经常在？",
@@ -370,35 +369,6 @@ class ConversationPipeline:
     No Qt dependency.
     """
 
-    # ---- Scale state delegation (core.scale_fsm.ScaleState) ----
-    # All scale-related fields live in self._scale_state; these properties
-    # keep the legacy attribute names working so existing call sites and
-    # log statements remain byte-for-byte unchanged.
-    _administered_scales = delegate_property("administered")
-    _scale_answers = delegate_property("answers")
-    _active_scale = delegate_property("active_scale")
-    _active_scale_q = delegate_property("active_item")
-    _active_scale_waiting_answer = delegate_property("waiting_answer")
-    _scale_queue = delegate_property("queue")
-    _scale_pause_turns = delegate_property("pause_turns")
-    _scale_soft_paused = delegate_property("soft_paused")
-    _scale_resume_item = delegate_property("resume_item")
-    scale_active = delegate_property("scale_active")
-    scale_name = delegate_property("scale_name")
-    scale_current_item = delegate_property("scale_current_item")
-    scale_completed = delegate_property("scale_completed")
-    scale_refused_rounds = delegate_property("scale_refused_rounds")
-    scale_defer_until_round = delegate_property("scale_defer_until_round")
-    last_scale_ask_round = delegate_property("last_scale_ask_round")
-    consecutive_scale_asks = delegate_property("consecutive_scale_asks")
-    symptom_scores = delegate_property("symptom_scores")
-    symptom_turns = delegate_property("symptom_turns")
-    last_scale_trigger_round = delegate_property("last_scale_trigger_round")
-    scale_trigger_cooldown = delegate_property("scale_trigger_cooldown")
-    pending_scale_resume = delegate_property("pending_scale_resume")
-    last_bot_asked_scale = delegate_property("last_bot_asked_scale")
-    last_bot_asked_item = delegate_property("last_bot_asked_item")
-
     def __init__(self, stt_service, llm_service, tts_service,
                  rag_service, agent_service, report_service, data_manager,
                  session_emotions: list, emotion_tracker=None,
@@ -415,10 +385,16 @@ class ConversationPipeline:
         self.emotion_tracker = emotion_tracker
         self.turn_policy = turn_policy or TurnPolicy()
         self._session_state_provider = session_state_provider
-        # All scale-related mutable state lives in this single container
-        # (core.scale_fsm.ScaleState). Legacy attribute names are exposed
-        # via delegate properties declared on the class below.
-        self._scale_state = ScaleState()
+        # Scale administration has one mutable owner.  Pipeline keeps only
+        # symptom observations used to build TurnSignals; it never mirrors
+        # active item, waiting, answers, pause, or completion state.
+        self.scale_runtime = ScaleRuntime()
+        self._scale_manager = get_scale_manager()
+        self.answer_interpreter = ScaleAnswerInterpreter()
+        self.symptom_scores = {
+            name: 0 for name in self._scale_manager.get_scale_names()
+        }
+        self.symptom_turns = 0
         self._post_scale_relaxation_done: bool = False  # True after post-scale relaxation recommended
         self._relaxation_recommended_this_session: set = set()  # track which types recommended
         self._game_recommended_this_session: bool = False  # track if game was recommended
@@ -450,14 +426,12 @@ class ConversationPipeline:
             logger.debug(f"executor shutdown error: {e}")
 
     def reset_session(self):
-        """Reset per-session state (scale tracking). Call on new session.
-
-        Note: the legacy implementation cleared the scale containers in
-        place (`.clear()`); ScaleState.reset() replaces them with fresh
-        objects. Verified safe: no code outside this class keeps
-        long-lived references to those containers.
-        """
-        self._scale_state.reset()
+        """Reset per-session state without touching unrelated services."""
+        self.scale_runtime.reset()
+        self.symptom_scores = {
+            name: 0 for name in self._scale_manager.get_scale_names()
+        }
+        self.symptom_turns = 0
         self._agent_route_cooldown = 0
         self.relaxation_recommended = False
         self.relaxation_active = False
@@ -481,9 +455,8 @@ class ConversationPipeline:
             return str(configured or "CHATTING").split(".")[-1].upper()
 
     def _completed_scale_names(self) -> tuple[str, ...]:
-        """Derive completed scales from the existing answer state."""
-        incomplete = {item["scale_name"] for item in self.get_incomplete_scales()}
-        return tuple(sorted(name for name in self._administered_scales if name not in incomplete))
+        """Read explicit completion from the Runtime snapshot."""
+        return tuple(self.scale_runtime.snapshot().completed_scales)
 
     def _build_turn_snapshot(
         self,
@@ -492,12 +465,13 @@ class ConversationPipeline:
         time_limit_reached: bool,
         session_state: str = "CHATTING",
     ) -> TurnStateSnapshot:
+        runtime = self.scale_runtime.snapshot()
         return TurnStateSnapshot(
             session_state=self._session_state_name(session_state),
             round_count=max(0, int(round_count)),
-            active_scale=self._active_scale,
-            current_item=self._active_scale_q if self._active_scale else None,
-            waiting_for_answer=bool(self._active_scale and self._active_scale_waiting_answer),
+            active_scale=runtime.active_scale,
+            current_item=runtime.current_item,
+            waiting_for_answer=runtime.waiting_for_answer,
             completed_scales=self._completed_scale_names(),
             relaxation_used=bool(self.relaxation_used),
             game_active=bool(self.relaxation_active),
@@ -527,8 +501,11 @@ class ConversationPipeline:
                 "user_text": user_text,
                 "recent_history": self._get_recent_dialogue_text(),
                 "current_round": current_rounds,
-                "active_scale": self._active_scale,
-                "collected_scales": self._scale_answers,
+                "active_scale": self.scale_runtime.snapshot().active_scale,
+                "collected_scales": {
+                    name: dict(answers)
+                    for name, answers in self.scale_runtime.snapshot().answers_by_scale.items()
+                },
                 "relaxation_done": self._get_relaxation_done(),
             }
             if hasattr(self.agent, "route_proposal"):
@@ -551,22 +528,25 @@ class ConversationPipeline:
     def _apply_turn_decision(self, decision: TurnDecision, result: PipelineResult) -> None:
         """Apply an already-authoritative decision; never choose another action."""
         if decision.action is TurnAction.START_SCALE:
-            scale_name = decision.scale_name
-            self._active_scale = scale_name
-            self._administered_scales.add(scale_name)
-            self._active_scale_q = self._next_unanswered_item(scale_name) or 1
-            self._active_scale_waiting_answer = False
-            self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
+            update = self.scale_runtime.start(decision.scale_name or "")
+            if not update.accepted:
+                logger.warning(
+                    f"[ScaleDebug] Runtime rejected start {decision.scale_name!r}: "
+                    f"{update.reason or update.status}"
+                )
+            self.symptom_scores = {
+                name: 0 for name in self._scale_manager.get_scale_names()
+            }
             self.symptom_turns = 0
         elif decision.action is TurnAction.CONTINUE_SCALE:
-            if self._scale_soft_paused and self._scale_pause_turns <= 0 and self._active_scale:
-                self._active_scale_waiting_answer = True
-                self._scale_soft_paused = False
+            runtime = self.scale_runtime.snapshot()
+            if runtime.active_scale and runtime.paused:
+                self.scale_runtime.resume()
+            elif runtime.active_scale:
+                self.scale_runtime.present_current_item()
         elif decision.action is TurnAction.PAUSE_SCALE:
-            if self._active_scale:
-                self._soft_pause_scale(reason=decision.reason)
-            else:
-                self._scale_pause_turns = 2
+            if self.scale_runtime.snapshot().active_scale:
+                self.scale_runtime.pause()
         elif decision.action is TurnAction.RECOMMEND_RELAXATION:
             self._relaxation_candidate = _normalize_relaxation_type(decision.intervention_type)
             self._pending_relaxation_after_scale = None
@@ -591,24 +571,27 @@ class ConversationPipeline:
 
     def get_active_scale_state(self) -> Optional[Dict[str, Any]]:
         """Return current active scale state for relaxation-interruption tracking."""
-        if self._active_scale and self._active_scale_q:
+        runtime = self.scale_runtime.snapshot()
+        if runtime.active_scale and runtime.current_item:
             return {
-                "scale_name": self._active_scale,
-                "item": self._active_scale_q,
+                "scale_name": runtime.active_scale,
+                "item": runtime.current_item,
                 "incomplete": True,
             }
         return None
 
     def get_active_scale_question_text(self) -> Optional[str]:
         """Get the natural question text for the current active scale item."""
-        if not self._active_scale or not self._active_scale_q:
+        runtime = self.scale_runtime.snapshot()
+        if not runtime.active_scale or not runtime.current_item:
             return None
-        from services.scales import SCALES
-        scale_def = SCALES.get(self._active_scale)
+        scale_def = self._scale_manager.get_scale_definition(runtime.active_scale)
         if not scale_def:
             return None
-        q_text = scale_def["questions"][self._active_scale_q - 1] if self._active_scale_q <= len(scale_def["questions"]) else ""
-        natural = NATURAL_SCALE_QUESTIONS.get((self._active_scale, self._active_scale_q), q_text)
+        q_text = scale_def.questions[runtime.current_item - 1]
+        natural = NATURAL_SCALE_QUESTIONS.get(
+            (runtime.active_scale, runtime.current_item), q_text
+        )
         return natural
 
     def restore_active_scale(self, scale_name: str, item: int) -> Optional[str]:
@@ -617,20 +600,26 @@ class ConversationPipeline:
         Returns the natural question phrasing for the resumed item, or None
         if scale is already complete.
         """
-        # Find the actual next unanswered item (item might already be scored)
-        next_item = self._next_unanswered_item(scale_name, after_item=item - 1)
-        if next_item is None:
-            logger.warning(f"[ScaleDebug] restore skipped: {scale_name} already complete")
+        del item  # Runtime derives the actual unanswered item from its answers.
+        runtime = self.scale_runtime.snapshot()
+        if runtime.active_scale and runtime.active_scale != scale_name:
+            logger.warning(
+                f"[ScaleDebug] restore rejected while {runtime.active_scale} is active"
+            )
             return None
-        self._active_scale = scale_name
-        self._active_scale_q = next_item
-        self._active_scale_waiting_answer = False
-        self._scale_soft_paused = False
-        self._scale_pause_turns = 0
-        self._scale_resume_item = None
-        natural = NATURAL_SCALE_QUESTIONS.get((scale_name, next_item), "")
-        logger.warning(f"[ScaleDebug] restore active scale after relaxation: {scale_name} Q{next_item}")
-        return natural
+        if runtime.active_scale is None:
+            update = self.scale_runtime.start(scale_name)
+        elif runtime.paused:
+            update = self.scale_runtime.resume()
+        else:
+            update = self.scale_runtime.present_current_item()
+        if update.status == "rejected":
+            logger.warning(
+                f"[ScaleDebug] restore rejected: {scale_name} "
+                f"{update.reason or update.status}"
+            )
+            return None
+        return self.get_active_scale_question_text()
 
     def force_resume_incomplete_scale(self) -> Optional[Dict[str, Any]]:
         """Force-resume the first incomplete scale for forced completion mode.
@@ -645,16 +634,23 @@ class ConversationPipeline:
         remaining = first.get("remaining_nums", [])
         if not remaining:
             return None
-        self._active_scale = scale_name
-        self._active_scale_q = remaining[0]
-        self._active_scale_waiting_answer = False
-        self._scale_soft_paused = False
-        self._scale_pause_turns = 0
+        runtime = self.scale_runtime.snapshot()
+        if runtime.active_scale is None:
+            update = self.scale_runtime.start(scale_name)
+        elif runtime.active_scale == scale_name and runtime.paused:
+            update = self.scale_runtime.resume()
+        elif runtime.active_scale == scale_name:
+            update = self.scale_runtime.present_current_item()
+        else:
+            return None
+        if update.status == "rejected":
+            return None
         logger.warning(
             f"[ScaleDebug] force resume: {scale_name} Q{remaining[0]}, "
             f"answered={first['answered']}/{first['total']}"
         )
-        return {"scale_name": scale_name, "item": remaining[0]}
+        current = self.scale_runtime.snapshot().current_item
+        return {"scale_name": scale_name, "item": current or remaining[0]}
 
     def get_incomplete_scales(self) -> List[Dict[str, Any]]:
         """Return scales with unanswered questions.
@@ -665,37 +661,16 @@ class ConversationPipeline:
         Each entry: {scale_name, total, answered, remaining_questions,
                      remaining_nums}.
         """
-        from services.scales import SCALES
-        # Build candidate set: all scales that have been touched
-        candidates = set(self._administered_scales)
-        candidates.update(self._scale_answers.keys())
-        if self._active_scale:
-            candidates.add(self._active_scale)
-
-        incomplete = []
-        for scale_name in candidates:
-            scale_def = SCALES.get(scale_name)
-            if not scale_def:
-                continue
-            total = len(scale_def["questions"])
-            answered = self._scale_answers.get(scale_name, {})
-            answered_count = len(answered)
-            if answered_count < total:
-                remaining = []
-                remaining_nums = []
-                for i, q in enumerate(scale_def["questions"]):
-                    q_num = i + 1
-                    if q_num not in answered:
-                        remaining.append(q)
-                        remaining_nums.append(q_num)
-                incomplete.append({
-                    "scale_name": scale_name,
-                    "total": total,
-                    "answered": answered_count,
-                    "remaining_questions": remaining,
-                    "remaining_nums": remaining_nums,
-                })
-        return incomplete
+        return [
+            {
+                "scale_name": item.scale_name,
+                "total": item.total,
+                "answered": item.answered,
+                "remaining_questions": list(item.remaining_questions),
+                "remaining_nums": list(item.remaining_nums),
+            }
+            for item in self.scale_runtime.get_incomplete_scales()
+        ]
 
     def get_scale_results(self) -> Dict[str, Any]:
         """Return structured scale scores for report and persistence.
@@ -704,32 +679,29 @@ class ConversationPipeline:
           scale_name, completed, answered, total_items, total_score,
           max_score, severity, items[{q_num, question, score, label, answered}]
         """
-        from services.scales import SCALES, get_scale_manager
-        mgr = get_scale_manager()
+        raw_results = self.scale_runtime.get_results()
         results: Dict[str, Any] = {}
 
-        for scale_name in self._administered_scales:
-            scale_def = SCALES.get(scale_name)
-            if not scale_def:
+        for scale_name, raw_result in raw_results.items():
+            scale_def = self._scale_manager.get_scale_definition(scale_name)
+            if scale_def is None:
                 continue
 
-            answers = self._scale_answers.get(scale_name, {})
-            total_items = len(scale_def["questions"])
-            completed = len(answers) == total_items
-
-            ordered_scores = [
-                answers[i] for i in range(1, total_items + 1) if i in answers
-            ]
-            score_summary = mgr.score_scale(scale_name, ordered_scores)
+            answers = dict(
+                self.scale_runtime.snapshot().answers_by_scale.get(scale_name, {})
+            )
+            total_items = scale_def.item_count
+            completed = bool(raw_result["completed"])
+            score_summary = raw_result
 
             items = []
-            for i, question in enumerate(scale_def["questions"], start=1):
+            for i, question in enumerate(scale_def.questions, start=1):
                 score = answers.get(i)
                 label = None
                 if score is not None:
-                    for opt in scale_def["options"]:
-                        if opt["score"] == score:
-                            label = opt["label"]
+                    for option_score, option_label in scale_def.options:
+                        if option_score == score:
+                            label = option_label
                             break
                 items.append({
                     "q_num": i,
@@ -750,13 +722,13 @@ class ConversationPipeline:
             missing_items = [i for i in range(1, total_items + 1) if i not in answers]
 
             results[scale_name] = {
-                "scale_name": scale_def["name"],
+                "scale_name": scale_def.title,
                 "completed": completed,
                 "answered": len(answers),
                 "total_items": total_items,
-                "total_score": score_summary["total"],
+                "total_score": raw_result["total_score"],
                 "total_score_label": total_score_label,
-                "max_score": score_summary["max_score"],
+                "max_score": raw_result["max_score"],
                 "severity": severity,
                 "missing_items": missing_items,
                 "items": items,
@@ -811,13 +783,14 @@ class ConversationPipeline:
         incomplete = self.get_incomplete_scales()
         if not incomplete:
             return None
-        from services.scales import SCALES
         parts = []
         for info in incomplete:
             scale_name = info["scale_name"]
-            scale_def = SCALES[scale_name]
+            scale_def = self._scale_manager.get_scale_definition(scale_name)
+            if scale_def is None:
+                continue
             options_text = " / ".join(
-                f"{opt['score']}-{opt['label']}" for opt in scale_def["options"]
+                f"{score}-{label}" for score, label in scale_def.options
             )
             questions_text = "\n".join(
                 f"  Q{info['remaining_nums'][i]}: {q}"
@@ -985,12 +958,13 @@ class ConversationPipeline:
         # neither is allowed to start a scale at this point.
         deterministic_candidate = None
         from config import ENABLE_SCALE_HARD_TRIGGER
-        if ENABLE_SCALE_HARD_TRIGGER and not self._active_scale:
+        before_runtime = self.scale_runtime.snapshot()
+        if ENABLE_SCALE_HARD_TRIGGER and not before_runtime.active_scale:
             detected = self._deterministic_scale_trigger(result.user_text)
             if detected:
                 deterministic_candidate = detected[0]
         pre_deltas, pre_reasons = ({}, [])
-        if not self._active_scale:
+        if not before_runtime.active_scale:
             pre_deltas, pre_reasons = score_symptom_signals(
                 result.user_text, self.symptom_scores
             )
@@ -1002,7 +976,7 @@ class ConversationPipeline:
                 eligible = [
                     (scale, score)
                     for scale, score in projected.items()
-                    if score >= 3 and scale not in self._administered_scales
+                    if score >= 3 and scale not in before_runtime.administered_scales
                 ]
                 if eligible:
                     eligible.sort(key=lambda pair: (-pair[1], pair[0]))
@@ -1033,11 +1007,10 @@ class ConversationPipeline:
         result.turn_decision = decision
         self._apply_turn_decision(decision, result)
         self._commit_user_turn(config, result, emit)
+        runtime = self.scale_runtime.snapshot()
 
         # Apply the one turn's symptom observations only after the decision.
-        allow_new_scale = True
-        _waiting_for_answer = bool(self._active_scale and self._active_scale_waiting_answer)
-        if not self._active_scale and pre_deltas:
+        if not before_runtime.active_scale and pre_deltas:
             if any(value > 0 for value in pre_deltas.values()):
                 self.symptom_turns += 1
                 for scale_name, delta in pre_deltas.items():
@@ -1059,7 +1032,9 @@ class ConversationPipeline:
 
         if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
             hint = self._build_scale_context_hint(
-                decision.scale_name, self._active_scale_q, agent_route or {}
+                runtime.active_scale or decision.scale_name,
+                runtime.current_item or 1,
+                agent_route or {},
             )
             if hint:
                 system_suffix += hint
@@ -1077,10 +1052,6 @@ class ConversationPipeline:
         # approved (or rejected) by TurnPolicy.  There is intentionally no
         # second trigger or eligibility check here.
 
-        # Scale pause countdown
-        if self._scale_pause_turns > 0:
-            self._scale_pause_turns -= 1
-
         if self.emotion_tracker:
             hint = self.emotion_tracker.get_intervention_hint()
             if hint:
@@ -1089,10 +1060,9 @@ class ConversationPipeline:
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
         # --- No programmatic scale questions ---
-        # Scales are now explored naturally by the LLM via subtle system_suffix
-        # hints. Background scoring happens via [SCALE:] tags and
-        # infer_scale_score_from_text(). The LLM generates a natural response,
-        # not a template question.
+        # Scales are explored naturally by the LLM via subtle system_suffix
+        # hints. Structured answer interpretation happens in the pure
+        # ScaleAnswerInterpreter after the response, not in the LLM branch.
 
         # Append extra system context (e.g. remaining scale questions at exit)
         if config.extra_system_suffix:
@@ -1104,20 +1074,21 @@ class ConversationPipeline:
         # --- Pre-LLM positive_pending check ---
         # If active scale item has positive symptoms but no frequency,
         # inject mandatory frequency follow-up BEFORE LLM generates.
-        if self._active_scale and self._active_scale_waiting_answer:
-            answered = self._scale_answers.get(self._active_scale, {})
-            if self._active_scale_q not in answered:
+        runtime = self.scale_runtime.snapshot()
+        if runtime.active_scale and runtime.waiting_for_answer:
+            answered = runtime.answers_by_scale.get(runtime.active_scale, {})
+            if runtime.current_item not in answered:
                 _pre_positive = self._is_positive_pending_frequency(
-                    self._active_scale, self._active_scale_q, result.user_text
+                    runtime.active_scale, runtime.current_item, result.user_text
                 )
                 if _pre_positive:
                     _item_hint = NATURAL_SCALE_QUESTIONS.get(
-                        (self._active_scale, self._active_scale_q), ""
+                        (runtime.active_scale, runtime.current_item), ""
                     )
                     freq_hint = f"""
 【必须追问频率】用户已明确表达存在症状，但缺少频率信息。
-当前量表：{self._active_scale}
-当前题：Q{self._active_scale_q}
+当前量表：{runtime.active_scale}
+当前题：Q{runtime.current_item}
 当前维度：{_item_hint}
 请自然追问最近两周频率。只能问这一件事。
 不要说量表、评分、PHQ。不能结束，不能推荐放松。
@@ -1127,8 +1098,8 @@ class ConversationPipeline:
                     else:
                         final_suffix = freq_hint
                     logger.warning(
-                        f"[ScaleDebug] pre-LLM positive_pending: {self._active_scale} "
-                        f"Q{self._active_scale_q}, injecting frequency hint"
+                        f"[ScaleDebug] pre-LLM positive_pending: {runtime.active_scale} "
+                        f"Q{runtime.current_item}, injecting frequency hint"
                     )
 
         # --- LLM stream + Agent classification (concurrent) ---
@@ -1178,9 +1149,9 @@ class ConversationPipeline:
         # Check for internal strategy term leak before display/TTS
         if _contains_internal_leak(result.spoken_text):
             logger.warning(f"[OutputClean] internal strategy leaked: {result.spoken_text!r}")
-            if self._active_scale:
+            if runtime.active_scale:
                 result.spoken_text = self._make_scale_clarify_reply(
-                    self._active_scale, self._active_scale_q, result.user_text
+                    runtime.active_scale, runtime.current_item or 1, result.user_text
                 )
             else:
                 result.spoken_text = make_safe_fallback_reply(result.user_text)
@@ -1220,138 +1191,111 @@ class ConversationPipeline:
         game_recommended = self._game_candidate
         self._game_candidate = False
         parsed_scale_tags = parse_scale_tags(result.full_response)
+        runtime = self.scale_runtime.snapshot()
         allowed_scale = (
-            self._active_scale
+            runtime.active_scale
             if result.turn_decision and result.turn_decision.action in (
                 TurnAction.START_SCALE,
                 TurnAction.CONTINUE_SCALE,
             )
             else None
         )
-        result.scale_tags = (
-            {allowed_scale: parsed_scale_tags.get(allowed_scale, {})}
-            if allowed_scale and parsed_scale_tags.get(allowed_scale)
-            else {}
-        )
-        if parsed_scale_tags and parsed_scale_tags != result.scale_tags:
+        result.scale_tags = {}
+        if parsed_scale_tags:
             logger.warning(
-                f"[ScaleDebug] ignored non-authoritative SCALE tags: {parsed_scale_tags}"
+                f"[ScaleDebug] SCALE tags are candidates only: {parsed_scale_tags}"
             )
-        if result.scale_tags:
-            logger.warning(f"[ScaleDebug] SCALE tags parsed from LLM: {result.scale_tags}")
-        # Track answered questions per scale
-        for scale_name, answers in result.scale_tags.items():
-            if scale_name not in self._scale_answers:
-                self._scale_answers[scale_name] = {}
-            self._scale_answers[scale_name].update(answers)
-            logger.warning(f"[ScaleDebug] tag scored {scale_name} {answers}")
-
-        # Short answer scoring: "经常", "是的", "没有" etc. for active scale items
-        if self._active_scale:
-            answered = self._scale_answers.get(self._active_scale, {})
-            if self._active_scale_q not in answered:
-                short_score = self._score_short_scale_answer(
-                    self._active_scale, self._active_scale_q, result.user_text
+        accepted_update = None
+        accepted_item = None
+        accepted_score = None
+        if allowed_scale and runtime.current_item:
+            current_item = runtime.current_item
+            tag_score = parsed_scale_tags.get(allowed_scale, {}).get(current_item)
+            if tag_score is not None and self._scale_manager.validate_answer(
+                allowed_scale, item=current_item, score=tag_score
+            ):
+                accepted_update = self.scale_runtime.accept_answer(
+                    scale_name=allowed_scale,
+                    item=current_item,
+                    score=tag_score,
                 )
-                if short_score is not None:
-                    self._record_scale_score(self._active_scale, self._active_scale_q, short_score)
-                    result.scale_tags.setdefault(self._active_scale, {})[self._active_scale_q] = short_score
-                    logger.warning(
-                        f"[ScaleDebug] short answer scored {self._active_scale} "
-                        f"Q{self._active_scale_q} = {short_score}, text={result.user_text!r}"
+                if accepted_update.accepted:
+                    accepted_item, accepted_score = current_item, tag_score
+                    result.scale_tags = {allowed_scale: {current_item: tag_score}}
+            elif parsed_scale_tags.get(allowed_scale):
+                logger.warning(
+                    f"[ScaleDebug] ignored tag not matching current Runtime item: "
+                    f"{parsed_scale_tags.get(allowed_scale)}"
+                )
+
+            if accepted_update is None or not accepted_update.accepted:
+                interpretation = self.answer_interpreter.interpret(
+                    result.user_text,
+                    scale_name=allowed_scale,
+                    item=current_item,
+                )
+                if interpretation.status == "accepted" and interpretation.score is not None:
+                    accepted_update = self.scale_runtime.accept_answer(
+                        scale_name=allowed_scale,
+                        item=current_item,
+                        score=interpretation.score,
                     )
+                    if accepted_update.accepted:
+                        accepted_item, accepted_score = current_item, interpretation.score
+                        result.scale_tags = {
+                            allowed_scale: {current_item: interpretation.score}
+                        }
+                elif interpretation.status == "ambiguous":
+                    self.scale_runtime.request_clarification()
+                elif interpretation.status in {"pause", "refusal", "unmatched"}:
+                    if not self.scale_runtime.snapshot().paused:
+                        self.scale_runtime.request_clarification()
 
-        # Fallback: if LLM didn't output a [SCALE:...] tag for the current
-        # question, try to infer the score from the user's plain text answer.
-        # Also detect if user is naturally talking about a different symptom.
-        # In latent mode, also try scoring even without explicit waiting state.
-        if self._active_scale:
-            answered = self._scale_answers.get(self._active_scale, {})
-            if self._active_scale_q not in answered:
-                # First check if user is talking about a different PHQ-9 item
-                detected_item = None
-                if self._active_scale == "PHQ-9":
-                    detected_item = detect_phq_item_from_text(result.user_text)
-                    if detected_item and detected_item != self._active_scale_q and detected_item not in answered:
-                        # User is talking about a different symptom — score that
-                        # item (NOT the active question number) using item-aware
-                        # inference, otherwise the symptom keywords would be
-                        # matched against the wrong question's scoring logic.
-                        inferred = infer_scale_score_from_text(result.user_text, self._active_scale, detected_item)
-                        if inferred is not None:
-                            self._scale_answers.setdefault(self._active_scale, {})[detected_item] = inferred
-                            logger.warning(
-                                f"[ScaleDebug] detected symptom Q{detected_item} (not Q{self._active_scale_q}), "
-                                f"scored {self._active_scale} Q{detected_item} = {inferred}"
-                            )
-
-                # Still try to score the current question
-                if self._active_scale_q not in self._scale_answers.get(self._active_scale, {}):
-                    inferred = infer_scale_score_from_text(result.user_text, self._active_scale, self._active_scale_q)
-                    if inferred is not None:
-                        self._scale_answers.setdefault(self._active_scale, {})[self._active_scale_q] = inferred
-                        logger.warning(
-                            f"[ScaleDebug] inferred score {self._active_scale} "
-                            f"Q{self._active_scale_q} = {inferred} from user_text: {result.user_text!r}"
-                        )
-
-        # Advance active scale after scoring
-        if self._active_scale:
-            from services.scales import SCALES
-            scale_def = SCALES.get(self._active_scale)
-            if scale_def:
-                total = len(scale_def["questions"])
-                answered = self._scale_answers.get(self._active_scale, {})
-                current_q = self._active_scale_q
-
-                if current_q in answered:
-                    # Current question was scored successfully — advance
-                    completed_name = self._active_scale
-                    self._advance_active_scale_after_score(completed_name)
-                    if self._active_scale is None:
-                        # Scale fully complete
-                        result.scale_completed = True
-                        result.completed_scale_name = completed_name
-                        if self._scale_queue:
-                            logger.warning(f"[ScaleDebug] clearing stale scale_queue: {self._scale_queue}")
-                            self._scale_queue.clear()
-                        result.all_scales_completed = True
-                        logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
-                        # Completion is execution metadata for this turn.  A
-                        # post-scale relaxation recommendation is deferred to a
-                        # future turn so it cannot become a second decision.
-                        if not self._post_scale_relaxation_done:
-                            rec_type = self._pending_relaxation_after_scale or self._choose_post_scale_relaxation(completed_name)
-                            self._pending_relaxation_after_scale = None
-                            if rec_type:
-                                self._pending_relaxation_after_scale = rec_type
-                                logger.warning(
-                                    f"[RelaxDebug] deferred post-scale signal: {completed_name} -> {rec_type}"
-                                )
-                    else:
-                        # Advanced to next item — pause 1 turn, don't chain questions
-                        self._scale_pause_turns = 1
-                        logger.warning(
-                            f"[ScaleDebug] scored {completed_name} Q{current_q}={answered.get(current_q)}; "
-                            f"next Q{self._active_scale_q}, pause 1 turn"
-                        )
-                else:
-                    # No score for current Q — continue waiting, add hint for next turn
-                    self._active_scale_waiting_answer = True
-                    # Check if user expressed strong symptoms (need frequency follow-up)
-                    _strong = any(x in result.user_text for x in [
-                        "非常", "很", "特别", "极其", "沮丧", "绝望", "难受", "低落", "焦虑"
-                    ])
-                    # Item-aware positive detection: "坐不住" → Q8, "睡不着" → Q3, etc.
-                    _positive_pending = self._is_positive_pending_frequency(
-                        self._active_scale, current_q, result.user_text
+        # Runtime is the only transition owner for answer acceptance and
+        # progression.  Clarification text is derived from the unchanged
+        # snapshot; it never creates a pending score in Pipeline.
+        runtime_after = self.scale_runtime.snapshot()
+        if accepted_update is not None and accepted_update.accepted:
+            completed_name = allowed_scale
+            if accepted_update.completed and completed_name:
+                result.scale_completed = True
+                result.completed_scale_name = completed_name
+                result.all_scales_completed = bool(
+                    set(runtime_after.completed_scales)
+                    >= set(runtime_after.administered_scales)
+                )
+                logger.warning(
+                    f"[ScaleDebug] completed {completed_name}; "
+                    f"completed={runtime_after.completed_scales}"
+                )
+                if not self._post_scale_relaxation_done:
+                    rec_type = (
+                        self._pending_relaxation_after_scale
+                        or self._choose_post_scale_relaxation(completed_name)
                     )
-                    if _strong or _positive_pending:
-                        # Symptoms confirmed — MUST ask for frequency
-                        _item_hint = NATURAL_SCALE_QUESTIONS.get((self._active_scale, current_q), "")
-                        system_suffix += f"""
+                    self._pending_relaxation_after_scale = None
+                    if rec_type:
+                        self._pending_relaxation_after_scale = rec_type
+            elif runtime_after.active_scale:
+                logger.warning(
+                    f"[ScaleDebug] accepted {completed_name} Q{accepted_item}="
+                    f"{accepted_score}; next Q{runtime_after.current_item}"
+                )
+        elif runtime_after.active_scale and runtime_after.current_item:
+            current_q = runtime_after.current_item
+            _strong = any(x in result.user_text for x in [
+                "非常", "很", "特别", "极其", "沮丧", "绝望", "难受", "低落", "焦虑"
+            ])
+            _positive_pending = self._is_positive_pending_frequency(
+                runtime_after.active_scale, current_q, result.user_text
+            )
+            if _strong or _positive_pending:
+                _item_hint = NATURAL_SCALE_QUESTIONS.get(
+                    (runtime_after.active_scale, current_q), ""
+                )
+                system_suffix += f"""
 【必须追问频率】用户已明确表达存在症状，但缺少频率信息。
-当前量表：{self._active_scale}
+当前量表：{runtime_after.active_scale}
 当前题：Q{current_q}
 当前维度：{_item_hint}
 不要再问"有没有这个症状"。
@@ -1359,14 +1303,16 @@ class ConversationPipeline:
 示例："这种感觉最近是偶尔几天，还是大多数时间都会有？"
 只能问这一件事。不能结束，不能推荐放松，不能泛泛咨询。
 """
-                        # Protect from agent pause during positive_pending
-                        self._active_scale_waiting_answer = True
-                        logger.warning(f"[ScaleDebug] {self._active_scale} Q{current_q} positive_pending_frequency; force frequency follow-up")
-                    else:
-                        hint = self._build_scale_context_hint(self._active_scale, current_q, {})
-                        if hint:
-                            system_suffix += hint
-                    logger.warning(f"[ScaleDebug] no score for Q{current_q}, staying waiting, strong={_strong}, positive_pending={_positive_pending}")
+            else:
+                hint = self._build_scale_context_hint(
+                    runtime_after.active_scale, current_q, {}
+                )
+                if hint:
+                    system_suffix += hint
+            logger.warning(
+                f"[ScaleDebug] item Q{current_q} remains pending; "
+                f"strong={_strong}, positive_pending={_positive_pending}"
+            )
 
         # Refresh final_suffix after all scale hints are added
         final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
@@ -1380,10 +1326,10 @@ class ConversationPipeline:
             f"scale_tags={result.scale_tags}"
         )
         logger.warning(
-            f"[ScaleState] active={self._active_scale} "
-            f"item={self._active_scale_q} "
-            f"waiting={self._active_scale_waiting_answer} "
-            f"pause={self._scale_pause_turns} "
+            f"[ScaleRuntime] active={runtime_after.active_scale} "
+            f"item={runtime_after.current_item} "
+            f"waiting={runtime_after.waiting_for_answer} "
+            f"paused={runtime_after.paused} "
             f"tags={result.scale_tags}"
         )
 
@@ -1457,7 +1403,7 @@ class ConversationPipeline:
                 lambda f: logger.warning(f"TTS error: {f.exception()}") if f.exception() else None
             )
 
-        result.scale_active = bool(self._active_scale)
+        result.scale_active = bool(self.scale_runtime.snapshot().active_scale)
         metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
         return result
 
@@ -1504,15 +1450,13 @@ class ConversationPipeline:
         This does NOT tell the LLM to "ask question N" or "score this item".
         Instead, it hints which symptom area to naturally explore, and lets
         the LLM generate a conversational response. Background scoring
-        happens via [SCALE:] tags and infer_scale_score_from_text().
+        happens via the pure ScaleAnswerInterpreter after the turn.
         """
-        from services.scales import SCALES
-        scale = SCALES.get(scale_name)
-        if not scale:
+        scale_def = self._scale_manager.get_scale_definition(scale_name)
+        if scale_def is None:
             return ""
 
-        total = len(scale["questions"])
-        q_text = scale["questions"][q_num - 1]
+        q_text = scale_def.questions[q_num - 1]
         natural_q = NATURAL_SCALE_QUESTIONS.get((scale_name, q_num), q_text)
 
         # Map scale to a brief clinical hint
@@ -1524,9 +1468,9 @@ class ConversationPipeline:
         clinical_hint = scale_hints.get(scale_name, "心理困扰")
 
         # Build a list of symptom areas still to explore
-        answered = self._scale_answers.get(scale_name, {})
+        answered = self.scale_runtime.snapshot().answers_by_scale.get(scale_name, {})
         remaining_areas = []
-        for i, q in enumerate(scale["questions"], start=1):
+        for i, q in enumerate(scale_def.questions, start=1):
             if i not in answered:
                 area = NATURAL_SCALE_QUESTIONS.get((scale_name, i), q)
                 remaining_areas.append(area)
@@ -1544,7 +1488,7 @@ class ConversationPipeline:
             # Background scoring will happen via [SCALE:] tags.
             # Hint: if user's response clearly maps to a score, output the tag.
             options_text = " / ".join(
-                f"{opt['score']}-{opt['label']}" for opt in scale["options"]
+                f"{score}-{label}" for score, label in scale_def.options
             )
             return f"""
 【后台提示】来访者正在回应关于"{natural_q}"的了解。
@@ -1553,21 +1497,6 @@ class ConversationPipeline:
 如果回答模糊，不要猜分数，自然追问一句。
 口语回复严禁出现"量表""问卷""题""评分""分数""PHQ-9""GAD-7""PCL-5""接下来"。
 """
-
-    def _next_unanswered_item(self, scale_name: str, after_item: int = 0):
-        """Get the next unanswered question number, or None if complete.
-
-        Scans from 1 to find all gaps — ensures Q1 gets back-filled
-        even if Q2 was answered first.
-        """
-        from services.scales import SCALES
-        total = len(SCALES.get(scale_name, {}).get("questions", []))
-        answered = self._scale_answers.get(scale_name, {})
-        # Always scan from 1 to find gaps (back-fill Q1 if Q2 answered first)
-        for i in range(1, total + 1):
-            if i not in answered:
-                return i
-        return None
 
     def _make_scale_clarify_reply(self, scale_name: str, item: int, user_text: str) -> str:
         """Generate a safe reply when internal strategy terms leak into spoken output."""
@@ -1610,7 +1539,7 @@ class ConversationPipeline:
 
     def _choose_post_scale_relaxation(self, scale_name: str) -> Optional[str]:
         """Choose relaxation type based on completed scale results."""
-        answers = self._scale_answers.get(scale_name, {})
+        answers = self.scale_runtime.snapshot().answers_by_scale.get(scale_name, {})
         if not answers:
             return "breathing"
 
@@ -1624,41 +1553,6 @@ class ConversationPipeline:
             return "breathing"
 
         return "breathing"
-
-    def _soft_pause_scale(self, reason: str = ""):
-        """Soft pause: temporarily stop probing, but keep active scale state.
-
-        Does NOT clear _active_scale, _active_scale_q, or _scale_answers.
-        The scale can resume after 1-2 turns of normal conversation.
-        """
-        self._scale_soft_paused = True
-        self._scale_pause_turns = 2
-        self._scale_resume_item = self._active_scale_q
-        self._active_scale_waiting_answer = True
-        logger.warning(
-            f"[ScaleDebug] soft pause {self._active_scale} Q{self._active_scale_q}, "
-            f"reason={reason}, will resume later"
-        )
-
-    def _record_scale_score(self, scale_name: str, item: int, score: int):
-        """Record a scale score into _scale_answers and mark as administered."""
-        self._scale_answers.setdefault(scale_name, {})
-        self._scale_answers[scale_name][int(item)] = int(score)
-        self._administered_scales.add(scale_name)
-
-    def _advance_active_scale_after_score(self, scale_name: str):
-        """After scoring an item, advance to next unanswered after current item."""
-        next_item = self._next_unanswered_item(scale_name, after_item=self._active_scale_q)
-        if next_item is None:
-            logger.warning(f"[ScaleDebug] {scale_name} completed: {self._scale_answers.get(scale_name, {})}")
-            self._active_scale = None
-            self._active_scale_q = 1
-            self._active_scale_waiting_answer = False
-            return
-        self._active_scale = scale_name
-        self._active_scale_q = next_item
-        self._active_scale_waiting_answer = False
-        logger.warning(f"[ScaleDebug] advance {scale_name} to Q{next_item}")
 
     def _deterministic_scale_trigger(self, text: str) -> Optional[tuple]:
         """Hard fallback: any symptom keyword from any scale item triggers that scale.
@@ -1733,58 +1627,6 @@ class ConversationPipeline:
         has_positive = any(w in t for w in positive_words)
         has_frequency = any(w in t for w in FREQUENCY_WORDS)
         return has_positive and not has_frequency
-
-    def _score_short_scale_answer(self, scale_name: str, item: int, user_text: str):
-        """Score short natural answers to the currently active scale item.
-
-        Returns score (0-3) or None if can't determine.
-        Only scores clean denials and clear frequency words — rejects
-        ambiguous text like "没有具体的" which isn't answering the scale item.
-        """
-        t = (user_text or "").strip("。！？!?,， ").lower()
-        if not t:
-            return None
-
-        # Symptom-positive words — if present, "没有" is denying cause, not symptom
-        _symptom_positive = [
-            "不开心", "心情不好", "低落", "难受", "没意思", "沮丧",
-            "绝望", "痛苦", "累", "焦虑", "紧张", "烦躁", "害怕",
-            "就是", "一直", "还是",
-        ]
-        has_symptom = any(x in t for x in _symptom_positive)
-
-        # Clean denial only — must NOT co-occur with symptom words
-        clean_denials = {"没有", "没", "没有了", "也不会", "不太会", "不会", "不"}
-        if t in clean_denials:
-            return 0
-
-        # "没有什么事，就是不开心" — denying cause, NOT denying symptom
-        if any(x in t for x in ["没有什么", "没有原因", "没有具体", "不知道为什么"]) and has_symptom:
-            return None  # ambiguous — continue asking frequency
-
-        # Frequency answers (PHQ-9 / GAD-7) — must be short and clear
-        if any(x in t for x in ["偶尔", "有时候", "有时", "几天", "一两天"]):
-            return 1
-        if any(x in t for x in ["经常", "挺多", "不少", "一半以上", "大多数", "多数时候", "好多天"]):
-            return 2
-        if any(x in t for x in ["每天", "天天", "几乎每天", "一直", "总是", "老是", "基本每天"]):
-            return 3
-
-        # Affirmative without frequency — conservative score 1
-        if t in {"是", "是的", "对", "对的", "嗯", "有", "会", "还会", "会的"}:
-            return 1
-
-        # Strong symptom words without frequency — don't score, keep asking
-        # "非常沮丧" "很绝望" "特别难受" → symptom confirmed, need frequency
-        _strong_symptom = [
-            "非常", "很", "特别", "极其", "十分", "相当", "一直很",
-        ]
-        if any(x in t for x in _strong_symptom) and has_symptom:
-            logger.warning(f"[ScaleDebug] strong symptom detected but no frequency: {user_text!r}")
-            return None  # don't score — continue asking frequency
-
-        # Reject everything else — don't guess
-        return None
 
     def _build_scale_context_hint(self, scale_name: str, item: int, agent_route: dict) -> str:
         """Build a detailed scale context hint for the main model.
@@ -1883,7 +1725,15 @@ class ConversationPipeline:
                     rag_text = "\n".join(cleaned_recent + [text])
             rag_suffix = self.rag.get_system_suffix(rag_text)
             # Truncate RAG — tighter when active scale or positive_pending
-            _rag_active = self._active_scale or (self._active_scale_waiting_answer and self._is_positive_pending_frequency(self._active_scale, self._active_scale_q, text))
+            runtime = self.scale_runtime.snapshot()
+            _rag_active = runtime.active_scale or (
+                runtime.waiting_for_answer
+                and runtime.active_scale
+                and runtime.current_item
+                and self._is_positive_pending_frequency(
+                    runtime.active_scale, runtime.current_item, text
+                )
+            )
             max_rag = 200 if _rag_active else 1200
             if rag_suffix and len(rag_suffix) > max_rag:
                 rag_suffix = rag_suffix[:max_rag] + "\n【知识库已截断】"
