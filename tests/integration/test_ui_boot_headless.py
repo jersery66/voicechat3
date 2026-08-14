@@ -1,7 +1,8 @@
 """Layer-2 headless UI tests: real MainWindow on the offscreen Qt platform.
 
-Requires a working PySide6 install (skipped otherwise) and shadow mode
-enabled (skipped when VOICECHAT_ENGINE_SHADOW=0).
+Requires a working PySide6 install (skipped otherwise).  Model loading is
+monkeypatched below, so this test exercises the authoritative lifecycle
+bridge without external model services.
 
 IMPORTANT: MainWindow.__init__ unconditionally spawns the model-loading
 thread; the fixture monkeypatches load_models to a no-op so these tests
@@ -20,17 +21,9 @@ pytest.importorskip("PySide6.QtWidgets", reason="PySide6 not available")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from config import SESSION_ENGINE_SHADOW  # noqa: E402
 from core.session_fsm import SessionState  # noqa: E402
 from app.contracts import EndSessionCommand  # noqa: E402
 from core.types import EndType  # noqa: E402
-
-if not SESSION_ENGINE_SHADOW:
-    pytest.skip(
-        "SESSION_ENGINE_SHADOW disabled (VOICECHAT_ENGINE_SHADOW=0)",
-        allow_module_level=True,
-    )
-
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -63,7 +56,7 @@ def window(qapp, monkeypatch):
 
 
 class TestHeadlessBoot:
-    def test_shadow_engine_created(self, window):
+    def test_session_engine_created(self, window):
         assert window.session_engine is not None
         assert window.session_engine.state == SessionState.IDLE
 

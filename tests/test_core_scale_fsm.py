@@ -157,8 +157,6 @@ class TestPipelineRuntimeOwnership:
         pipeline.scale_runtime.start("PHQ-9")
         pipeline.scale_runtime.accept_answer(scale_name="PHQ-9", item=1, score=1)
         pipeline.symptom_scores["PHQ-9"] = 3
-        pipeline.relaxation_used = True
-        pipeline.exit_requested = True
         pipeline._agent_route_cooldown = 2
         pipeline._post_scale_relaxation_done = True
         pipeline._relaxation_recommended_this_session.add("breathing")
@@ -172,8 +170,8 @@ class TestPipelineRuntimeOwnership:
         assert pipeline.scale_runtime.snapshot().active_scale is None
         assert pipeline.scale_runtime.snapshot().answers_by_scale == {}
         assert pipeline.symptom_scores == {name: 0 for name in SCALE_NAMES}
-        assert pipeline.relaxation_used is False
-        assert pipeline.exit_requested is False
+        assert not hasattr(pipeline, "relaxation_used")
+        assert not hasattr(pipeline, "exit_requested")
         assert pipeline._agent_route_cooldown == 0
         assert pipeline._post_scale_relaxation_done is False
         assert pipeline._relaxation_recommended_this_session == set()

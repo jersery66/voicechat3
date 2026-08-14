@@ -99,4 +99,4 @@ def test_legacy_end_and_relaxation_tags_cannot_override_chat_decision():
     assert result.turn_decision.action is TurnAction.CHAT
     assert result.end_type is None
     assert result.relaxation_rec is None
-    assert pipeline.relaxation_used is False
+    assert not hasattr(pipeline, "relaxation_used")

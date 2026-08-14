@@ -39,8 +39,6 @@ from .dialogs import (
 )
 from .styles import get_style
 from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineConfig
-from services.session_orchestrator import SessionState, SessionOrchestrator
-from services.session_end_controller import SessionEndController
 from services.report_service import EndType
 
 
@@ -60,10 +58,7 @@ class MainWindow(QMainWindow):
         self.agent_service = None
         self.session_emotions = []  # Accumulated emotion tags for report
         self._scale_tags = {}
-        self._session_ending = False
-        self._pending_quit = False
         self._asking_scales = False
-        self._user_explicit_end = False
         self._exit_wait_dialog = None
         self._current_report_generated = False
         self._current_report_generating = False
@@ -74,17 +69,10 @@ class MainWindow(QMainWindow):
         self._end_decision_open = False
         self._end_request_in_progress = False
         self._pre_end_relax_prompted = False
-        self._pending_end_after_video = None
 
         # Pipeline generation token — used to cancel stale results
         self._pipeline_generation = 0
         self._pipeline_cancel_generation = -1
-
-        # Relaxation-interrupted-scale resume state
-        self._scale_interrupted_by_relaxation = False
-        self._resume_scale_after_relaxation = None  # {"scale_name": ..., "item": ...}
-        self._post_scale_relaxation_recommended = False
-        self._post_relaxation_feedback_consumed = False
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -95,31 +83,19 @@ class MainWindow(QMainWindow):
         self.is_recording = False
         self.models_loaded = False
         self._dark_mode = False
-        self.orchestrator = SessionOrchestrator()
-        self.session_end_controller = SessionEndController()
-
-        # Refactor shadow mode: mirror lifecycle decisions into the new
-        # app.engine.SessionEngine for validation. LEGACY stays authoritative;
-        # engine events are only logged. Never crashes the app: any failure
-        # here disables shadow mode silently.
+        # SessionEngine is the single lifecycle owner.  MainWindow only sends
+        # commands and renders the immutable events it emits.
         self.session_engine = None
         try:
-            from config import SESSION_ENGINE_SHADOW
-            if SESSION_ENGINE_SHADOW:
-                from app.engine import SessionEngine
-                self.session_engine = SessionEngine(
-                    emit=lambda ev: logger.info(
-                        f"[EngineShadow] event {ev.kind}: "
-                        f"{ev.model_dump(mode='json', exclude={'ts'})}"
-                    )
-                )
-                self.session_engine.start()
-                app = QApplication.instance()
-                if app is not None:
-                    app.aboutToQuit.connect(self.session_engine.shutdown)
-                logger.info("[EngineShadow] SessionEngine shadow mode enabled")
+            from app.engine import SessionEngine
+            self.session_engine = SessionEngine(emit=self._on_engine_event)
+            self.session_engine.start()
+            app = QApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(self.session_engine.shutdown)
+            logger.info("SessionEngine lifecycle authority enabled")
         except Exception as e:
-            logger.warning(f"[EngineShadow] disabled due to init error: {e}")
+            logger.warning(f"SessionEngine unavailable: {e}")
             self.session_engine = None
 
         self.user_info = {}
@@ -150,6 +126,34 @@ class MainWindow(QMainWindow):
         # Load models in background
         self.load_thread = threading.Thread(target=self.load_models, daemon=True)
         self.load_thread.start()
+
+    def _on_engine_event(self, event):
+        """Bridge engine events to the Qt queue without mutating lifecycle state."""
+        try:
+            self.processing_queue.put(("engine_event", event))
+        except Exception as exc:
+            logger.warning(f"SessionEngine event bridge failed: {exc}")
+
+    def _lifecycle_snapshot(self):
+        engine = getattr(self, "session_engine", None)
+        return engine.snapshot() if engine is not None else None
+
+    def _lifecycle_state_name(self) -> str:
+        snapshot = self._lifecycle_snapshot()
+        state = getattr(snapshot, "session_state", None)
+        return getattr(state, "name", str(state or "IDLE").split(".")[-1]).upper()
+
+    def _engine_can_start_pipeline(self) -> bool:
+        engine = getattr(self, "session_engine", None)
+        return bool(engine and engine.can_start_pipeline())
+
+    def _engine_can_play_video(self) -> bool:
+        engine = getattr(self, "session_engine", None)
+        return bool(engine and engine.can_play_video())
+
+    def _engine_relaxation_type(self):
+        snapshot = self._lifecycle_snapshot()
+        return getattr(snapshot, "relaxation_type", None)
 
     def _setup_window(self):
         self.setWindowTitle(APP_NAME)
@@ -314,7 +318,7 @@ class MainWindow(QMainWindow):
         """用户点击'修改信息/新会话'：准备下一位，但不播放欢迎语。"""
         self.info_confirmed = False
         # If previous session already ended, clean up now
-        if self.orchestrator.state in (SessionState.SESSION_ENDED, SessionState.IDLE):
+        if self._lifecycle_state_name() in ("SESSION_ENDED", "IDLE"):
             self._prepare_next_subject()
         else:
             self.control_panel.set_status("请重新填写信息")
@@ -357,7 +361,7 @@ class MainWindow(QMainWindow):
         self.control_panel.set_recording_state(True)
         self.control_panel.set_status("正在录音...")
         # Don't kill relaxation highlight when user starts recording during RELAXATION_RECOMMENDED
-        if self.orchestrator.state != SessionState.RELAXATION_RECOMMENDED:
+        if self._lifecycle_state_name() != "RELAXATION_RECOMMENDED":
             self.control_panel.stop_all_blinks()
 
         if self.stt_service:
@@ -401,7 +405,7 @@ class MainWindow(QMainWindow):
         if not self.models_loaded or not self.pipeline:
             self.chat_panel.add_system_message("模型尚未加载完成，请稍候")
             return
-        if not self.orchestrator.can_start_pipeline():
+        if not self._engine_can_start_pipeline():
             self.chat_panel.add_system_message("当前不在可对话状态，请稍候")
             return
         if not self.info_confirmed:
@@ -424,23 +428,29 @@ class MainWindow(QMainWindow):
 
         def safe_put(mt, ct):
             """Suppress callbacks from stale/cancelled pipeline results."""
-            if generation <= self._pipeline_cancel_generation or self._session_ending:
+            if generation <= self._pipeline_cancel_generation or self._lifecycle_state_name() in (
+                "SESSION_ENDING", "SESSION_ENDED"
+            ):
                 logger.warning(f"[PipelineCancel] suppress callback {mt} from gen={generation}")
                 return
-            if self.orchestrator.state != SessionState.CHATTING and mt in (
+            if self._lifecycle_state_name() != "CHATTING" and mt in (
                 "append_chat", "replace_last_ai", "stream_text", "start_ai_message"
             ):
-                logger.warning(f"[PipelineCancel] suppress UI callback {mt} in state={self.orchestrator.state}")
+                logger.warning(f"[PipelineCancel] suppress UI callback {mt} in state={self._lifecycle_state_name()}")
                 return
             self.processing_queue.put((mt, ct))
 
         try:
-            if not self.orchestrator.can_start_pipeline():
+            if not self._engine_can_start_pipeline():
                 self.processing_queue.put(("status", "当前不在可对话状态，请稍候"))
                 return
 
-            # Post-relaxation feedback: consume first user message, then resume scale
-            if self._scale_interrupted_by_relaxation and not self._post_relaxation_feedback_consumed:
+            # A paused Runtime scale consumes the first post-relaxation turn
+            # as feedback, then resumes the Runtime-selected item.  UI does
+            # not retain a second item/resume state.
+            runtime = getattr(self.pipeline, "scale_runtime", None)
+            runtime_snapshot = runtime.snapshot() if runtime is not None else None
+            if runtime_snapshot and runtime_snapshot.paused and runtime_snapshot.active_scale:
                 if text is not None:
                     user_text = text
                 else:
@@ -453,16 +463,10 @@ class MainWindow(QMainWindow):
                         self.processing_queue.put(("status", "无法识别内容"))
                         return
 
-                self._post_relaxation_feedback_consumed = True
                 logger.warning(f"[RelaxResume] consume post-relaxation feedback: {user_text!r}")
 
-                # Restore the interrupted scale and get the question phrasing
-                resume_info = self._resume_scale_after_relaxation
-                natural_q = ""
-                if resume_info and self.pipeline:
-                    natural_q = self.pipeline.restore_active_scale(
-                        resume_info["scale_name"], resume_info["item"]
-                    ) or ""
+                update = runtime.resume()
+                natural_q = self.pipeline.get_active_scale_question_text() if update.accepted else ""
 
                 # Acknowledge feedback and prompt to continue with the actual question
                 if natural_q:
@@ -473,8 +477,6 @@ class MainWindow(QMainWindow):
                 self.processing_queue.put(("append_chat", ("ai", ack_text)))
                 self._play_tts_async(ack_text)
                 self.processing_queue.put(("status", "继续量表采样..."))
-                self._scale_interrupted_by_relaxation = False
-                self._resume_scale_after_relaxation = None
                 return
 
             # Clear interim report
@@ -490,7 +492,7 @@ class MainWindow(QMainWindow):
                     use_tts=True,
                     user_text=text,
                     extra_system_suffix=extra,
-                    session_state=getattr(self.orchestrator.state, "name", "CHATTING"),
+                    session_state=self._lifecycle_state_name(),
                 )
             else:
                 # Voice mode: STT + TTS
@@ -522,7 +524,7 @@ class MainWindow(QMainWindow):
                     use_tts=True,
                     audio_data=audio_data,
                     extra_system_suffix=extra,
-                    session_state=getattr(self.orchestrator.state, "name", "CHATTING"),
+                    session_state=self._lifecycle_state_name(),
                 )
 
             coordinator = getattr(self, "conversation_coordinator", None)
@@ -536,15 +538,17 @@ class MainWindow(QMainWindow):
                     self._scale_tags[scale_name].update(answers)
 
             # Drop stale pipeline results (user clicked end/relaxation during processing)
-            if generation <= self._pipeline_cancel_generation or self._session_ending:
+            if generation <= self._pipeline_cancel_generation or self._lifecycle_state_name() in (
+                "SESSION_ENDING", "SESSION_ENDED"
+            ):
                 logger.warning(
                     f"[PipelineCancel] drop stale pipeline result gen={generation}, "
-                    f"cancel_gen={self._pipeline_cancel_generation}, state={self.orchestrator.state}"
+                    f"cancel_gen={self._pipeline_cancel_generation}, state={self._lifecycle_state_name()}"
                 )
                 return
-            if self.orchestrator.state != SessionState.CHATTING:
+            if self._lifecycle_state_name() != "CHATTING":
                 logger.warning(
-                    f"[PipelineCancel] drop result in non-chatting state: {self.orchestrator.state}"
+                    f"[PipelineCancel] drop result in non-chatting state: {self._lifecycle_state_name()}"
                 )
                 return
 
@@ -570,6 +574,13 @@ class MainWindow(QMainWindow):
         happen on the GUI thread to avoid "parent in a different thread" crashes.
         """
         decision = getattr(result, "turn_decision", None)
+        try:
+            from app.contracts import ScaleProjectionCommand
+            self._engine_submit(ScaleProjectionCommand(
+                active=bool(getattr(result, "scale_active", False))
+            ))
+        except Exception as exc:
+            logger.warning(f"Scale projection command failed: {exc}")
         if decision is None:
             logger.warning("[TurnAuthority] result has no TurnDecision; refusing UI business routing")
             self.processing_queue.put(("status", "准备就绪"))
@@ -596,6 +607,53 @@ class MainWindow(QMainWindow):
 
     # ==================== Queue Processing ====================
 
+    def _handle_engine_event(self, event):
+        """Render lifecycle events; no UI handler mutates lifecycle state."""
+        kind = getattr(event, "kind", "")
+        if kind == "state_changed":
+            state = getattr(event, "state", "")
+            if state == "SESSION_ENDING":
+                self.control_panel.set_buttons_enabled(False)
+            elif state == "CHATTING" and not self._current_report_generating:
+                self.control_panel.set_status("继续对话中...")
+            return
+        if kind == "relaxation_recommended":
+            tag = getattr(event, "relaxation", "breathing")
+            if getattr(event, "forced", False):
+                if self._exit_wait_dialog:
+                    self._exit_wait_dialog.close()
+                    self._exit_wait_dialog = None
+                names = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想", "game": "游戏"}
+                text = f"结束前咱们先做个短的{names.get(tag, tag)}放松训练，做完再保存会话。"
+                self.chat_panel.add_system_message(text, as_ai=True)
+                self._play_tts_async(text)
+            self.processing_queue.put(("highlight_relax_delayed", (tag, 300)))
+            self.control_panel.set_status("请尝试放松训练")
+            self._end_request_in_progress = False
+            return
+        if kind == "session_ending":
+            self._begin_report_flow(getattr(event, "end_type", EndType.GOAL_ACHIEVED))
+            return
+        if kind == "session_warning":
+            self.chat_panel.add_system_message(getattr(event, "message", ""))
+            return
+        if kind == "time_limit_ask":
+            self._ask_continue_or_end()
+            return
+        if kind == "time_limit_acknowledged":
+            if self.report_service:
+                self.report_service.continued_after_time_limit = True
+                self.report_service.time_limit_prompt_shown = True
+                self.report_service.time_warning_shown = True
+            return
+        if kind == "continue_or_end_ask":
+            # Keep the existing dialog as a UI affordance; the engine remains
+            # the owner of the POST_RELAXATION state and receives the command.
+            self._ask_continue_or_end()
+            return
+        if kind == "error":
+            logger.warning("SessionEngine error: %s", getattr(event, "message", event))
+
     def process_queue(self):
         # VAD auto-stop polling
         if (self.is_recording and self.stt_service
@@ -608,7 +666,10 @@ class MainWindow(QMainWindow):
                 task = self.processing_queue.get_nowait()
                 msg_type, content = task
 
-                if msg_type == "status":
+                if msg_type == "engine_event":
+                    self._handle_engine_event(content)
+
+                elif msg_type == "status":
                     self.control_panel.set_status(content)
 
                 elif msg_type == "append_chat":
@@ -687,6 +748,18 @@ class MainWindow(QMainWindow):
                 elif msg_type == "time_limit_ask":
                     self._ask_continue_or_end()
 
+                elif msg_type == "time_limit_check":
+                    try:
+                        from app.contracts import CheckTimeLimitCommand
+                        from config import TIME_WARNING_MINUTES, MAX_CONVERSATION_MINUTES
+                        self._engine_submit(CheckTimeLimitCommand(
+                            duration_minutes=float(content),
+                            warning_minutes=TIME_WARNING_MINUTES,
+                            max_minutes=MAX_CONVERSATION_MINUTES,
+                        ))
+                    except Exception as exc:
+                        logger.warning(f"Time-limit command failed: {exc}")
+
                 elif msg_type == "enable_ui":
                     self._transition_to_main()
 
@@ -729,9 +802,15 @@ class MainWindow(QMainWindow):
                         self.control_panel.set_buttons_enabled(False)
 
                 elif msg_type == "session_finished":
-                    self._on_session_finished(
-                        report_ok=content if isinstance(content, bool) else True
-                    )
+                    if isinstance(content, dict):
+                        self._on_session_finished(
+                            report_ok=bool(content.get("report_ok", True)),
+                            exit_after=bool(content.get("exit_after", False)),
+                        )
+                    else:
+                        self._on_session_finished(
+                            report_ok=content if isinstance(content, bool) else True
+                        )
 
                 elif msg_type == "quit":
                     self._force_quit_now()
@@ -870,7 +949,6 @@ class MainWindow(QMainWindow):
 
             self.report_service = ReportService(self.llm_service, agent_service=self.agent_service)
             self.report_service.start_session()
-            self.orchestrator.transition_to(SessionState.CHATTING)
 
             try:
                 self.rag_service = get_rag_service()
@@ -891,7 +969,7 @@ class MainWindow(QMainWindow):
                 data_manager=self.data_manager,
                 session_emotions=self.session_emotions,
                 emotion_tracker=self.emotion_tracker,
-                session_state_provider=lambda: self.orchestrator.state,
+                session_state_provider=self._lifecycle_state_name,
             )
 
             # New authoritative turn boundary: every text turn now enters via
@@ -953,72 +1031,53 @@ class MainWindow(QMainWindow):
         self.chat_panel.clear_chat()
         self.session_emotions = []
         self._scale_tags = {}
-        self._session_ending = False
-        self._pending_quit = False
         self._pipeline_busy = False
         self._end_decision_open = False
         self._end_request_in_progress = False
         self._pre_end_relax_prompted = False
-        self._pending_end_after_video = None
         self._completion_status = None
         self._auto_ending_after_relaxation = False
-        self._scale_interrupted_by_relaxation = False
-        self._resume_scale_after_relaxation = None
-        self._post_relaxation_feedback_consumed = False
-        self._post_scale_relaxation_recommended = False
         self.current_user_id = None
         self.user_info = {}
         self.info_confirmed = False
         self.control_panel.reset_form()
-        self.session_end_controller.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
             self.emotion_tracker.reset()
         if hasattr(self, 'pipeline') and self.pipeline:
             self.pipeline.reset_session()
         if self.llm_service:
             self.llm_service.reset_conversation(clear_context=True)
-        # Keep orchestrator in a terminal state (IDLE/SESSION_ENDED) so
-        # _on_exit_program() knows there is no active session.
-        if self.orchestrator.state not in (SessionState.IDLE, SessionState.SESSION_ENDED):
-            self.orchestrator.transition_to(SessionState.SESSION_ENDED)
+        from app.contracts import PrepareNextSubjectCommand
+        self._engine_submit(PrepareNextSubjectCommand())
 
     def _engine_submit(self, command):
-        """Shadow-mode forward of a lifecycle command to SessionEngine.
-
-        Legacy flow remains authoritative; this only validates the engine
-        mirror in parallel. Any failure is logged and swallowed so shadow
-        mode can never break the running session.
-        """
+        """Submit one lifecycle command to the single SessionEngine writer."""
         engine = getattr(self, "session_engine", None)
         if engine is None:
+            logger.warning("SessionEngine unavailable; command rejected: %s", command.kind)
             return
         try:
             engine.submit(command)
         except Exception as e:
-            logger.warning(f"[EngineShadow] submit failed: {e}")
+            logger.warning(f"SessionEngine command failed: {e}")
 
     def _start_new_session(self):
         self.chat_panel.clear_chat()
-        # Shadow-mode mirror of the session start (legacy stays authoritative)
         try:
             from app.contracts import StartSessionCommand, SubjectInfo
             self._engine_submit(StartSessionCommand(
                 subject=SubjectInfo(subject_id=str(self.current_user_id or "unknown"))
             ))
         except Exception as e:
-            logger.warning(f"[EngineShadow] start_session forward failed: {e}")
+            logger.warning(f"SessionEngine start command failed: {e}")
         self.session_emotions = []
         self._scale_tags = {}
-        self._session_ending = False
         self._asking_scales = False
-        self._user_explicit_end = False
         self._pending_scale_prompt = None
         self._current_report_generated = False
         self._current_report_generating = False
         self._pipeline_busy = False
         self._completion_status = None
-        self.session_end_controller.reset()
-        self.orchestrator.reset()
         if hasattr(self, 'emotion_tracker') and self.emotion_tracker:
             self.emotion_tracker.reset()
         if hasattr(self, 'pipeline') and self.pipeline:
@@ -1074,7 +1133,11 @@ class MainWindow(QMainWindow):
     def _on_continue_chosen(self):
         """用户选择继续聊天"""
         self._cancel_post_relaxation_timer()
-        self.orchestrator.transition_to(SessionState.CHATTING)
+        try:
+            from app.contracts import ContinueChatCommand
+            self._engine_submit(ContinueChatCommand())
+        except Exception as exc:
+            logger.warning(f"ContinueChat command failed: {exc}")
         message = random.choice(CONTINUE_CHAT_MESSAGE)
         self.chat_panel.add_system_message(message)
         self._play_tts_async(message)
@@ -1090,26 +1153,20 @@ class MainWindow(QMainWindow):
         """统一的放松视频播放流程：全屏播放 → 弹窗
         relaxation_type: 'breathing', 'muscle', 'meditation'
         """
-        if not self.orchestrator.can_play_video():
+        if not self._engine_can_play_video():
             return
 
-        # Shadow-mode mirror (legacy stays authoritative)
         try:
             from app.contracts import PlayRelaxationCommand
             self._engine_submit(PlayRelaxationCommand(relaxation=relaxation_type))
         except Exception as e:
-            logger.warning(f"[EngineShadow] play_relaxation forward failed: {e}")
+            logger.warning(f"PlayRelaxation command failed: {e}")
 
-        # Record scale state before relaxation interrupts it
-        if self.pipeline:
-            active_state = self.pipeline.get_active_scale_state()
-            if active_state:
-                self._scale_interrupted_by_relaxation = True
-                self._resume_scale_after_relaxation = active_state
-                self._post_relaxation_feedback_consumed = False
-                logger.warning(f"[RelaxResume] relaxation will interrupt scale: {active_state}")
-
-        self.orchestrator.transition_to(SessionState.VIDEO_PLAYING)
+        # ScaleRuntime owns the paused item; the UI only issues its command.
+        if self.pipeline and self.pipeline.scale_runtime.snapshot().active_scale:
+            update = self.pipeline.scale_runtime.pause()
+            if update.accepted:
+                logger.warning("[RelaxResume] Runtime scale paused for relaxation")
         self.control_panel.stop_all_blinks()
 
         # Store type for recording after video finishes (not before — video may fail)
@@ -1128,19 +1185,17 @@ class MainWindow(QMainWindow):
 
     def _on_video_finished(self, relaxation_type, completed=True):
         """视频播放完成：记录放松，回到正常聊天。不弹结束框。"""
-        # A missing or failed video is not a completed intervention and must
-        # never be recorded as one in either the shadow engine or the report.
+        # A missing or failed video is not a completed intervention.
         try:
             from app.contracts import RelaxationFinishedCommand
             self._engine_submit(RelaxationFinishedCommand(completed=completed))
         except Exception as e:
-            logger.warning(f"[EngineShadow] relaxation_finished forward failed: {e}")
+            logger.warning(f"RelaxationFinished command failed: {e}")
         # Record relaxation AFTER video finishes
         relax_name = ""
         if completed:
             relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
         if relax_name:
-            self.orchestrator.ctx.current_relaxation_type = relax_name
             if self.report_service:
                 self.report_service.record_relaxation(relax_name)
                 self.report_service.activity_log.append({
@@ -1150,30 +1205,21 @@ class MainWindow(QMainWindow):
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 })
 
-        # Return to normal chat (must go through POST_RELAXATION first)
-        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
-        self.orchestrator.transition_to(SessionState.CHATTING)
         self._end_decision_open = False
         self._pre_end_relax_prompted = False
 
-        # Check if end was deferred while video was playing
-        pending_end = getattr(self, "_pending_end_after_video", None)
-        if pending_end:
-            self._pending_end_after_video = None
-            if not completed:
-                self.chat_panel.add_system_message("放松训练未能启动，未记录为已完成。请检查媒体文件后重试。")
-                self.control_panel.set_status("放松训练未完成")
-                return
-            logger.info(f"[EndFlow] executing deferred end after video: {pending_end}")
-            self._request_end_with_readiness_check(
-                pending_end, allow_force_relaxation=False, source="after_video"
-            )
+        if not completed:
+            self.chat_panel.add_system_message("放松训练未能启动，未记录为已完成。请检查媒体文件后重试。")
+            self.control_panel.set_status("放松训练未完成")
             return
 
-        # If a scale was interrupted by relaxation, set up for resume
-        if self._scale_interrupted_by_relaxation and self._resume_scale_after_relaxation:
-            # Ask for relaxation feedback first — don't resume scale yet
-            self._post_relaxation_feedback_consumed = False
+        # A paused Runtime scale resumes after the next feedback turn.
+        runtime_snapshot = (
+            self.pipeline.scale_runtime.snapshot()
+            if self.pipeline and self.pipeline.scale_runtime
+            else None
+        )
+        if runtime_snapshot and runtime_snapshot.paused and runtime_snapshot.active_scale:
             message = "刚才这个练习先到这里，你现在身体有没有稍微松一点？"
             self.chat_panel.add_system_message(message)
             self._play_tts_async(message)
@@ -1186,9 +1232,13 @@ class MainWindow(QMainWindow):
             self.control_panel.set_status("继续对话中...")
 
     def _play_game(self):
-        if not self.orchestrator.can_play_video():
+        if not self._engine_can_play_video():
             return
-        self.orchestrator.transition_to(SessionState.VIDEO_PLAYING)
+        try:
+            from app.contracts import PlayGameCommand
+            self._engine_submit(PlayGameCommand())
+        except Exception as exc:
+            logger.warning(f"PlayGame command failed: {exc}")
         self.control_panel.stop_all_blinks()
 
         def game_runner():
@@ -1207,6 +1257,11 @@ class MainWindow(QMainWindow):
 
     def _on_game_finished(self, completed: bool = True):
         """Game finished — return to normal chat. No dialog, no end prompt."""
+        try:
+            from app.contracts import RelaxationFinishedCommand
+            self._engine_submit(RelaxationFinishedCommand(completed=completed))
+        except Exception as exc:
+            logger.warning(f"Game lifecycle command failed: {exc}")
         # Record relaxation
         if completed and self.report_service:
             self.report_service.record_relaxation("game")
@@ -1217,9 +1272,6 @@ class MainWindow(QMainWindow):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
 
-        # Return to normal chat (must go through POST_RELAXATION first)
-        self.orchestrator.transition_to(SessionState.POST_RELAXATION)
-        self.orchestrator.transition_to(SessionState.CHATTING)
         self._end_decision_open = False
         self._pre_end_relax_prompted = False
 
@@ -1238,7 +1290,7 @@ class MainWindow(QMainWindow):
         # Guard against duplicate dialogs from queue
         if getattr(self, "_timeout_dialog_open", False):
             return
-        if self.orchestrator.state in (SessionState.SESSION_ENDING, SessionState.SESSION_ENDED):
+        if self._lifecycle_state_name() in ("SESSION_ENDING", "SESSION_ENDED"):
             return
 
         self._timeout_dialog_open = True
@@ -1247,8 +1299,7 @@ class MainWindow(QMainWindow):
             dialog = ContinueOrEndDialog(parent=self, timeout=True)
             dialog.continue_chosen.connect(self._on_timeout_continue)
             def _on_end():
-                self._user_explicit_end = True
-                self._handle_session_end(EndType.TIME_LIMIT)
+                self._handle_session_end(EndType.TIME_LIMIT, allow_force_relaxation=False)
             dialog.end_chosen.connect(_on_end)
             dialog.exec()
         finally:
@@ -1256,17 +1307,13 @@ class MainWindow(QMainWindow):
 
     def _on_timeout_continue(self):
         """User chose to continue after time limit."""
-        # Shadow-mode mirror: engine must never re-ask the time limit this
-        # session (legacy continued_after_time_limit parity).
+        # The engine consumes this one-shot acknowledgement; the report
+        # service keeps its existing compatibility metadata for reporting.
         try:
             from app.contracts import AcknowledgeTimeLimitCommand
             self._engine_submit(AcknowledgeTimeLimitCommand())
         except Exception as e:
-            logger.warning(f"[EngineShadow] acknowledge_time_limit forward failed: {e}")
-        if self.report_service:
-            self.report_service.continued_after_time_limit = True
-            self.report_service.time_limit_prompt_shown = True
-            self.report_service.time_warning_shown = True
+            logger.warning(f"AcknowledgeTimeLimit command failed: {e}")
         self.chat_panel.add_system_message("好的，咱们继续聊。")
         self._play_tts_async("好的，咱们继续聊。")
         self.control_panel.set_status("继续对话中...")
@@ -1300,7 +1347,7 @@ class MainWindow(QMainWindow):
             music_files = scene.get("music", [])
             video_files = scene.get("videos", [])
 
-            if self.report_service and not self._session_ending:
+            if self.report_service and self._lifecycle_state_name() not in ("SESSION_ENDING", "SESSION_ENDED"):
                 self.report_service.activity_log.append({
                     "type": "media",
                     "scene": scene_key,
@@ -1381,7 +1428,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.add_system_message(fallback)
         self._play_tts_async(fallback)
 
-        relax_type = self.orchestrator.ctx.current_relaxation_type or ""
+        relax_type = self._engine_relaxation_type() or ""
         relax_name = {"breathing": "呼吸放松", "muscle": "肌肉放松", "meditation": "冥想"}.get(relax_type, "放松训练")
 
         def _try_generate():
@@ -1447,9 +1494,9 @@ class MainWindow(QMainWindow):
             logger.info("[KeepAlive] stopped during session ending")
 
     def _ollama_keepalive_tick(self):
-        if self._session_ending or self._current_report_generating:
+        if self._lifecycle_state_name() in ("SESSION_ENDING", "SESSION_ENDED") or self._current_report_generating:
             return
-        if self.orchestrator.state != SessionState.CHATTING:
+        if self._lifecycle_state_name() != "CHATTING":
             return
         if self.llm_service:
             threading.Thread(
@@ -1465,15 +1512,13 @@ class MainWindow(QMainWindow):
     def _on_exit_program(self):
         """退出整个程序。如果当前被试报告未生成，先生成报告再退出。
 
-        组合守卫：退出意图始终记录在 `self._pending_quit`，并在已有结束流程
-        （正在结束 / 决策弹窗打开 / 请求进行中）时不重复发起新的结束请求，
-        避免退出意图被静默丢失。已有流程完成时会据此自动退出。
+        The exit intent is submitted to SessionEngine and remains there while
+        the report-first flow completes.  UI dialog state only prevents a
+        second modal from being opened.
         """
         self._cancel_active_pipeline(reason="exit program")
-        # Mark quit intent up front so it survives any in-progress end flow.
-        self._pending_quit = True
 
-        if self._session_ending or self._end_decision_open or self._end_request_in_progress:
+        if self._lifecycle_state_name() in ("SESSION_ENDING", "SESSION_ENDED") or self._end_decision_open or self._end_request_in_progress:
             # An end flow is already running/showing a dialog — don't stack
             # another request; just wait. It will auto-quit when finished.
             logger.info("[EndFlow] quit requested during end flow; waiting for completion")
@@ -1487,7 +1532,7 @@ class MainWindow(QMainWindow):
         no_current_subject = (
             not self.info_confirmed
             or not self.current_user_id
-            or self.orchestrator.state in (SessionState.IDLE, SessionState.SESSION_ENDED)
+            or self._lifecycle_state_name() in ("IDLE", "SESSION_ENDED")
         )
         if no_current_subject:
             self._force_quit_now()
@@ -1495,12 +1540,11 @@ class MainWindow(QMainWindow):
 
         has_active_session = (
             self.models_loaded
-            and self.orchestrator.state not in (SessionState.SESSION_ENDED, SessionState.IDLE)
+            and self._lifecycle_state_name() not in ("SESSION_ENDED", "IDLE")
         )
 
         if has_active_session and not self._current_report_generated:
             # Use unified end flow — will check scales, relaxation, then end.
-            self._user_explicit_end = True
             self._request_end_with_readiness_check(
                 EndType.QUIT, allow_force_relaxation=False, source="exit_program"
             )
@@ -1510,14 +1554,12 @@ class MainWindow(QMainWindow):
 
     def _on_end_session(self):
         """结束当前被试会话：先检查完成度，再弹窗让用户选择。"""
-        if self._session_ending or self._end_decision_open or self._end_request_in_progress:
+        if self._lifecycle_state_name() in ("SESSION_ENDING", "SESSION_ENDED") or self._end_decision_open or self._end_request_in_progress:
             logger.info("[EndFlow] duplicate end click ignored")
             return
         self._cancel_active_pipeline(reason="end session requested")
 
-        if not self.models_loaded or self.orchestrator.state in (
-            SessionState.SESSION_ENDED, SessionState.IDLE
-        ):
+        if not self.models_loaded or self._lifecycle_state_name() in ("SESSION_ENDED", "IDLE"):
             self.chat_panel.add_system_message("当前没有进行中的会话。请填写参与者信息后开始。")
             return
 
@@ -1538,25 +1580,25 @@ class MainWindow(QMainWindow):
         """
         logger.info(f"[EndFlow] _request_end_with_readiness_check: end_type={end_type}, source={source}")
 
-        # If video is playing, defer end until it finishes
-        if self.orchestrator.state == SessionState.VIDEO_PLAYING:
-            self._pending_end_after_video = end_type
+        # The engine owns deferred-end state while playback is active.
+        if self._lifecycle_state_name() in ("VIDEO_PLAYING", "RELAXATION_PLAYING", "GAME_PLAYING"):
+            self._handle_session_end(
+                end_type,
+                allow_force_relaxation=allow_force_relaxation,
+                source=source,
+            )
             self.control_panel.set_status("放松训练结束后将自动完成会话")
             logger.info("[EndFlow] deferred end until video finishes")
             return
 
-        # If scale was interrupted by relaxation and not yet resumed, block end
-        if self._scale_interrupted_by_relaxation and not self._post_relaxation_feedback_consumed:
+        # If Runtime paused a scale and the user has not supplied feedback yet,
+        # resume from Runtime's actual next item before accepting an end.
+        runtime = getattr(self.pipeline, "scale_runtime", None)
+        runtime_snapshot = runtime.snapshot() if runtime is not None else None
+        if runtime_snapshot and runtime_snapshot.paused and runtime_snapshot.active_scale:
             if source != "direct_end_confirmed":
-                # Restore scale and ask the question directly
-                if self._resume_scale_after_relaxation and self.pipeline:
-                    self.pipeline.restore_active_scale(
-                        self._resume_scale_after_relaxation["scale_name"],
-                        self._resume_scale_after_relaxation["item"]
-                    )
-                    self._scale_interrupted_by_relaxation = False
-                    self._resume_scale_after_relaxation = None
-
+                if self.pipeline:
+                    runtime.resume()
                     natural_q = self.pipeline.get_active_scale_question_text()
                     if natural_q:
                         msg = f"还剩几个问题没补完，我们先把这个问完。{natural_q}"
@@ -1573,14 +1615,11 @@ class MainWindow(QMainWindow):
         scale_incomplete = state["scale_incomplete"]
         relax_done = state["relax_done"]
 
-        # Store pending end info for use in _end_session_directly
-        self._pending_end_type = end_type
-        self._pending_end_allow_force = allow_force_relaxation
-        self._pending_end_source = source
-
         # If scales incomplete, always prompt (except when user already confirmed direct end)
         if scale_incomplete and source != "direct_end_confirmed":
-            self._show_end_decision_dialog(state)
+            self._show_end_decision_dialog(
+                state, end_type, allow_force_relaxation, source
+            )
             return
 
         # If no relaxation done, recommend once (non-blocking, no TTS to avoid overlap)
@@ -1595,7 +1634,9 @@ class MainWindow(QMainWindow):
                 # Don't play TTS — it overlaps with farewell TTS if user clicks "direct end"
                 self.processing_queue.put(("highlight_relax_delayed", (tag, 300)))
 
-            self._show_end_decision_dialog(state)
+            self._show_end_decision_dialog(
+                state, end_type, allow_force_relaxation, source
+            )
             return
 
         # All checks passed — proceed to end directly
@@ -1620,7 +1661,7 @@ class MainWindow(QMainWindow):
             "relax_type": self._get_relaxation_info_str(),
         }
 
-    def _show_end_decision_dialog(self, state):
+    def _show_end_decision_dialog(self, state, end_type, allow_force_relaxation, source):
         """Show end-session decision dialog based on completion state."""
         if self._end_decision_open:
             logger.info("[EndFlow] decision dialog already open; skip")
@@ -1636,27 +1677,28 @@ class MainWindow(QMainWindow):
             dialog = EndSessionDecisionDialog(self, state=state, recommended_tag=recommended)
             dialog.continue_chosen.connect(self._end_session_continue_chat)
             dialog.relax_chosen.connect(self._end_session_with_relaxation)
-            dialog.end_chosen.connect(lambda: self._end_session_directly(state))
+            dialog.end_chosen.connect(
+                lambda: self._end_session_directly(
+                    state, end_type, allow_force_relaxation, source
+                )
+            )
             dialog.cancel_chosen.connect(lambda: None)
             dialog.exec()
         finally:
             self._end_decision_open = False
-            if not self._session_ending and self.orchestrator.state not in (
-                SessionState.SESSION_ENDING, SessionState.SESSION_ENDED
-            ):
+            if self._lifecycle_state_name() not in ("SESSION_ENDING", "SESSION_ENDED"):
                 self.control_panel.set_buttons_enabled(True)
 
     def _end_session_continue_chat(self):
         """User chose to continue — enter force-complete scales mode."""
         self._force_complete_scales = True
-        self._session_ending = False
         self._end_request_in_progress = False
 
-        # Transition to CHATTING (handle already-in-CHATTING gracefully)
         try:
-            self.orchestrator.transition_to(SessionState.CHATTING)
-        except Exception:
-            pass  # already in CHATTING
+            from app.contracts import ContinueChatCommand
+            self._engine_submit(ContinueChatCommand())
+        except Exception as exc:
+            logger.warning(f"ContinueChat command failed: {exc}")
 
         incomplete = []
         if self.pipeline and hasattr(self.pipeline, "get_incomplete_scales"):
@@ -1695,9 +1737,10 @@ class MainWindow(QMainWindow):
 
     def _get_end_relaxation_tag(self):
         """Get the recommended relaxation tag for end-session dialog."""
-        if self.orchestrator.ctx.current_relaxation_type:
+        current_relaxation = self._engine_relaxation_type()
+        if current_relaxation:
             type_map = {"huxi": "breathing", "jirou": "muscle", "mingxiang": "meditation"}
-            return type_map.get(self.orchestrator.ctx.current_relaxation_type, "breathing")
+            return type_map.get(current_relaxation, current_relaxation)
         if self.relaxation_tool:
             try:
                 conversation_history = self.llm_service.conversation_history
@@ -1708,9 +1751,9 @@ class MainWindow(QMainWindow):
                 pass
         return "breathing"
 
-    def _end_session_directly(self, state=None):
+    def _end_session_directly(self, state=None, end_type=EndType.GOAL_ACHIEVED,
+                              allow_force_relaxation=False, source="direct_end_confirmed"):
         """User chose 'end directly' in the decision dialog — confirmed direct end."""
-        self._user_explicit_end = True
 
         # Stop pre-end recommendation TTS before farewell TTS starts
         try:
@@ -1731,25 +1774,21 @@ class MainWindow(QMainWindow):
         else:
             self._completion_status = {"ended_by_user": True}
 
-        # Use pending end info from _request_end_with_readiness_check
-        end_type = getattr(self, '_pending_end_type', EndType.GOAL_ACHIEVED)
-        allow_force = getattr(self, '_pending_end_allow_force', False)
-        source = getattr(self, '_pending_end_source', '')
-
         if source == "exit_program":
-            self._pending_quit = True
             self._show_exit_waiting_dialog("正在保存本次会话，完成后将自动退出...", force_quit_timeout=120000)
         else:
             self._show_exit_waiting_dialog("会话结束，感谢你的参与，请稍候...")
 
         # Call _handle_session_end with source="direct_end_confirmed" to skip re-checking
-        self._handle_session_end(end_type, allow_force_relaxation=allow_force)
+        self._handle_session_end(
+            end_type,
+            allow_force_relaxation=allow_force_relaxation,
+            source=source,
+        )
 
     def _end_session_with_relaxation(self):
         """User chose 'do relaxation first' — recommend training, no report yet."""
         self._cancel_active_pipeline(reason="end with relaxation chosen")
-        self._pending_quit = False
-        self._user_explicit_end = False
 
         tag = self._get_end_relaxation_tag()
         tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
@@ -1757,18 +1796,25 @@ class MainWindow(QMainWindow):
         self.chat_panel.add_system_message(rec_text, as_ai=True)
         self._play_tts_async(rec_text)
 
-        self.orchestrator.transition_to(SessionState.RELAXATION_RECOMMENDED)
         QTimer.singleShot(1000, lambda: self.control_panel.highlight_relax_button(tag))
         self.control_panel.set_status("请先完成放松训练")
 
-    def _on_session_finished(self, report_ok: bool = True):
+    def _on_session_finished(self, report_ok: bool = True, exit_after: bool = False):
         """Session ended — keep chat visible until operator confirms next subject."""
         if self._exit_wait_dialog:
             self._exit_wait_dialog.close()
             self._exit_wait_dialog = None
-        self._session_ending = False
         self._current_report_generating = False
         self._current_report_generated = report_ok
+        try:
+            from app.contracts import MarkSessionEndedCommand
+            self._engine_submit(MarkSessionEndedCommand(
+                report_path=getattr(self, "_last_report_path", None),
+                farewell_text=getattr(self, "_last_farewell_text", ""),
+                pdf_path=getattr(self, "_last_pdf_path", None),
+            ))
+        except Exception as exc:
+            logger.warning(f"Session completion command failed: {exc}")
         # Disable recording but keep chat and farewell visible
         self.control_panel.set_buttons_enabled(False)
         if report_ok:
@@ -1781,11 +1827,12 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message(
                 '会话已结束，但报告保存失败；请检查数据目录和日志后再开始下一位参与者。'
             )
+        if exit_after:
+            QTimer.singleShot(100, self._force_quit_now)
 
     def _force_quit_now(self):
         """Immediate quit — stop all services and exit, no farewell/report."""
         import os as _os
-        self._session_ending = True
         # Stop timers
         for timer_name in ("_queue_timer", "_progress_timer", "_keepalive_timer", "_post_relaxation_timer"):
             timer = getattr(self, timer_name, None)
@@ -1886,7 +1933,7 @@ class MainWindow(QMainWindow):
     def _update_progress_bars(self):
         """Refresh session progress bars on control panel."""
         from config import MAX_CONVERSATION_MINUTES, MAX_CONVERSATION_ROUNDS
-        if self.report_service and self.orchestrator.state == SessionState.CHATTING:
+        if self.report_service and self._lifecycle_state_name() == "CHATTING":
             elapsed = self.report_service.get_session_duration_minutes()
             rounds = self.report_service.get_round_count()
             self.control_panel.update_session_progress(
@@ -1902,7 +1949,7 @@ class MainWindow(QMainWindow):
             "呼吸放松训练": "呼吸放松训练", "呼吸训练": "呼吸放松训练",
             "unknown": "未知"
         }
-        raw_type = self.orchestrator.ctx.current_relaxation_type or ""
+        raw_type = self._engine_relaxation_type() or ""
         if raw_type:
             clean_type = raw_type.replace(".mp4", "")
             return relax_map.get(clean_type, clean_type)
@@ -1941,98 +1988,37 @@ class MainWindow(QMainWindow):
             logger.exception("Exception occurred")
         return None
 
-    def _handle_session_end(self, end_type, relaxation_tag=None, allow_force_relaxation=True):
-        """Handle session end using orchestrator decision logic."""
-        # Shadow-mode mirror of the end request (legacy stays authoritative).
-        # Forwarded BEFORE the legacy guards consume _user_explicit_end so the
-        # engine sees the same effective inputs as the legacy decision.
+    def _handle_session_end(self, end_type, relaxation_tag=None,
+                            allow_force_relaxation=True, source="ui"):
+        """Submit an end request; SessionEngine owns all lifecycle decisions."""
         try:
             from app.contracts import EndSessionCommand
             self._engine_submit(EndSessionCommand(
                 end_type=end_type,
-                allow_force_relaxation=bool(
-                    allow_force_relaxation and not self._user_explicit_end
-                ),
+                allow_force_relaxation=bool(allow_force_relaxation),
                 ai_relaxation_tag=relaxation_tag,
-                source="legacy_end_flow",
+                source=source,
+                relaxation_used=bool(
+                    getattr(getattr(self, "report_service", None), "completed_relaxation", None)
+                ),
             ))
-        except Exception as e:
-            logger.warning(f"[EngineShadow] end_session forward failed: {e}")
-        if self._session_ending:
-            logger.info("[EndFlow] _handle_session_end ignored: already ending")
-            return
-        if not self.session_end_controller.begin().accepted:
-            return
-        self._session_ending = True
+        except Exception as exc:
+            logger.warning(f"EndSession command failed: {exc}")
 
-        # Stop competing resources immediately
+    def _begin_report_flow(self, end_type):
+        """Render farewell and persist reports after SessionEngine accepts end."""
         self._stop_ollama_keepalive()
         if self.tts_service:
             try:
                 self.tts_service.stop_playing()
             except Exception:
                 pass
-        logger.info("[EndFlow] session ending started, keepalive and TTS stopped")
-
-        # If user explicitly chose to end or force relaxation is disabled,
-        # skip forced relaxation — respect their choice.
-        user_explicit = self._user_explicit_end
-        self._user_explicit_end = False  # consume the flag
-
-        # Use orchestrator to decide: force relaxation or generate reports
-        if allow_force_relaxation and not user_explicit and not relaxation_tag and not self.orchestrator.ctx.current_relaxation_type:
-            if self.relaxation_tool is None:
-                relaxation_tag = "呼吸"
-            else:
-                try:
-                    conversation_history = self.llm_service.conversation_history
-                    relaxation_tag = self.relaxation_tool.execute(
-                        conversation_history=conversation_history
-                    )
-                except Exception as e:
-                    logger.warning(f"智能推荐失败: {e}")
-                    relaxation_tag = "呼吸"
-
-        if allow_force_relaxation:
-            # Feed the pipeline's own "已做过放松" flag so the FSM honors the
-            # "at most once per session" rule even when relaxation was driven
-            # outside the FSM (completes the M10 fix in core/session_fsm.py).
-            action, data = self.orchestrator.evaluate_session_end(
-                end_type, relaxation_tag,
-                relaxation_used=getattr(self.pipeline, "relaxation_used", False),
-            )
-        else:
-            self.orchestrator.transition_to(SessionState.SESSION_ENDING)
-            action, data = "generate_reports", {}
-
-        if action == "force_relaxation":
-            # Close waiting dialog so user can see/click relaxation buttons
-            if self._exit_wait_dialog:
-                self._exit_wait_dialog.close()
-                self._exit_wait_dialog = None
-            tag = data["relaxation_tag"]
-            tag_cn_map = {"breathing": "呼吸", "muscle": "肌肉放松", "meditation": "冥想", "呼吸": "呼吸", "肌肉": "肌肉放松", "冥想": "冥想"}
-            tag_cn = tag_cn_map.get(tag, tag)
-            rec_text = f"等等，在结束之前，我留意到你还是有点紧张。要不咱们先做个{tag_cn}放松训练？只需几分钟，效果很好的。"
-            self.processing_queue.put(("append_chat", ("ai", rec_text)))
-            self._play_tts_async(rec_text)
-            self.processing_queue.put(("highlight_relax_delayed", (tag, 1000)))
-            self.processing_queue.put(("status", "请尝试放松训练"))
-            # Defer the end until the user finishes the recommended relaxation.
-            # Remember the deferred end so _on_video_finished can re-trigger it;
-            # otherwise the session could never end after relaxation completes.
-            self._pending_end_after_video = end_type
-            self._session_ending = False
-            self._end_request_in_progress = False
-            self.session_end_controller.defer_for_relaxation()
-            return
-
-        # action == "generate_reports"
-        is_exit = self._pending_quit
+        is_exit = end_type is EndType.QUIT
         if is_exit:
             self.processing_queue.put(("status", "正在保存本次会话..."))
         else:
             self.processing_queue.put(("status", "正在生成告别语..."))
+        relaxation_tag = self._engine_relaxation_type()
 
         def generate_farewell_and_reports():
             try:
@@ -2072,8 +2058,6 @@ class MainWindow(QMainWindow):
                         logger.warning(f"Visitor feedback generation failed: {e}")
                         full_feedback = "今天的聊天到此结束，希望对你有所帮助。有事儿随时来找我唠。"
                     self.processing_queue.put(("finish_streaming", None))
-
-                self.orchestrator.transition_to(SessionState.SESSION_ENDED)
 
                 # --- Phase 2: Save raw snapshot → Generate report + PDF FIRST ---
                 # Reports MUST complete before farewell TTS plays.
@@ -2138,6 +2122,7 @@ class MainWindow(QMainWindow):
                             logger.warning(f"Report save failed: {e}")
 
                     # PDF with timeout
+                    pdf_path = None
                     try:
                         pdf_pool = ThreadPoolExecutor(max_workers=1)
                         try:
@@ -2145,7 +2130,7 @@ class MainWindow(QMainWindow):
                                 self._generate_and_save_pdf,
                                 researcher_report, user_id, end_type, save_result
                             )
-                            pdf_future.result(timeout=30)
+                            pdf_path = pdf_future.result(timeout=30)
                         finally:
                             pdf_pool.shutdown(wait=False, cancel_futures=True)
                     except Exception as e:
@@ -2157,6 +2142,10 @@ class MainWindow(QMainWindow):
                         and save_result.get("ok", False)
                     )
                     self._current_report_generated = report_ok
+                    self._last_report_path = (
+                        save_result.get("report_path") if isinstance(save_result, dict) else None
+                    )
+                    self._last_pdf_path = pdf_path
                     if not report_ok:
                         logger.warning(
                             "Report persistence incomplete: save_result=%r", save_result
@@ -2174,8 +2163,6 @@ class MainWindow(QMainWindow):
 
             except Exception as e:
                 logger.exception("Exception occurred")
-                self._session_ending = False
-                self.session_end_controller.reset()
                 logger.warning(f"Report generation failed: {e}")
 
             finally:
@@ -2188,11 +2175,10 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         logger.warning(f"[SessionEnd] farewell TTS failed: {e}")
 
-                if is_exit:
-                    logger.info("[ExitDebug] report done, queuing quit")
-                    self.processing_queue.put(("quit", None))
-                else:
-                    logger.info("[ExitDebug] report done, queuing session_finished")
-                    self.processing_queue.put(("session_finished", report_ok))
+                self._last_farewell_text = full_feedback
+                self.processing_queue.put((
+                    "session_finished",
+                    {"report_ok": report_ok, "exit_after": is_exit},
+                ))
 
         threading.Thread(target=generate_farewell_and_reports, daemon=True).start()

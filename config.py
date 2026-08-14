@@ -686,24 +686,6 @@ MAX_CONVERSATION_ROUNDS = 15        # Maximum conversation rounds before soft li
 MAX_CONVERSATION_MINUTES = 45       # Maximum session duration in minutes
 TIME_WARNING_MINUTES = 40           # Show warning at this point (5 min before limit)
 
-# ============== Refactor: SessionEngine Shadow Mode ==============
-# When enabled, MainWindow mirrors every lifecycle decision into the new
-# app.engine.SessionEngine for validation. The LEGACY flow stays fully
-# authoritative; engine decisions are only logged ([EngineShadow] prefix).
-# Disable with VOICECHAT_ENGINE_SHADOW=0.
-SESSION_ENGINE_SHADOW = os.environ.get("VOICECHAT_ENGINE_SHADOW", "1") == "1"
-
-# AUTHORITATIVE mode: SessionEngine decisions drive the session instead of
-# the legacy MainWindow flow. KEPT OFF until the deployment-machine smoke
-# validation passes (see docs/refactor/02_smoke_checklist.md and
-# docs/refactor/04_authority_switch.md). Shadow mode is the prerequisite:
-# run shadow first, compare [EngineShadow] logs against legacy behavior,
-# only then flip this switch. NOTE: the MainWindow wiring for this flag is
-# intentionally NOT implemented yet — see 04_authority_switch.md.
-SESSION_ENGINE_AUTHORITATIVE = (
-    os.environ.get("VOICECHAT_SESSION_ENGINE_AUTHORITATIVE", "0") == "1"
-)
-
 # ============== Agent (qwen-agent) ==============
 AGENT_ENABLED = True
 AGENT_MODEL = _RUNTIME_MODELS.router

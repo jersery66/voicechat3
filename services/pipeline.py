@@ -9,7 +9,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.logger import get_logger
 from services.metrics import get_metrics
-from config import MIN_ROUNDS_BEFORE_SCALE, AGENT_ROUTE_ENABLED, AGENT_ROUTE_COOLDOWN_ROUNDS
+from config import (
+    MIN_ROUNDS_BEFORE_SCALE,
+    AGENT_ROUTE_ENABLED,
+    AGENT_ROUTE_COOLDOWN_ROUNDS,
+)
 
 logger = get_logger(__name__)
 
@@ -403,14 +407,6 @@ class ConversationPipeline:
         self._game_candidate: bool = False  # agent-proposed game for current turn
         self._agent_route_cooldown: int = 0         # cooldown after agent route failure
 
-        self.relaxation_recommended: bool = False
-        self.relaxation_active: bool = False
-        self.relaxation_completed: bool = False
-        self.relaxation_used: bool = False  # True after any relaxation this session
-
-        self.exit_requested: bool = False
-        self.finish_mode: bool = False
-
         # Shared executor for parallel intent / emotion classification.
         # Created once and reused across pipeline executions to avoid
         # spawning fresh worker threads on every user turn.
@@ -433,12 +429,6 @@ class ConversationPipeline:
         }
         self.symptom_turns = 0
         self._agent_route_cooldown = 0
-        self.relaxation_recommended = False
-        self.relaxation_active = False
-        self.relaxation_completed = False
-        self.relaxation_used = False
-        self.exit_requested = False
-        self.finish_mode = False
         self._post_scale_relaxation_done = False
         self._relaxation_recommended_this_session.clear()
         self._game_recommended_this_session = False
@@ -473,8 +463,8 @@ class ConversationPipeline:
             current_item=runtime.current_item,
             waiting_for_answer=runtime.waiting_for_answer,
             completed_scales=self._completed_scale_names(),
-            relaxation_used=bool(self.relaxation_used),
-            game_active=bool(self.relaxation_active),
+            relaxation_used=bool(getattr(self.report, "completed_relaxation", None)),
+            game_active=False,
             time_limit_reached=bool(time_limit_reached),
         )
 
@@ -831,9 +821,9 @@ class ConversationPipeline:
         """
         if self.report:
             self.report.increment_round()
-            should_warn, warning_msg = self.report.should_warn_time_limit()
-            if should_warn:
-                emit("session_warning", warning_msg)
+            duration_getter = getattr(self.report, "get_session_duration_minutes", None)
+            if callable(duration_getter):
+                emit("time_limit_check", float(duration_getter()))
 
     def execute(self, config: PipelineConfig,
                 emit: Callable[[str, Any], None]) -> PipelineResult:
@@ -1177,7 +1167,6 @@ class ConversationPipeline:
             result.relaxation_rec = self._relaxation_candidate or _normalize_relaxation_type(
                 result.turn_decision.intervention_type
             )
-            self.relaxation_used = True
             logger.warning(f"[RelaxDebug] relaxation authorized by TurnDecision: {result.relaxation_rec}")
         elif llm_rec:
             logger.warning(

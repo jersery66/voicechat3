@@ -6,26 +6,27 @@
 #   timers — only submits commands and receives events. Shared-mutable-state
 #   races disappear by construction, no locks required.
 #
-# Stage 1 scope (this file):
+# Lifecycle ownership scope (this file):
 #   - command/event plumbing (queue + worker loop, or synchronous mode)
 #   - session lifecycle decisions built on core FSMs:
 #       start_session / end_session (incl. forced-relaxation interception) /
 #       play_relaxation / relaxation_finished / continue_chat
 #   - time-limit decisions with legacy single-shot semantics
 #
-# MainWindow still runs the legacy flow as of this commit; the engine is
-# wired in incrementally (each handler mirrors a legacy MainWindow path so
-# behavior can be diffed 1:1).
+# MainWindow submits commands and renders the events emitted by this engine;
+# it does not own a second lifecycle state machine.
 
 from __future__ import annotations
 
 import logging
 import queue
 import threading
+import time
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from core.types import EndType
-from core.session_fsm import SessionOrchestrator, SessionState
+from core.session_fsm import SessionContext, SessionOrchestrator, SessionState
 from core.end_guard import SessionEndController
 from app.contracts import (
     Command,
@@ -34,19 +35,51 @@ from app.contracts import (
     EndSessionCommand,
     ErrorEvent,
     Event,
+    ExitCommand,
+    CheckTimeLimitCommand,
     PlayRelaxationCommand,
+    PlayGameCommand,
     RelaxationFinishedCommand,
     RelaxationRecommendedEvent,
     SessionEndedEvent,
     SessionEndingEvent,
     StartSessionCommand,
     StateChangedEvent,
+    SessionWarningEvent,
+    TimeLimitAskEvent,
+    TimeLimitAcknowledgedEvent,
+    PrepareNextSubjectCommand,
+    ScaleProjectionCommand,
+    MarkSessionEndedCommand,
 )
 
 logger = logging.getLogger(__name__)
 
 # End types that must NEVER be intercepted by a forced relaxation.
 _NO_FORCE_END_TYPES = (EndType.INVALID, EndType.QUIT)
+
+
+@dataclass(frozen=True)
+class SessionLifecycleSnapshot:
+    """Immutable lifecycle read model exposed by :class:`SessionEngine`.
+
+    The snapshot deliberately contains only session-level facts.  Questionnaire
+    state remains in ``assessment.ScaleRuntimeSnapshot`` and is never copied
+    into this object.
+    """
+
+    session_state: SessionState
+    pending_end: bool = False
+    pending_end_type: Optional[EndType] = None
+    relaxation_type: Optional[str] = None
+    playback_kind: Optional[str] = None
+    time_warning_sent: bool = False
+    time_limit_ask_sent: bool = False
+    time_limit_continue_chosen: bool = False
+    is_ending: bool = False
+    terminal: bool = False
+    scale_active: bool = False
+    exit_requested: bool = False
 
 
 class SessionEngine:
@@ -79,12 +112,18 @@ class SessionEngine:
         self._time_warning_sent = False
         self._time_limit_ask_sent = False
         self._time_limit_continue_chosen = False
-        # end request deferred while a relaxation video is playing
-        # (mirrors legacy MainWindow._pending_end_after_video)
+        # End request deferred while playback is active.  This record is
+        # mutated only by the engine writer and is exposed read-only in the
+        # snapshot.
         self._pending_end: Optional[EndSessionCommand] = None
         # end_type of the most recent accepted end flow, surfaced again in
         # SessionEndedEvent (H15).
         self._last_end_type: Optional[EndType] = None
+        # Session-level projection only.  ScaleRuntime remains the source of
+        # item/answer/waiting/pause/completion state.
+        self._scale_active = False
+        self._playback_kind: Optional[str] = None
+        self._exit_requested = False
 
         self._handlers = {
             "start_session": self._handle_start_session,
@@ -93,16 +132,19 @@ class SessionEngine:
             "relaxation_finished": self._handle_relaxation_finished,
             "continue_chat": self._handle_continue_chat,
             "acknowledge_time_limit": self._handle_acknowledge_time_limit,
-            # Commands not yet owned by the shadow-mode engine: explicitly
-            # rejected (H14) so nothing is silently dropped.
+            "check_time_limit": self._handle_check_time_limit,
+            "play_game": self._handle_play_game,
+            "prepare_next_subject": self._handle_prepare_next_subject,
+            "scale_projection": self._handle_scale_projection,
+            "mark_session_ended": self._handle_mark_session_ended,
+            "exit": self._handle_exit,
+            # Commands that are intentionally outside lifecycle ownership are
+            # explicitly rejected so nothing is silently dropped.
             "user_text": self._handle_unimplemented,
             "start_recording": self._handle_unimplemented,
             "stop_recording": self._handle_unimplemented,
-            "play_game": self._handle_unimplemented,
             "select_media": self._handle_unimplemented,
             "confirm_user_info": self._handle_unimplemented,
-            "prepare_next_subject": self._handle_unimplemented,
-            "exit": self._handle_unimplemented,
         }
 
     # ==================== lifecycle ====================
@@ -158,13 +200,13 @@ class SessionEngine:
             logger.exception(f"SessionEngine: handler failed for {command.kind!r}")
 
     def _handle_unimplemented(self, command: Command) -> None:
-        """Explicitly reject commands not yet wired into the shadow-mode engine.
+        """Explicitly reject commands outside lifecycle ownership.
 
         H14: previously such commands were silently dropped. Now we emit an
         ErrorEvent so the client (and tests) can see the engine does not own
         this flow yet, rather than wondering why nothing happened.
         """
-        logger.info(f"SessionEngine: command {command.kind!r} not implemented (shadow mode)")
+        logger.info(f"SessionEngine: command {command.kind!r} not implemented by lifecycle engine")
         self._emit(ErrorEvent(
             message=f"command {command.kind!r} is not implemented in this engine build",
             recoverable=True,
@@ -191,6 +233,35 @@ class SessionEngine:
     @property
     def state(self) -> SessionState:
         return self._orchestrator.state
+
+    def snapshot(self) -> SessionLifecycleSnapshot:
+        """Return an immutable session lifecycle read model."""
+        context = self._orchestrator.ctx
+        return SessionLifecycleSnapshot(
+            session_state=self._orchestrator.state,
+            pending_end=self._pending_end is not None,
+            pending_end_type=(
+                self._pending_end.end_type if self._pending_end is not None else None
+            ),
+            relaxation_type=context.current_relaxation_type,
+            playback_kind=self._playback_kind,
+            time_warning_sent=self._time_warning_sent,
+            time_limit_ask_sent=self._time_limit_ask_sent,
+            time_limit_continue_chosen=self._time_limit_continue_chosen,
+            is_ending=self._guard.is_ending,
+            terminal=self._orchestrator.state is SessionState.SESSION_ENDED,
+            scale_active=self._scale_active,
+            exit_requested=self._exit_requested,
+        )
+
+    def wait_for_state(self, state: SessionState, timeout: float = 2.0) -> bool:
+        """Wait for the writer thread to publish ``state`` (test/UI bridge)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.state is state:
+                return True
+            time.sleep(0.01)
+        return self.state is state
 
     @property
     def is_ending(self) -> bool:
@@ -223,6 +294,10 @@ class SessionEngine:
         self._time_limit_ask_sent = False
         self._time_limit_continue_chosen = False
         self._pending_end = None
+        self._last_end_type = None
+        self._scale_active = False
+        self._playback_kind = None
+        self._exit_requested = False
         logger.info(f"SessionEngine: session started for {command.subject.subject_id!r}")
         self._emit_state()
 
@@ -234,15 +309,21 @@ class SessionEngine:
            relaxation video was already played/recommended), the end is
            intercepted by one forced relaxation recommendation;
         3. if the FSM cannot enter SESSION_ENDING right now (a relaxation
-           video is playing), the request is DEFERRED until the video ends
-           (legacy MainWindow._pending_end_after_video) — the guard is
-           released meanwhile so the resumed flow can acquire it;
+           video is playing), the request is deferred until the video ends;
+           the guard is released meanwhile so the resumed flow can acquire it;
         4. otherwise the end flow starts (SESSION_ENDING + SessionEndingEvent
            so the client runs farewell/report generation).
         """
         if not self._guard.begin().accepted:
             logger.info("SessionEngine: end request ignored (already ending)")
+            self._emit(ErrorEvent(
+                message="session end request ignored because an end flow is already active",
+                recoverable=True,
+                context="end_session.duplicate",
+            ))
             return
+
+        self._exit_requested = command.end_type is EndType.QUIT
 
         force_allowed = (
             command.allow_force_relaxation
@@ -260,6 +341,7 @@ class SessionEngine:
         )
 
         if force_allowed:
+            self._pending_end = command
             self._orchestrator.ctx.has_forced_relaxation_rec = True
             self._orchestrator.transition_to(SessionState.RELAXATION_RECOMMENDED)
             self._guard.defer_for_relaxation()
@@ -298,8 +380,14 @@ class SessionEngine:
             logger.warning(
                 f"SessionEngine: play_relaxation rejected in state {self._orchestrator.state}"
             )
+            self._emit(ErrorEvent(
+                message=f"cannot play media from state {self._orchestrator.state.name}",
+                recoverable=True,
+                context="play_relaxation",
+            ))
             return
         self._orchestrator.ctx.current_relaxation_type = command.relaxation
+        self._playback_kind = "game" if command.relaxation == "game" else "relaxation"
         self._orchestrator.transition_to(SessionState.VIDEO_PLAYING)
         self._emit_state()
 
@@ -311,8 +399,14 @@ class SessionEngine:
                 f"SessionEngine: relaxation_finished ignored in state "
                 f"{self._orchestrator.state.name}"
             )
+            self._emit(ErrorEvent(
+                message=f"relaxation_finished is invalid in state {self._orchestrator.state.name}",
+                recoverable=True,
+                context="relaxation_finished",
+            ))
             return
         self._orchestrator.transition_to(SessionState.POST_RELAXATION)
+        self._playback_kind = None
         self._emit_state()
 
         if self._pending_end is not None:
@@ -325,14 +419,89 @@ class SessionEngine:
 
     def _handle_continue_chat(self, command: ContinueChatCommand) -> None:
         """User chose to keep chatting after relaxation."""
-        self._orchestrator.transition_to(SessionState.CHATTING)
+        if not self._orchestrator.transition_to(SessionState.CHATTING):
+            self._emit(ErrorEvent(
+                message=f"cannot continue chat from state {self._orchestrator.state.name}",
+                recoverable=True,
+                context="continue_chat",
+            ))
+            return
         self._emit_state()
+
+    def _handle_play_game(self, command: PlayGameCommand) -> None:
+        """Games use the same lifecycle playback state as relaxation media."""
+        self._handle_play_relaxation(PlayRelaxationCommand(relaxation="game"))
+
+    def _handle_exit(self, command: ExitCommand) -> None:
+        """Translate an application exit into the no-force end contract."""
+        self._handle_end_session(EndSessionCommand(
+            end_type=EndType.QUIT,
+            allow_force_relaxation=False,
+            source="exit_command",
+        ))
+
+    def _handle_prepare_next_subject(self, command: PrepareNextSubjectCommand) -> None:
+        """Return to IDLE without starting the next participant session."""
+        self._orchestrator.ctx = SessionContext()
+        self._guard.reset()
+        self._time_warning_sent = False
+        self._time_limit_ask_sent = False
+        self._time_limit_continue_chosen = False
+        self._pending_end = None
+        self._last_end_type = None
+        self._scale_active = False
+        self._playback_kind = None
+        self._exit_requested = False
+        self._emit_state()
+
+    def _handle_scale_projection(self, command: ScaleProjectionCommand) -> None:
+        """Record only the boolean activity projection from ScaleRuntime."""
+        self._scale_active = bool(command.active)
+
+    def _handle_mark_session_ended(self, command: MarkSessionEndedCommand) -> None:
+        """Complete the lifecycle after the client finishes report work."""
+        if self._orchestrator.state is not SessionState.SESSION_ENDING:
+            self._emit(ErrorEvent(
+                message=f"cannot mark session ended from state {self._orchestrator.state.name}",
+                recoverable=True,
+                context="mark_session_ended",
+            ))
+            return
+        self._orchestrator.transition_to(SessionState.SESSION_ENDED)
+        self._guard.reset()
+        self._scale_active = False
+        self._pending_end = None
+        self._emit_state()
+        self._emit(SessionEndedEvent(
+            end_type=self._last_end_type or EndType.GOAL_ACHIEVED,
+            farewell_text=command.farewell_text,
+            report_path=command.report_path,
+            pdf_path=command.pdf_path,
+        ))
 
     def _handle_acknowledge_time_limit(self, command) -> None:
         """User chose 'continue chatting' in the time-limit dialog:
         the ask must never fire again this session (legacy
         continued_after_time_limit parity)."""
         self.acknowledge_time_limit_continue()
+        self._emit(TimeLimitAcknowledgedEvent())
+
+    def _handle_check_time_limit(self, command: CheckTimeLimitCommand) -> None:
+        """Consume warning/limit markers on the lifecycle writer thread."""
+        if command.duration_minutes >= command.max_minutes and self.should_emit_time_limit_ask(
+            command.duration_minutes, command.max_minutes
+        ):
+            self._emit(TimeLimitAskEvent())
+            return
+        if self.should_emit_time_warning(command.duration_minutes, command.warning_minutes):
+            remaining = max(0, int(command.max_minutes - command.duration_minutes))
+            self._emit(SessionWarningEvent(
+                message=(
+                    f"我们的对话已进行约{int(command.duration_minutes)}分钟，"
+                    f"还剩约{remaining}分钟。"
+                )
+            ))
+            return
 
     # ==================== time-limit decisions (legacy single-shot) ====================
 
@@ -366,18 +535,15 @@ class SessionEngine:
         self._time_limit_continue_chosen = True
 
     def mark_session_ended(self, report_path: Optional[str] = None,
-                           farewell_text: str = "") -> None:
+                           farewell_text: str = "", pdf_path: Optional[str] = None) -> None:
         """Client finished report generation: complete the FSM + release guard.
 
         H15: emits the terminal SessionEndedEvent (with report_path /
         farewell_text) so clients waiting on the session-end contract can
         react. The end_type comes from the SessionEndingEvent emitted earlier.
         """
-        self._orchestrator.transition_to(SessionState.SESSION_ENDED)
-        self._guard.reset()
-        self._emit_state()
-        self._emit(SessionEndedEvent(
-            end_type=self._last_end_type or EndType.GOAL_ACHIEVED,
-            farewell_text=farewell_text,
+        self.process_command(MarkSessionEndedCommand(
             report_path=report_path,
+            farewell_text=farewell_text,
+            pdf_path=pdf_path,
         ))

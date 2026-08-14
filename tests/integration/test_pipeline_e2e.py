@@ -166,7 +166,7 @@ class TestRelaxationTag:
         result, _ = run_turn(p, "心里很紧张，坐不住")
         assert result.relaxation_rec is None
         assert result.turn_decision.action.value != "recommend_relaxation"
-        assert p.relaxation_used is False
+        assert not hasattr(p, "relaxation_used")
 
 
 class TestEndTag:

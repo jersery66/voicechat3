@@ -131,6 +131,14 @@ class AcknowledgeTimeLimitCommand(Command):
     kind: Literal["acknowledge_time_limit"] = "acknowledge_time_limit"
 
 
+class CheckTimeLimitCommand(Command):
+    """Ask the lifecycle writer to consume one-shot time-limit markers."""
+    kind: Literal["check_time_limit"] = "check_time_limit"
+    duration_minutes: float
+    warning_minutes: float
+    max_minutes: float
+
+
 class PlayGameCommand(Command):
     """Launch the therapeutic mini-game (blocks until done in Phase 2)."""
     kind: Literal["play_game"] = "play_game"
@@ -153,6 +161,25 @@ class PrepareNextSubjectCommand(Command):
     kind: Literal["prepare_next_subject"] = "prepare_next_subject"
 
 
+class ScaleProjectionCommand(Command):
+    """Publish the current ScaleRuntime activity to the lifecycle owner.
+
+    This is deliberately a projection only: it carries no scale name, item,
+    answer, or completion data.  Questionnaire state remains owned by
+    ``ScaleRuntime``.
+    """
+    kind: Literal["scale_projection"] = "scale_projection"
+    active: bool = False
+
+
+class MarkSessionEndedCommand(Command):
+    """Complete report/farewell work and close the lifecycle state."""
+    kind: Literal["mark_session_ended"] = "mark_session_ended"
+    report_path: Optional[str] = None
+    farewell_text: str = ""
+    pdf_path: Optional[str] = None
+
+
 class ExitCommand(Command):
     """Exit the application (fast quit vs full end handled by engine)."""
     kind: Literal["exit"] = "exit"
@@ -170,10 +197,13 @@ AnyCommand = (
     | RelaxationFinishedCommand
     | ContinueChatCommand
     | AcknowledgeTimeLimitCommand
+    | CheckTimeLimitCommand
     | PlayGameCommand
     | SelectMediaCommand
     | ConfirmUserInfoCommand
     | PrepareNextSubjectCommand
+    | ScaleProjectionCommand
+    | MarkSessionEndedCommand
     | ExitCommand
 )
 
@@ -233,6 +263,11 @@ class TimeLimitAskEvent(Event):
     kind: Literal["time_limit_ask"] = "time_limit_ask"
 
 
+class TimeLimitAcknowledgedEvent(Event):
+    """The user consumed the session's one-shot time-limit choice."""
+    kind: Literal["time_limit_acknowledged"] = "time_limit_acknowledged"
+
+
 class ContinueOrEndAskEvent(Event):
     """Post-relaxation (or timeout) continue/end choice dialog."""
     kind: Literal["continue_or_end_ask"] = "continue_or_end_ask"
@@ -280,6 +315,7 @@ AnyEvent = (
     | RelaxationRecommendedEvent
     | SessionWarningEvent
     | TimeLimitAskEvent
+    | TimeLimitAcknowledgedEvent
     | ContinueOrEndAskEvent
     | SessionEndingEvent
     | SessionEndedEvent
