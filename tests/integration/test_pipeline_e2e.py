@@ -161,24 +161,27 @@ class TestScaleFlow:
 
 
 class TestRelaxationTag:
-    def test_rec_tag_detected(self, ctx):
+    def test_rec_tag_is_metadata_only_without_decision(self, ctx):
         llm = FakeLLM([
             "【情绪识别】焦虑【状态评估】中【变革话语】无【策略选择】放松|||身上紧得很是吧？试试左边的呼吸放松按钮。[REC_BREATHING]",
         ])
         p = ctx(llm=llm)
         result, _ = run_turn(p, "心里很紧张，坐不住")
-        assert result.relaxation_rec == "breathing"
+        assert result.relaxation_rec is None
+        assert result.turn_decision.action.value != "recommend_relaxation"
+        assert p.relaxation_used is False
 
 
 class TestEndTag:
     END_REPLY = ("【情绪识别】平静【状态评估】低【变革话语】无【策略选择】结束"
                  "|||嗯，能感觉到你松快了不少。有事儿随时来找我唠。[END_GOAL_ACHIEVED]")
 
-    def test_end_tag_honored_on_explicit_end(self, ctx):
+    def test_explicit_decision_authorizes_end_and_tag_does_not_choose_type(self, ctx):
         llm = FakeLLM([self.END_REPLY])
         p = ctx(llm=llm)
         result, _ = run_turn(p, "今天先这样吧")
-        assert result.end_type == "goal_achieved"
+        assert result.turn_decision.action.value == "end_session"
+        assert result.end_type == "quit"
 
     def test_end_tag_suppressed_without_explicit_end(self, ctx):
         """Legacy safety: the LLM alone must not end a session — the END

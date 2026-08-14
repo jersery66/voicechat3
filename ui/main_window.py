@@ -485,7 +485,13 @@ class MainWindow(QMainWindow):
                 self.processing_queue.put(("set_buttons_state", "disabled"))
                 extra = getattr(self, '_pending_scale_prompt', '') or ''
                 self._pending_scale_prompt = None
-                config = PipelineConfig(use_stt=False, use_tts=True, user_text=text, extra_system_suffix=extra)
+                config = PipelineConfig(
+                    use_stt=False,
+                    use_tts=True,
+                    user_text=text,
+                    extra_system_suffix=extra,
+                    session_state=getattr(self.orchestrator.state, "name", "CHATTING"),
+                )
             else:
                 # Voice mode: STT + TTS
                 audio_data = self.stt_service.stop_recording()
@@ -511,7 +517,13 @@ class MainWindow(QMainWindow):
                     return
                 extra = getattr(self, '_pending_scale_prompt', '') or ''
                 self._pending_scale_prompt = None
-                config = PipelineConfig(use_stt=True, use_tts=True, audio_data=audio_data, extra_system_suffix=extra)
+                config = PipelineConfig(
+                    use_stt=True,
+                    use_tts=True,
+                    audio_data=audio_data,
+                    extra_system_suffix=extra,
+                    session_state=getattr(self.orchestrator.state, "name", "CHATTING"),
+                )
 
             coordinator = getattr(self, "conversation_coordinator", None)
             if coordinator is None:
@@ -551,32 +563,34 @@ class MainWindow(QMainWindow):
                 self.processing_queue.put(("set_buttons_state", "normal"))
 
     def _post_pipeline_routing(self, result):
-        """Route pipeline result to appropriate actions.
+        """Dispatch the already-authoritative TurnDecision to UI handlers.
 
         Runs on the pipeline worker thread — only put state to the GUI thread
         via the processing queue. Never create/exec a QDialog here; that must
         happen on the GUI thread to avoid "parent in a different thread" crashes.
         """
-        if result.end_type:
-            et = get_end_type_enum(result.end_type)
-            # Hand off the end request to the GUI thread (consistent with the
-            # "auto_end_session" path) through the unified readiness check.
-            self.processing_queue.put(("end_session_request", (et, result.relaxation_rec)))
+        decision = getattr(result, "turn_decision", None)
+        if decision is None:
+            logger.warning("[TurnAuthority] result has no TurnDecision; refusing UI business routing")
+            self.processing_queue.put(("status", "准备就绪"))
             return
 
-        if result.relaxation_rec:
-            # Pipeline synced relaxation with spoken_text — safe to highlight
-            self.processing_queue.put(("highlight_relax_delayed", (result.relaxation_rec, 500)))
+        action = getattr(decision.action, "value", decision.action)
+        if action == "end_session":
+            end_name = "time_limit" if decision.end_reason == "time_limit" else "quit"
+            et = get_end_type_enum(end_name)
+            # Hand off the end request to the GUI thread (consistent with the
+            # "auto_end_session" path) through the unified readiness check.
+            self.processing_queue.put(("end_session_request", (et, None)))
+            return
+
+        if action == "recommend_relaxation":
+            relaxation = decision.intervention_type or "breathing"
+            self.processing_queue.put(("highlight_relax_delayed", (relaxation, 500)))
             self.processing_queue.put(("status", "可以尝试左侧放松训练"))
-        elif result.all_scales_completed:
-            self.processing_queue.put(("all_scales_completed", None))
-        elif result.intent == "entertainment":
+        elif action == "recommend_game":
             self.processing_queue.put(("highlight_relax", "game"))
             self.processing_queue.put(("status", "准备就绪"))
-        elif self._should_soft_recommend_relaxation(result):
-            tag = self._get_end_relaxation_tag()
-            self.processing_queue.put(("highlight_relax", tag))
-            self.processing_queue.put(("status", "可以尝试左侧放松训练"))
         else:
             self.processing_queue.put(("status", "准备就绪"))
 
@@ -635,7 +649,7 @@ class MainWindow(QMainWindow):
 
                 elif msg_type == "end_session_request":
                     et, relaxation_rec = content
-                    self._request_end_with_readiness_check(et, source="model_end_tag")
+                    self._request_end_with_readiness_check(et, source="turn_decision")
 
                 elif msg_type == "highlight_relax":
                     # Map Chinese tags to English keys for control_panel
@@ -660,9 +674,6 @@ class MainWindow(QMainWindow):
 
                 elif msg_type == "replace_last_system":
                     self._replace_last_system(content)
-
-                elif msg_type == "all_scales_completed":
-                    self._handle_scales_completed_recommend_relaxation()
 
                 elif msg_type == "auto_end_session":
                     self._request_end_with_readiness_check(content, allow_force_relaxation=False, source="auto_end_after_relaxation")
@@ -880,6 +891,7 @@ class MainWindow(QMainWindow):
                 data_manager=self.data_manager,
                 session_emotions=self.session_emotions,
                 emotion_tracker=self.emotion_tracker,
+                session_state_provider=lambda: self.orchestrator.state,
             )
 
             # New authoritative turn boundary: every text turn now enters via
@@ -1037,39 +1049,6 @@ class MainWindow(QMainWindow):
             self.control_panel.set_status("可以尝试左侧放松训练")
         except Exception as e:
             logger.warning(f"[UIDebug] highlight_relax failed: {e}")
-
-    def _handle_scales_completed_recommend_relaxation(self):
-        """After all scales are done, recommend relaxation — not end session."""
-        if self._post_scale_relaxation_recommended:
-            return
-        if self.orchestrator.ctx.current_relaxation_type:
-            return
-        if self.orchestrator.state == SessionState.RELAXATION_RECOMMENDED:
-            return
-
-        self._post_scale_relaxation_recommended = True
-
-        tag = self._get_end_relaxation_tag() or "breathing"
-        tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
-
-        display_text = (
-            f"刚才我们已经把你最近这段时间的状态大致了解清楚了。"
-            f"你前面提到的这些感受，身体上也可能会跟着紧绷。"
-            f"先不用急着结束，可以做一个短的{tag_cn}放松训练，让身体缓一缓。"
-            f"你可以点左侧的{tag_cn}放松训练，跟着做几分钟。"
-        )
-        tts_text = (
-            f"刚才我们已经把你最近这段时间的状态大致了解清楚了。[breath]"
-            f"你前面提到的这些感受，身体上也可能会跟着紧绷。[breath]"
-            f"先不用急着结束，可以做一个短的{tag_cn}放松训练，让身体缓一缓。"
-        )
-
-        self.chat_panel.add_system_message(display_text, as_ai=True)
-        self._play_tts_async(tts_text)
-
-        self.orchestrator.transition_to(SessionState.RELAXATION_RECOMMENDED)
-        self.processing_queue.put(("highlight_relax_delayed", (tag, 500)))
-        self.control_panel.set_status("建议完成放松训练")
 
     def _cancel_post_relaxation_timer(self):
         """取消放松后超时定时器（用户做出选择或关闭弹窗时调用）。
@@ -1713,32 +1692,6 @@ class MainWindow(QMainWindow):
         self._play_tts_async(msg)
         self.control_panel.set_buttons_enabled(True)
         self.control_panel.set_status("继续对话中...")
-
-    def _should_soft_recommend_relaxation(self, result):
-        """Check if relaxation should be softly recommended based on emotion/symptoms."""
-        if self.orchestrator.state != SessionState.CHATTING:
-            return False
-        if self.orchestrator.ctx.current_relaxation_type:
-            return False
-        # Don't recommend relaxation too early in the conversation
-        from config import MIN_ROUNDS_FOR_RELAXATION
-        current_rounds = self.report_service.get_round_count() if self.report_service else 0
-        if current_rounds < MIN_ROUNDS_FOR_RELAXATION:
-            return False
-
-        text = result.user_text or ""
-        emotion = result.emotion_result.get("emotion", "")
-        intensity = result.emotion_result.get("intensity", 0)
-
-        keywords = [
-            "睡不着", "失眠", "紧张", "焦虑", "烦躁", "心慌",
-            "喘不过气", "身体很累", "很累", "没力气", "不耐烦",
-        ]
-        return (
-            any(k in text for k in keywords)
-            or emotion in {"anxious", "stressed", "angry"}
-            or intensity >= 0.75
-        )
 
     def _get_end_relaxation_tag(self):
         """Get the recommended relaxation tag for end-session dialog."""

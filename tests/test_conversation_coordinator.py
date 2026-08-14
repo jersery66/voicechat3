@@ -2,7 +2,7 @@
 
 import json
 
-from conversation.contracts import PolicyDecision, ScaleAction
+from conversation.contracts import RouterAction, RouterProposal, TurnAction, TurnDecision
 from conversation.coordinator import ConversationCoordinator
 from research.event_journal import EventJournal
 from services.pipeline import PipelineConfig, PipelineResult
@@ -29,14 +29,14 @@ class VoiceCapableFakePipeline(FakePipeline):
         return self.transcript
 
 
-def test_legacy_agent_route_becomes_a_typed_policy_decision():
-    decision = PolicyDecision.from_agent_route(
+def test_legacy_agent_route_becomes_a_non_executable_router_proposal():
+    proposal = RouterProposal.from_legacy_route(
         {"scale_action": "start", "scale": "phq9", "item": 2, "confidence": 0.91}
     )
 
-    assert decision.scale_action == ScaleAction.START
-    assert decision.scale_name == "PHQ-9"
-    assert decision.scale_item == 2
+    assert proposal.action is RouterAction.START_SCALE
+    assert proposal.scale_name == "PHQ-9"
+    assert "item" not in proposal.model_dump()
 
 
 def test_normal_turn_flows_through_legacy_pipeline_and_is_journaled(tmp_path):
@@ -56,7 +56,7 @@ def test_normal_turn_flows_through_legacy_pipeline_and_is_journaled(tmp_path):
     assert len(pipeline.calls) == 1
     records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
     assert [record["type"] for record in records] == [
-        "policy_decision", "turn_completed"
+        "router_proposal", "turn_state_snapshot", "turn_decision", "turn_completed"
     ]
     assert all("user_text" not in record["payload"] for record in records)
 
@@ -73,9 +73,8 @@ def test_router_reason_is_not_written_to_the_research_journal(tmp_path):
 
     coordinator.execute(PipelineConfig(user_text="normal input"), lambda *_event: None)
 
-    policy = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
-              if json.loads(line)["type"] == "policy_decision"][0]
-    assert policy["payload"]["reason"] == ""
+    records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert all("echoed private text" not in json.dumps(record, ensure_ascii=False) for record in records)
 
 
 def test_crisis_keyword_text_still_flows_through_legacy_pipeline(tmp_path):
@@ -166,12 +165,12 @@ def test_safe_voice_transcript_is_transcribed_once_then_runs_legacy_pipeline(tmp
     assert result.full_response == "ok"
     records = [json.loads(line) for line in journal.path.read_text(encoding="utf-8").splitlines()]
     assert [record["type"] for record in records] == [
-        "policy_decision", "turn_completed"
+        "router_proposal", "turn_state_snapshot", "turn_decision", "turn_completed"
     ]
     assert records[-1]["payload"] == {"input_mode": "voice", "end_type": None}
 
 
-def test_decide_turn_returns_typed_policy_without_safety_journal(tmp_path):
+def test_decide_turn_returns_authoritative_decision_without_safety_journal(tmp_path):
     journal_path = tmp_path / "events.jsonl"
     coordinator = ConversationCoordinator(
         pipeline=FakePipeline(),
@@ -182,7 +181,8 @@ def test_decide_turn_returns_typed_policy_without_safety_journal(tmp_path):
         {"scale_action": "start", "scale": "phq9", "item": 2, "confidence": 0.91}
     )
 
-    assert isinstance(decision, PolicyDecision)
-    assert decision.scale_action == ScaleAction.START
+    assert isinstance(decision, TurnDecision)
+    assert decision.action is TurnAction.CHAT
+    assert decision.reason == "router_before_min_rounds"
     records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
-    assert [record["type"] for record in records] == ["policy_decision"]
+    assert [record["type"] for record in records] == ["router_proposal", "turn_decision"]

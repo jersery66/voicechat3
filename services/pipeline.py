@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.logger import get_logger
 from services.metrics import get_metrics
-from config import MIN_ROUNDS_BEFORE_SCALE, SCALE_ROUTE_CONFIDENCE, RELAX_ROUTE_CONFIDENCE, AGENT_ROUTE_ENABLED, AGENT_ROUTE_COOLDOWN_ROUNDS
+from config import MIN_ROUNDS_BEFORE_SCALE, AGENT_ROUTE_ENABLED, AGENT_ROUTE_COOLDOWN_ROUNDS
 
 logger = get_logger(__name__)
 
@@ -63,14 +63,20 @@ from core.scoring import (  # noqa: F401  (re-exported for backward compatibilit
     FREQUENCY_WORDS,
     infer_scale_score_from_text,
     detect_phq_item_from_text,
-    is_user_explicit_end_text,
     score_symptom_signals,
-    is_scale_interruption_text,
 )
 
 # Scale state container (core.scale_fsm). The pipeline delegates all
 # scale-related fields to it via properties below — call sites unchanged.
 from core.scale_fsm import ScaleState, delegate_property
+from conversation.contracts import (
+    RouterProposal,
+    TurnAction,
+    TurnDecision,
+    TurnStateSnapshot,
+)
+from conversation.turn_policy import TurnPolicy
+from conversation.turn_signals import collect_turn_signals
 
 
 # Natural-language versions of scale questions for conversational delivery.
@@ -329,6 +335,11 @@ class PipelineResult:
     scale_completed: bool = False
     all_scales_completed: bool = False
     completed_scale_name: Optional[str] = None
+    # Phase 2 authority audit trail.  These are immutable value objects; all
+    # executable control fields below are derived from ``turn_decision``.
+    router_proposal: Optional[RouterProposal] = None
+    turn_state_snapshot: Optional[TurnStateSnapshot] = None
+    turn_decision: Optional[TurnDecision] = None
 
 
 @dataclass
@@ -340,6 +351,11 @@ class PipelineConfig:
     user_text: str = ""         # Text input if use_stt=False
     transcribed_text: str = ""  # Coordinator-owned STT result; skips a second ASR pass
     extra_system_suffix: str = ""  # Additional system context (e.g. scale questions)
+    # Precomputed contracts are accepted for adapter/tests; production
+    # ConversationPipeline builds them exactly once when omitted.
+    router_proposal: Optional[RouterProposal] = None
+    turn_decision: Optional[TurnDecision] = None
+    session_state: str = "CHATTING"
 
 
 # ==================== Unified Conversation Pipeline ====================
@@ -385,7 +401,9 @@ class ConversationPipeline:
 
     def __init__(self, stt_service, llm_service, tts_service,
                  rag_service, agent_service, report_service, data_manager,
-                 session_emotions: list, emotion_tracker=None):
+                 session_emotions: list, emotion_tracker=None,
+                 turn_policy: TurnPolicy | None = None,
+                 session_state_provider: Callable[[], Any] | None = None):
         self.stt = stt_service
         self.llm = llm_service
         self.tts = tts_service
@@ -395,6 +413,8 @@ class ConversationPipeline:
         self.data = data_manager
         self.session_emotions = session_emotions
         self.emotion_tracker = emotion_tracker
+        self.turn_policy = turn_policy or TurnPolicy()
+        self._session_state_provider = session_state_provider
         # All scale-related mutable state lives in this single container
         # (core.scale_fsm.ScaleState). Legacy attribute names are exposed
         # via delegate properties declared on the class below.
@@ -451,6 +471,123 @@ class ConversationPipeline:
         self._pending_relaxation_after_scale = None
         self._relaxation_candidate = None
         self._game_candidate = False
+
+    def _session_state_name(self, configured: str = "CHATTING") -> str:
+        """Return the current lifecycle state without owning that state."""
+        try:
+            value = self._session_state_provider() if self._session_state_provider else configured
+            return getattr(value, "name", str(value).split(".")[-1]).upper()
+        except Exception:
+            return str(configured or "CHATTING").split(".")[-1].upper()
+
+    def _completed_scale_names(self) -> tuple[str, ...]:
+        """Derive completed scales from the existing answer state."""
+        incomplete = {item["scale_name"] for item in self.get_incomplete_scales()}
+        return tuple(sorted(name for name in self._administered_scales if name not in incomplete))
+
+    def _build_turn_snapshot(
+        self,
+        *,
+        round_count: int,
+        time_limit_reached: bool,
+        session_state: str = "CHATTING",
+    ) -> TurnStateSnapshot:
+        return TurnStateSnapshot(
+            session_state=self._session_state_name(session_state),
+            round_count=max(0, int(round_count)),
+            active_scale=self._active_scale,
+            current_item=self._active_scale_q if self._active_scale else None,
+            waiting_for_answer=bool(self._active_scale and self._active_scale_waiting_answer),
+            completed_scales=self._completed_scale_names(),
+            relaxation_used=bool(self.relaxation_used),
+            game_active=bool(self.relaxation_active),
+            time_limit_reached=bool(time_limit_reached),
+        )
+
+    def _request_router_proposal(
+        self,
+        *,
+        user_text: str,
+        current_rounds: int,
+    ) -> tuple[RouterProposal, dict]:
+        """Obtain one non-executable proposal from the configured Router."""
+        fallback = RouterProposal.fallback("router_fallback")
+        if not AGENT_ROUTE_ENABLED:
+            logger.warning("[AgentRoute] skipped: AGENT_ROUTE_ENABLED=False")
+            return fallback, fallback.model_dump(mode="json")
+        if self._agent_route_cooldown > 0:
+            self._agent_route_cooldown -= 1
+            logger.warning(f"[AgentRoute] cooldown remaining={self._agent_route_cooldown}")
+            return fallback, fallback.model_dump(mode="json")
+        if not self.agent or not self.agent.is_available():
+            return fallback, fallback.model_dump(mode="json")
+
+        try:
+            kwargs = {
+                "user_text": user_text,
+                "recent_history": self._get_recent_dialogue_text(),
+                "current_round": current_rounds,
+                "active_scale": self._active_scale,
+                "collected_scales": self._scale_answers,
+                "relaxation_done": self._get_relaxation_done(),
+            }
+            if hasattr(self.agent, "route_proposal"):
+                raw = self.agent.route_proposal(**kwargs)
+            else:
+                raw = self.agent.route_conversation_actions(**kwargs)
+            proposal = raw if isinstance(raw, RouterProposal) else RouterProposal.from_legacy_route(raw)
+            self._agent_route_cooldown = 0
+            logger.warning(
+                f"[AgentRoute] user={user_text!r} action={proposal.action.value} "
+                f"scale={proposal.scale_name} confidence={proposal.confidence} "
+                f"reason={proposal.reason[:60]!r}"
+            )
+            return proposal, proposal.model_dump(mode="json")
+        except Exception as exc:
+            logger.warning(f"[AgentRoute] failed: {exc}")
+            self._agent_route_cooldown = AGENT_ROUTE_COOLDOWN_ROUNDS
+            return fallback, fallback.model_dump(mode="json")
+
+    def _apply_turn_decision(self, decision: TurnDecision, result: PipelineResult) -> None:
+        """Apply an already-authoritative decision; never choose another action."""
+        if decision.action is TurnAction.START_SCALE:
+            scale_name = decision.scale_name
+            self._active_scale = scale_name
+            self._administered_scales.add(scale_name)
+            self._active_scale_q = self._next_unanswered_item(scale_name) or 1
+            self._active_scale_waiting_answer = False
+            self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
+            self.symptom_turns = 0
+        elif decision.action is TurnAction.CONTINUE_SCALE:
+            if self._scale_soft_paused and self._scale_pause_turns <= 0 and self._active_scale:
+                self._active_scale_waiting_answer = True
+                self._scale_soft_paused = False
+        elif decision.action is TurnAction.PAUSE_SCALE:
+            if self._active_scale:
+                self._soft_pause_scale(reason=decision.reason)
+            else:
+                self._scale_pause_turns = 2
+        elif decision.action is TurnAction.RECOMMEND_RELAXATION:
+            self._relaxation_candidate = _normalize_relaxation_type(decision.intervention_type)
+            self._pending_relaxation_after_scale = None
+        elif decision.action is TurnAction.RECOMMEND_GAME:
+            self._game_candidate = True
+            self._game_recommended_this_session = True
+        elif decision.action is TurnAction.END_SESSION:
+            result.end_type = {
+                "time_limit": "time_limit",
+                "user_explicit": "quit",
+                "router_proposal": "quit",
+            }.get(decision.end_reason or "", "quit")
+
+    def _decision_end_type(self, decision: TurnDecision | None) -> Optional[str]:
+        if decision is None or decision.action is not TurnAction.END_SESSION:
+            return None
+        return {
+            "time_limit": "time_limit",
+            "user_explicit": "quit",
+            "router_proposal": "quit",
+        }.get(decision.end_reason or "", "quit")
 
     def get_active_scale_state(self) -> Optional[Dict[str, Any]]:
         """Return current active scale state for relaxation-interruption tracking."""
@@ -710,6 +847,21 @@ class ConversationPipeline:
         with metrics.timer("stt.transcribe"):
             return self.stt.transcribe(audio_data)
 
+    def _commit_user_turn(self, config: PipelineConfig, result: PipelineResult,
+                          emit: Callable[[str, Any], None]) -> None:
+        """Persist ordinary turn bookkeeping after the authoritative decision.
+
+        Proposal, snapshot, signals, and policy remain read-only.  Round
+        counters and user-message persistence are committed only after
+        ``TurnDecision`` exists, so infrastructure bookkeeping cannot become a
+        second action authority.
+        """
+        if self.report:
+            self.report.increment_round()
+            should_warn, warning_msg = self.report.should_warn_time_limit()
+            if should_warn:
+                emit("session_warning", warning_msg)
+
     def execute(self, config: PipelineConfig,
                 emit: Callable[[str, Any], None]) -> PipelineResult:
         """
@@ -741,12 +893,8 @@ class ConversationPipeline:
 
         emit("append_chat", ("user", result.user_text))
 
-        # --- Round tracking ---
-        if self.report:
-            self.report.increment_round()
-            should_warn, warning_msg = self.report.should_warn_time_limit()
-            if should_warn:
-                emit("session_warning", warning_msg)
+        # Evaluate the incoming turn number without mutating the report yet.
+        current_rounds = (self.report.get_round_count() + 1) if self.report else 0
 
         # --- Save user data ---
         # Defensive: DataManager exposes ``current_subject_id`` (被试编号),
@@ -764,7 +912,6 @@ class ConversationPipeline:
 
         # --- Fast path: skip LLM for simple greetings in early rounds ---
         _GREETING_INPUTS = {"你好", "你好呀", "嗨", "哈喽", "在吗", "老师好", "喂"}
-        current_rounds = self.report.get_round_count() if self.report else 0
         _normalized = result.user_text.strip("。！？!?,， ").strip()
         _is_greeting = (
             _normalized in _GREETING_INPUTS
@@ -772,6 +919,25 @@ class ConversationPipeline:
             or (len(_normalized) <= 6 and _normalized.replace("呀", "").replace("啊", "").replace("哈", "") in {"你好", "嗨"})
         )
         if current_rounds <= 2 and _is_greeting:
+            # Fast replies still pass through the same one-decision boundary;
+            # the optimized branch only skips model generation.
+            proposal = RouterProposal.fallback("greeting_fast_path")
+            snapshot = self._build_turn_snapshot(
+                round_count=current_rounds,
+                time_limit_reached=bool(self.report and self.report.is_over_limit()),
+                session_state=config.session_state,
+            )
+            decision = self.turn_policy.decide(
+                user_text=result.user_text,
+                proposal=proposal,
+                snapshot=snapshot,
+                signals=collect_turn_signals(result.user_text, snapshot),
+            )
+            result.router_proposal = proposal
+            result.turn_state_snapshot = snapshot
+            result.turn_decision = decision
+            self._apply_turn_decision(decision, result)
+            self._commit_user_turn(config, result, emit)
             import random
             _GREETING_REPLIES = [
                 "你好呀。[breath]今天感觉咋样？",
@@ -802,276 +968,114 @@ class ConversationPipeline:
             metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
             return result
 
-        # --- System suffix: RAG + round warning + scale (no agent dependency) ---
-        with metrics.timer("rag.system_suffix"):
-            system_suffix = self._build_system_suffix(result.user_text)
-
-        from services.scales import get_scale_manager
-        scale_mgr = get_scale_manager()
-
-        # Interruption detection: if user resists questioning, stop scale immediately
-        if self._active_scale and is_scale_interruption_text(result.user_text):
-            logger.warning(f"[ScaleDebug] user interrupted scale: {result.user_text!r}")
-            self._soft_pause_scale(reason="user_interruption")
-
-        # Round gate
-        current_rounds = self.report.get_round_count() if self.report else 0
-
-        # --- Agent unified routing (3B model decides scale/relaxation) ---
-        _AGENT_FALLBACK = {
-            "scale_action": "none", "scale": None, "item": None,
-            "probe_hint": "", "recommend_relaxation": False,
-            "relaxation_type": None, "recommend_game": False,
-            "game_type": None, "recommend_media": False,
-            "media_type": None, "exit_intent": False,
-            "confidence": 0.0, "reason": "agent fallback",
-        }
-        agent_route = None
-        if not AGENT_ROUTE_ENABLED:
-            logger.warning("[AgentRoute] skipped: AGENT_ROUTE_ENABLED=False")
-        elif self._agent_route_cooldown > 0:
-            self._agent_route_cooldown -= 1
-            logger.warning(f"[AgentRoute] cooldown remaining={self._agent_route_cooldown}")
-        elif self.agent and self.agent.is_available():
-            try:
-                relax_done = self._get_relaxation_done()
-                agent_route = self.agent.route_conversation_actions(
-                    user_text=result.user_text,
-                    recent_history=self._get_recent_dialogue_text(),
-                    current_round=current_rounds,
-                    active_scale=self._active_scale,
-                    collected_scales=self._scale_answers,
-                    relaxation_done=relax_done,
-                )
-                self._agent_route_cooldown = 0  # reset cooldown on success
-                logger.warning(
-                    f"[AgentRoute] user={result.user_text!r} "
-                    f"action={agent_route.get('scale_action')} "
-                    f"scale={agent_route.get('scale')} "
-                    f"item={agent_route.get('item')} "
-                    f"confidence={agent_route.get('confidence')} "
-                    f"reason={agent_route.get('reason', '')[:60]}"
-                )
-            except Exception as e:
-                logger.warning(f"[AgentRoute] failed: {e}")
-                self._agent_route_cooldown = AGENT_ROUTE_COOLDOWN_ROUNDS
-                agent_route = _AGENT_FALLBACK
-
-        result.agent_route = dict(agent_route or _AGENT_FALLBACK)
-
-        allow_new_scale = True
-
-        # --- Soft pause recovery ---
-        # If scale was soft paused and user mentions symptoms again, resume
-        if self._scale_soft_paused and self._active_scale:
-            if self._scale_pause_turns <= 0:
-                # Pause expired — check if user is back on topic
-                if agent_route and agent_route.get("scale_action") in ("start", "continue"):
-                    # Don't resume to stale item — keep current if it's ahead
-                    if self._scale_resume_item and self._scale_resume_item > self._active_scale_q:
-                        self._active_scale_q = self._scale_resume_item
-                    logger.warning(
-                        f"[ScaleDebug] resume {self._active_scale} Q{self._active_scale_q} "
-                        f"after soft pause"
-                    )
-                    self._active_scale_waiting_answer = True
-                    self._scale_soft_paused = False
-
-        # --- Scale logic driven by agent route ---
-        # If we're waiting for an answer on current item, agent can't change it
-        _waiting_for_answer = self._active_scale and self._active_scale_waiting_answer
-
-        # Check if current item is in positive_pending_frequency state
-        _positive_pending_active = False
-        if self._active_scale and self._active_scale_waiting_answer:
-            answered = self._scale_answers.get(self._active_scale, {})
-            if self._active_scale_q not in answered:
-                _positive_pending_active = self._is_positive_pending_frequency(
-                    self._active_scale, self._active_scale_q, result.user_text
-                )
-
-        if agent_route and agent_route.get("confidence", 0) >= SCALE_ROUTE_CONFIDENCE:
-            scale_action = agent_route.get("scale_action", "none")
-            suggested_scale = agent_route.get("scale")
-            probe_hint = agent_route.get("probe_hint", "")
-
-            # --- Normalize the suggested scale to a canonical name ---
-            # The agent may return variants like "PHQ9" / "phq-9" / "GAD7". A
-            # non-canonical name would silently fail `SCALES.get(...)` and the
-            # scale could neither advance nor complete, leaking an un-hittable name.
-            if suggested_scale:
-                _norm = (str(suggested_scale).strip().upper()
-                         .replace("PHQ9", "PHQ-9").replace("GAD7", "GAD-7")
-                         .replace("PCL5", "PCL-5").replace(" ", ""))
-                if _norm in ("PHQ-9", "GAD-7", "PCL-5"):
-                    suggested_scale = _norm
-                else:
-                    logger.warning(f"[ScaleDebug] agent returned unknown scale {suggested_scale!r}; ignoring")
-                    suggested_scale = None
-
-            # --- Consume agent's exit intent (user wants to end) ---
-            # The agent router detects explicit/implicit end intent; the pipeline
-            # previously ignored `exit_intent` entirely, so a user saying "我想结束"
-            # would be silently dropped.
-            if agent_route.get("exit_intent") and not result.end_type:
-                result.end_type = "quit"
-                logger.warning(f"[Pipeline] agent exit_intent consumed -> end_type=quit")
-
-            if scale_action == "pause":
-                # Don't pause during positive_pending_frequency — must ask for frequency
-                if _positive_pending_active:
-                    logger.warning(f"[ScaleDebug] ignore agent pause during positive_pending: {self._active_scale} Q{self._active_scale_q}")
-                elif self._active_scale:
-                    self._soft_pause_scale(reason=agent_route.get("reason", "agent_pause"))
-                else:
-                    self._scale_pause_turns = 2
-
-            elif scale_action == "start" and not self._active_scale and allow_new_scale and not _waiting_for_answer and current_rounds >= MIN_ROUNDS_BEFORE_SCALE:
-                # Agent recommends starting a new scale
-                if suggested_scale:
-                    self._active_scale = suggested_scale
-                    self._administered_scales.add(suggested_scale)  # Track for incomplete check
-                    # Use agent's item suggestion if available
-                    route_item = agent_route.get("item")
-                    if isinstance(route_item, int) and route_item > 0:
-                        self._active_scale_q = route_item
-                    else:
-                        self._active_scale_q = self._next_unanswered_item(suggested_scale)
-                    self._active_scale_waiting_answer = False
-                    # Agent explicitly started a scale: clear any lingering
-                    # cumulative symptom scores so a residual score can't
-                    # immediately re-trigger a *different* scale right after.
-                    self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
-                    self.symptom_turns = 0
-                    # Log specific trigger reason
-                    if suggested_scale == "PHQ-9" and self._active_scale_q == 2:
-                        logger.warning(f"[ScaleTrigger] depressed mood detected, start PHQ-9 Q2")
-                    elif suggested_scale == "PHQ-9" and self._active_scale_q == 1:
-                        logger.warning(f"[ScaleTrigger] anhedonia detected, start PHQ-9 Q1")
-                    else:
-                        logger.warning(
-                            f"[ScaleDebug] agent start: {suggested_scale} Q{self._active_scale_q}, "
-                            f"confidence={agent_route.get('confidence')}, "
-                            f"reason={agent_route.get('reason', '')[:60]}"
-                    )
-                    # Build scale context hint with item core info
-                    hint = self._build_scale_context_hint(suggested_scale, self._active_scale_q, agent_route)
-                    if hint:
-                        system_suffix += hint
-
-            elif scale_action == "continue" and self._active_scale:
-                # Agent says continue probing current scale
-                hint = self._build_scale_context_hint(self._active_scale, self._active_scale_q, agent_route)
-                if hint:
-                    system_suffix += hint
-                logger.warning(f"[ScaleDebug] agent continue: {self._active_scale} Q{self._active_scale_q}")
-
-            # Relaxation: agent proposes candidate, only set after spoken_text sync
-            # Skip if: already used this session, or waiting for scale answer
-            self._relaxation_candidate = None
-            if (agent_route.get("recommend_relaxation")
-                and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE
-                and not self.relaxation_used
-                and not self._active_scale_waiting_answer):
-                self._relaxation_candidate = _normalize_relaxation_type(
-                    agent_route.get("relaxation_type")
-                )
-                logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
-                logger.warning(f"[RelaxDebug] agent relaxation candidate: {self._relaxation_candidate}")
-                # Inject hint so LLM naturally mentions relaxation in its reply
-                _relax_hint = {
-                    "breathing": "你可以试试旁边的呼吸放松训练，跟着做几分钟，身体会松一些。",
-                    "muscle": "你可以试试旁边的肌肉放松训练，让身体缓一缓。",
-                    "meditation": "你可以试试旁边的冥想训练，静一静对睡眠也有帮助。",
-                    "game": "你可以试试旁边的小游戏，换换心情。",
-                }
-                _hint = _relax_hint.get(self._relaxation_candidate, "你可以试试旁边的放松训练。")
-                system_suffix += f"\n【建议放松】{_hint} 把这句话自然地融入你的回复里，不要原样照搬。"
-
-            # Game recommendation: inject hint so LLM naturally mentions it
-            self._game_candidate = False
-            if (agent_route.get("recommend_game")
-                and agent_route.get("confidence", 0) >= RELAX_ROUTE_CONFIDENCE
-                and not self._game_recommended_this_session):
-                self._game_candidate = True
-                self._game_recommended_this_session = True
-                logger.warning("[GameDebug] agent game candidate: True")
-                system_suffix += "\n【建议游戏】你可以试试旁边的小游戏，换换心情。把这句话自然地融入你的回复里，不要原样照搬。"
-
-        elif self._active_scale:
-            # Agent unavailable — keep active scale alive with item core context
-            next_item = self._next_unanswered_item(self._active_scale, after_item=self._active_scale_q - 1)
-            hint_q = next_item if next_item else self._active_scale_q
-            logger.warning(
-                f"[ScaleDebug] agent route failed but active scale remains: "
-                f"{self._active_scale} Q{hint_q}"
+        # The Router proposal, snapshot, and pure signals are assembled before
+        # any scale/session mutation.  RAG and LLM context are built only after
+        # the authoritative decision exists.
+        proposal = config.router_proposal
+        agent_route = proposal.model_dump(mode="json") if proposal is not None else None
+        if proposal is None:
+            proposal, agent_route = self._request_router_proposal(
+                user_text=result.user_text,
+                current_rounds=current_rounds,
             )
-            hint = self._build_scale_context_hint(self._active_scale, hint_q, {})
-            if hint:
-                system_suffix += hint
+        result.router_proposal = proposal
+        result.agent_route = dict(agent_route or proposal.model_dump(mode="json"))
 
-        # --- Deterministic scale trigger fallback ---
-        # If agent returned none/pause/low-confidence but user text has clear
-        # symptom keywords, force-start the appropriate scale.
+        # Cumulative symptoms and the optional hard detector are observations;
+        # neither is allowed to start a scale at this point.
+        deterministic_candidate = None
         from config import ENABLE_SCALE_HARD_TRIGGER
-        if not ENABLE_SCALE_HARD_TRIGGER:
-            pass  # hard trigger disabled, let agent control scales
-        elif not self._active_scale and allow_new_scale and not _waiting_for_answer:
-            _detected = self._deterministic_scale_trigger(result.user_text)
-            if _detected:
-                scale_name, item = _detected
-                self._active_scale = scale_name
-                self._administered_scales.add(scale_name)
-                self._active_scale_q = item
-                self._active_scale_waiting_answer = False
-                logger.warning(f"[ScaleTriggerHard] {scale_name} Q{item} from deterministic fallback")
-                # Deterministic fallback started a scale: clear residual scores
-                # to prevent an immediate secondary scale trigger next round.
-                self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
-                self.symptom_turns = 0
+        if ENABLE_SCALE_HARD_TRIGGER and not self._active_scale:
+            detected = self._deterministic_scale_trigger(result.user_text)
+            if detected:
+                deterministic_candidate = detected[0]
+        pre_deltas, pre_reasons = ({}, [])
+        if not self._active_scale:
+            pre_deltas, pre_reasons = score_symptom_signals(
+                result.user_text, self.symptom_scores
+            )
+            projected = {
+                scale: self.symptom_scores.get(scale, 0) + delta
+                for scale, delta in pre_deltas.items()
+            }
+            if current_rounds >= MIN_ROUNDS_BEFORE_SCALE:
+                eligible = [
+                    (scale, score)
+                    for scale, score in projected.items()
+                    if score >= 3 and scale not in self._administered_scales
+                ]
+                if eligible:
+                    eligible.sort(key=lambda pair: (-pair[1], pair[0]))
+                    deterministic_candidate = deterministic_candidate or eligible[0][0]
 
-        # --- Cumulative symptom signal scoring (per-scale) ---
-        # Only when no active scale and not in cooldown
-        if not self._active_scale and not _waiting_for_answer:
-            deltas, reasons = score_symptom_signals(result.user_text, self.symptom_scores)
-            if any(v > 0 for v in deltas.values()):
+        snapshot = result.turn_state_snapshot
+        if snapshot is None:
+            snapshot = self._build_turn_snapshot(
+                round_count=current_rounds,
+                time_limit_reached=bool(self.report and self.report.is_over_limit()),
+                session_state=config.session_state,
+            )
+        result.turn_state_snapshot = snapshot
+        signals = collect_turn_signals(
+            result.user_text,
+            snapshot,
+            deterministic_scale_candidate=deterministic_candidate,
+            legacy_relaxation_candidate=self._pending_relaxation_after_scale,
+        )
+        decision = config.turn_decision
+        if decision is None:
+            decision = self.turn_policy.decide(
+                user_text=result.user_text,
+                proposal=proposal,
+                snapshot=snapshot,
+                signals=signals,
+            )
+        result.turn_decision = decision
+        self._apply_turn_decision(decision, result)
+        self._commit_user_turn(config, result, emit)
+
+        # Apply the one turn's symptom observations only after the decision.
+        allow_new_scale = True
+        _waiting_for_answer = bool(self._active_scale and self._active_scale_waiting_answer)
+        if not self._active_scale and pre_deltas:
+            if any(value > 0 for value in pre_deltas.values()):
                 self.symptom_turns += 1
-                for scale_name, d in deltas.items():
-                    if d > 0:
-                        self.symptom_scores[scale_name] = self.symptom_scores.get(scale_name, 0) + d
+                for scale_name, delta in pre_deltas.items():
+                    if delta > 0:
+                        self.symptom_scores[scale_name] = self.symptom_scores.get(scale_name, 0) + delta
             logger.warning(
                 f"[ScaleTriggerScore] user={result.user_text!r} "
-                f"deltas={deltas} totals={self.symptom_scores} reasons={reasons}"
+                f"deltas={pre_deltas} totals={self.symptom_scores} reasons={pre_reasons}"
             )
 
-            # Trigger highest-scoring scale if threshold reached
-            if (allow_new_scale
-                and current_rounds >= MIN_ROUNDS_BEFORE_SCALE
-                and current_rounds > self.last_scale_trigger_round + self.scale_trigger_cooldown):
-                # Find the scale with highest score that hasn't been administered
-                best_scale = None
-                best_score = 0
-                for s, sc in self.symptom_scores.items():
-                    if sc >= 3 and sc > best_score and s not in self._administered_scales:
-                        best_scale = s
-                        best_score = sc
-                if best_scale:
-                    self._active_scale = best_scale
-                    self._active_scale_q = self._next_unanswered_item(best_scale) or 1
-                    self._active_scale_waiting_answer = False
-                    self._administered_scales.add(best_scale)
-                    self.last_scale_trigger_round = current_rounds
-                    logger.warning(
-                        f"[ScaleTrigger] {best_scale} by accumulated symptom score: "
-                        f"total={best_score}, item={self._active_scale_q}"
-                    )
-                    # Reset all scores after trigger
-                    self.symptom_scores = {"PHQ-9": 0, "GAD-7": 0, "PCL-5": 0}
-                    self.symptom_turns = 0
-                    # Add subtle hint for LLM
-                    hint = self._build_scale_context_hint(best_scale, self._active_scale_q, {})
-                    if hint:
-                        system_suffix += hint
+        # Build ordinary context only after the decision has been formed.  The
+        # decision's needs_rag bit is the sole RAG gate for this turn.
+        with metrics.timer("rag.system_suffix"):
+            system_suffix = self._build_system_suffix(
+                result.user_text,
+                needs_rag=decision.needs_rag,
+                round_count=current_rounds,
+            )
+
+        if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
+            hint = self._build_scale_context_hint(
+                decision.scale_name, self._active_scale_q, agent_route or {}
+            )
+            if hint:
+                system_suffix += hint
+        elif decision.action is TurnAction.RECOMMEND_RELAXATION:
+            relax_hint = {
+                "breathing": "你可以试试旁边的呼吸放松训练，跟着做几分钟，身体会松一些。",
+                "muscle": "你可以试试旁边的肌肉放松训练，让身体缓一缓。",
+                "meditation": "你可以试试旁边的冥想训练，静一静对睡眠也有帮助。",
+            }.get(self._relaxation_candidate or "breathing", "你可以试试旁边的放松训练。")
+            system_suffix += f"\n【建议放松】{relax_hint} 把这句话自然地融入你的回复里，不要原样照搬。"
+        elif decision.action is TurnAction.RECOMMEND_GAME:
+            system_suffix += "\n【建议游戏】你可以试试旁边的小游戏，换换心情。把这句话自然地融入你的回复里，不要原样照搬。"
+
+        # Deterministic detectors have already been reduced to ``signals`` and
+        # approved (or rejected) by TurnPolicy.  There is intentionally no
+        # second trigger or eligibility check here.
 
         # Scale pause countdown
         if self._scale_pause_turns > 0:
@@ -1187,41 +1191,52 @@ class ConversationPipeline:
 
         # --- Tag detection ---
         raw_end_type = detect_tag(result.full_response, END_PATTERNS)
-        # Only allow END tag if user explicitly wants to end (not "好吧", "嗯", etc.)
-        if raw_end_type and is_user_explicit_end_text(result.user_text):
-            result.end_type = raw_end_type
-        else:
-            if raw_end_type:
-                logger.warning(
-                    f"[EndDebug] suppress END tag: user did not explicitly end. "
-                    f"user={result.user_text!r}, raw_end={raw_end_type}"
-                )
-            result.end_type = None
-        # Relaxation: LLM REC tag takes priority, otherwise use agent candidate
-        # Only allow if not already used this session and not waiting for scale answer
+        # Legacy tags are response metadata only.  They never create or
+        # replace the authoritative decision formed before the 72B call.
+        if raw_end_type and result.turn_decision and result.turn_decision.action is not TurnAction.END_SESSION:
+            logger.warning(
+                f"[EndDebug] ignored non-authoritative END tag {raw_end_type!r} "
+                f"for decision={result.turn_decision.action.value}"
+            )
+
+        # A relaxation event is emitted only when the Decision authorized it;
+        # an LLM REC tag by itself is ignored.
         llm_rec = detect_tag(result.full_response, REC_TAGS)
-        if llm_rec and not self.relaxation_used and not self._active_scale_waiting_answer:
-            result.relaxation_rec = llm_rec
+        if result.turn_decision and result.turn_decision.action is TurnAction.RECOMMEND_RELAXATION:
+            result.relaxation_rec = self._relaxation_candidate or _normalize_relaxation_type(
+                result.turn_decision.intervention_type
+            )
             self.relaxation_used = True
-            logger.warning(f"[RelaxDebug] relaxation from LLM tag: {llm_rec}")
-        elif self._relaxation_candidate:
-            if self._active_scale and not result.scale_completed:
-                # During active scale: hold for later
-                self._pending_relaxation_after_scale = self._relaxation_candidate
-                result.relaxation_rec = None
-                logger.warning(f"[RelaxDebug] hold relaxation until scale done: {self._relaxation_candidate}")
-            else:
-                # Agent recommended + hint injected → trust the recommendation
-                result.relaxation_rec = self._relaxation_candidate
-                self.relaxation_used = True
-                logger.warning(f"[RelaxDebug] relaxation from agent: {self._relaxation_candidate}")
+            logger.warning(f"[RelaxDebug] relaxation authorized by TurnDecision: {result.relaxation_rec}")
+        elif llm_rec:
+            logger.warning(
+                f"[RelaxDebug] ignored non-authoritative REC tag {llm_rec!r} "
+                f"for decision={result.turn_decision.action.value if result.turn_decision else 'none'}"
+            )
         self._relaxation_candidate = None
 
         # Preserve this turn's recommendation until the asynchronous intent
         # classification has completed below.
         game_recommended = self._game_candidate
         self._game_candidate = False
-        result.scale_tags = parse_scale_tags(result.full_response)
+        parsed_scale_tags = parse_scale_tags(result.full_response)
+        allowed_scale = (
+            self._active_scale
+            if result.turn_decision and result.turn_decision.action in (
+                TurnAction.START_SCALE,
+                TurnAction.CONTINUE_SCALE,
+            )
+            else None
+        )
+        result.scale_tags = (
+            {allowed_scale: parsed_scale_tags.get(allowed_scale, {})}
+            if allowed_scale and parsed_scale_tags.get(allowed_scale)
+            else {}
+        )
+        if parsed_scale_tags and parsed_scale_tags != result.scale_tags:
+            logger.warning(
+                f"[ScaleDebug] ignored non-authoritative SCALE tags: {parsed_scale_tags}"
+            )
         if result.scale_tags:
             logger.warning(f"[ScaleDebug] SCALE tags parsed from LLM: {result.scale_tags}")
         # Track answered questions per scale
@@ -1302,16 +1317,17 @@ class ConversationPipeline:
                             self._scale_queue.clear()
                         result.all_scales_completed = True
                         logger.warning(f"[ScaleDebug] all scales completed (last: {completed_name})")
-                        # Post-scale relaxation recommendation
-                        # Use pending candidate if available, otherwise choose based on scores
+                        # Completion is execution metadata for this turn.  A
+                        # post-scale relaxation recommendation is deferred to a
+                        # future turn so it cannot become a second decision.
                         if not self._post_scale_relaxation_done:
                             rec_type = self._pending_relaxation_after_scale or self._choose_post_scale_relaxation(completed_name)
                             self._pending_relaxation_after_scale = None
                             if rec_type:
-                                result.relaxation_rec = rec_type
-                                self._post_scale_relaxation_done = True
-                                self._relaxation_recommended_this_session.add(rec_type)
-                                logger.warning(f"[RelaxDebug] post-scale relaxation: {completed_name} -> {rec_type}")
+                                self._pending_relaxation_after_scale = rec_type
+                                logger.warning(
+                                    f"[RelaxDebug] deferred post-scale signal: {completed_name} -> {rec_type}"
+                                )
                     else:
                         # Advanced to next item — pause 1 turn, don't chain questions
                         self._scale_pause_turns = 1
@@ -1823,12 +1839,22 @@ class ConversationPipeline:
             lines.append(f"{role}: {content}")
         return "\n".join(lines)
 
-    def _build_system_suffix(self, text: str) -> str:
+    def _build_system_suffix(
+        self,
+        text: str,
+        *,
+        needs_rag: bool = True,
+        round_count: int | None = None,
+    ) -> str:
         """Build system suffix with round warning + RAG context."""
         from config import MIN_ROUNDS_FOR_RELAXATION
 
         system_suffix = ""
-        current_rounds = self.report.get_round_count() if self.report else 0
+        current_rounds = (
+            int(round_count)
+            if round_count is not None
+            else (self.report.get_round_count() if self.report else 0)
+        )
 
         if current_rounds < MIN_ROUNDS_FOR_RELAXATION:
             system_suffix = (
@@ -1838,7 +1864,7 @@ class ConversationPipeline:
                 f"继续通过对话建立关系。"
             )
 
-        if self.rag:
+        if needs_rag and self.rag:
             # Use multi-turn context for RAG retrieval
             rag_text = text
             if self.llm and hasattr(self.llm, 'conversation_history'):

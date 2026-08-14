@@ -27,12 +27,12 @@ class ScalePolicy:
         route = route or {}
         action = str(route.get("scale_action", "none")).lower()
         requested_scale = self._normalize_scale(route.get("scale"))
-        requested_item = route.get("item")
         if active_scale and action == "continue":
             return ScaleDirective("continue", active_scale, active_item)
         if not active_scale and action == "start" and requested_scale:
-            item = requested_item if isinstance(requested_item, int) and requested_item > 0 else 1
-            return ScaleDirective("start", requested_scale, item)
+            # Item progression is owned by the legacy scale executor during
+            # Phase 2; Router item hints are intentionally ignored.
+            return ScaleDirective("start", requested_scale, 1)
         if action == "pause" and active_scale:
             return ScaleDirective("pause", active_scale, active_item)
         return ScaleDirective("none")

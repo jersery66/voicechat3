@@ -33,6 +33,7 @@ from config import (
     EMOTION_SCENE_MAP,
     INTENT_SCENE_MAP,
 )
+from conversation.contracts import RouterProposal
 
 logger = get_logger(__name__)
 
@@ -614,24 +615,26 @@ class AgentService:
 
 字段必须完整，类型如下：
 {
-  "action": "chat|start_scale|continue_scale|recommend_relaxation|recommend_game|recommend_media|exit",
-  "scale": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
-  "target_item": null 或 "Q1"-"Q9",
+  "action": "chat|start_scale|recommend_relaxation|recommend_game|end_session",
+  "scale_name": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
   "intervention_type": null 或 "breathing" 或 "muscle_relaxation" 或 "mindfulness" 或 "game" 或 "media",
+  "emotion": "neutral|calm|sad|anxious|angry|fearful",
+  "intensity": 0.0-1.0,
+  "needs_rag": true 或 false,
   "confidence": 0.0-1.0,
   "reason": "15字以内"
 }
 
-要求：只输出单行JSON，不要换行。不要输出题目文本。
+要求：只输出单行JSON，不要换行。不要输出题目文本、题号或评分。
 
 规则：
 - 普通聊天且症状不明确：action="chat"
-- 连续2轮以上出现症状，或症状明确影响功能时：action="start_scale"
+- 达到系统当前最低轮次门槛且症状持续，或症状明确影响功能时：action="start_scale"
 - 单次轻微信号（如"还好""不太开心"）不触发量表，继续观察
-- 已采样但需继续时：action="continue_scale"
+- 当前已有量表时不要切换量表，由系统根据状态继续当前题目
 - 用户焦虑/紧张/失眠/疲惫且量表已部分完成：action="recommend_relaxation"
 - 用户想玩/无聊时：action="recommend_game"
-- 用户明确想退出时：action="exit"
+- 用户明确想退出时：action="end_session"
 
 症状→量表映射：
 - 心情不好/低落/沮丧/没意思/没兴趣/难受/想哭→PHQ-9
@@ -640,16 +643,16 @@ class AgentService:
 - 焦虑/紧张/担心/心慌→GAD-7
 - 创伤/噩梦/闪回→PCL-5
 
-注意：start_scale 时不需要指定 target_item，由系统自动决定。
+注意：start_scale 时不要指定题号或评分，由系统自动决定。
 
 示例1：用户连续表达低落（第3轮）
-{"action":"start_scale","scale":"PHQ-9","target_item":null,"intervention_type":null,"confidence":0.75,"reason":"持续低落情绪"}
+{"action":"start_scale","scale_name":"PHQ-9","intervention_type":null,"emotion":"sad","intensity":0.6,"needs_rag":true,"confidence":0.75,"reason":"持续低落情绪"}
 
 示例2：用户单次说"睡不好"（第1轮）
-{"action":"chat","scale":null,"target_item":null,"intervention_type":null,"confidence":0.5,"reason":"单次睡眠提及"}
+{"action":"chat","scale_name":null,"intervention_type":null,"emotion":"neutral","intensity":0.2,"needs_rag":true,"confidence":0.5,"reason":"单次睡眠提及"}
 
 示例3：用户焦虑且已有PHQ-9在进行
-{"action":"continue_scale","scale":"PHQ-9","target_item":null,"intervention_type":null,"confidence":0.7,"reason":"继续采样"}"""
+{"action":"chat","scale_name":null,"intervention_type":null,"emotion":"neutral","intensity":0.2,"needs_rag":true,"confidence":0.7,"reason":"继续采样"}"""
 
         timeout = timeout or AGENT_TIMEOUT
         try:
@@ -691,14 +694,6 @@ class AgentService:
             else:
                 scale_action = raw_action
 
-            # Map item field
-            item = result.get("target_item") or result.get("item")
-            if isinstance(item, str) and item.startswith("Q"):
-                try:
-                    item = int(item[1:])
-                except ValueError:
-                    item = None
-
             # Build normalized result — derive booleans from action field
             intervention = result.get("intervention_type")
             if raw_action == "recommend_relaxation":
@@ -713,9 +708,7 @@ class AgentService:
             normalized = {
                 "action": raw_action,
                 "scale_action": scale_action,
-                "scale": result.get("scale"),
-                "target_item": result.get("target_item"),
-                "item": item,
+                "scale": result.get("scale_name") or result.get("scale"),
                 "intervention_type": intervention,
                 "probe_hint": result.get("probe_hint", ""),
                 "recommend_relaxation": raw_action == "recommend_relaxation",
@@ -726,6 +719,9 @@ class AgentService:
                 "media_type": intervention if raw_action == "recommend_media" else None,
                 "exit_intent": raw_action == "exit",
                 "confidence": result.get("confidence", 0.0),
+                "emotion": result.get("emotion", "neutral"),
+                "intensity": result.get("intensity", 0.0),
+                "needs_rag": result.get("needs_rag", raw_action == "chat"),
                 "reason": result.get("reason", ""),
             }
             return normalized
@@ -735,13 +731,22 @@ class AgentService:
             return {
                 "scale_action": "none",
                 "scale": None,
-                "item": None,
                 "probe_hint": "",
                 "recommend_relaxation": False,
                 "relaxation_type": None,
                 "confidence": 0.0,
                 "reason": f"agent fallback: {e}",
             }
+
+    def route_proposal(self, **kwargs) -> RouterProposal:
+        """Return the Phase 2 non-executable Router contract.
+
+        ``route_conversation_actions`` remains as a short-lived compatibility
+        adapter for older callers, but production pipeline wiring uses this
+        method and discards legacy item/score/control fields at the boundary.
+        """
+        legacy = self.route_conversation_actions(**kwargs)
+        return RouterProposal.from_legacy_route(legacy)
 
     def validate_route_json(self) -> bool:
         """Test if agent can produce valid route JSON."""
