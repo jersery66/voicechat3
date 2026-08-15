@@ -74,5 +74,9 @@
 
 - Implementation commit: `4858cd9a0a45228ba86e48ef97d0eddd43c4ad0d`
   (`feat: enable cancellable sentence streaming tts`).
-- Pushed remote HEAD: pending push verification.
-- Final working-tree status: pending push verification.
+- Pushed remote HEAD: **NOT UPDATED / network unavailable**. Two push
+  attempts using the required no-proxy command could not connect to GitHub;
+  the local tracking ref remains the Phase 7 design baseline
+  `38d16ecf2cf59f1d0c74a90b2245b0ebc6e19425` until connectivity returns.
+- Local final working-tree status: clean after the implementation and record
+  commits; local branch is ahead of the remote by the unpushed commits.
