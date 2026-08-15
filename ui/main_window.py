@@ -1014,7 +1014,27 @@ class MainWindow(QMainWindow):
 
             if tts_ok and self.tts_service:
                 self.processing_queue.put(("status", "正在预热语音合成..."))
-                self.tts_service.warmup()
+                warmup_ok = False
+                try:
+                    warmup_ok = bool(self.tts_service.warmup())
+                except Exception as exc:
+                    logger.warning(f"TTS warmup failed: {exc}")
+                if not warmup_ok:
+                    logger.warning("TTS warmup produced no usable audio; disabling TTS.")
+                    failed_tts = self.tts_service
+                    try:
+                        cleanup = getattr(failed_tts, "cleanup", None)
+                        if callable(cleanup):
+                            cleanup()
+                        else:
+                            unload = getattr(failed_tts, "unload_model", None)
+                            if callable(unload):
+                                unload()
+                    except Exception as exc:
+                        logger.warning(f"TTS warmup cleanup failed: {exc}")
+                    self.tts_service = None
+                    tts_ok = False
+                    self.processing_queue.put(("status", "语音合成不可用，已切换为无语音模式"))
             else:
                 logger.warning("TTS unavailable; continuing in text-only playback mode")
             self.processing_queue.put(("loading_progress", 65))

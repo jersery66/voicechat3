@@ -183,10 +183,14 @@ class TTSService:
         logger.info("Warming up VoxCPM2...")
         try:
             audio = self.generate("你好，很高兴认识你。")
-            if audio is not None and len(audio) > 0:
-                logger.info(f"VoxCPM2 warmup successful. Generated {len(audio)} samples.")
-            else:
-                logger.warning("Warmup generated empty audio, continuing...")
+            try:
+                sample_count = int(np.asarray(audio).size) if audio is not None else 0
+            except Exception:
+                sample_count = 0
+            if sample_count <= 0:
+                logger.warning("VoxCPM2 warmup produced no usable audio; TTS is unavailable.")
+                return False
+            logger.info(f"VoxCPM2 warmup successful. Generated {sample_count} samples.")
             return True
         except Exception as e:
             logger.error(f"VoxCPM2 warmup failed: {e}")
