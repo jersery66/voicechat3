@@ -2,8 +2,8 @@
 
 ## Status
 
-- Phase 8 status: **implementation complete; final verification pending the
-  documentation-only record push**.
+- Phase 8 status: **implementation complete; primary implementation and
+  documentation record pushed**.
 - Phase 1–7 remain frozen and accepted.
 - No Phase 9 or later architecture work was started.
 
@@ -140,6 +140,11 @@ Phase 7 delivery contract, and report ordering.
   `223d4ff7f2d685e3c83c81f9dfe500af5ead5a16`.
 - Remote branch at implementation push:
   `origin/codex/a100-vllm-safety` -> `223d4ff7f2d685e3c83c81f9dfe500af5ead5a16`.
+- Documentation record commit:
+  `d3996dec6e445c51a2dbea747916c3497b65df45`
+  (`docs: finalize phase 8 implementation record`).
+- Local and remote were synchronized after the record push (`ahead/behind
+  0/0`, clean working tree).
 - `git diff --check`: passed for the staged implementation.
 - The final documentation-only record commit is intentionally separate from
   the primary test implementation commit, so the implementation SHA remains
