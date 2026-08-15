@@ -74,9 +74,7 @@
 
 - Implementation commit: `4858cd9a0a45228ba86e48ef97d0eddd43c4ad0d`
   (`feat: enable cancellable sentence streaming tts`).
-- Pushed remote HEAD: **NOT UPDATED / network unavailable**. Two push
-  attempts using the required no-proxy command could not connect to GitHub;
-  the local tracking ref remains the Phase 7 design baseline
-  `38d16ecf2cf59f1d0c74a90b2245b0ebc6e19425` until connectivity returns.
-- Local final working-tree status: clean after the implementation and record
-  commits; local branch is ahead of the remote by the unpushed commits.
+- Pushed remote HEAD verified after connectivity recovered:
+  `40fbc9ce856ba4edbe61f5c218159669899af7bb`.
+- Local final working-tree status before this docs-only verification update:
+  clean; local and `origin/codex/a100-vllm-safety` were synchronized (`0/0`).
