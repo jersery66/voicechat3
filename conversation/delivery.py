@@ -18,6 +18,7 @@ from core.tags import clean_for_display
 
 
 DEFAULT_MAX_PENDING_SENTENCES = 32
+DEFAULT_MAX_GENERATION_RECORDS = 64
 
 
 @dataclass
@@ -108,14 +109,24 @@ class GenerationController:
         self,
         *,
         on_cancel: Optional[Callable[[GenerationCancelled], None]] = None,
+        max_records: int = DEFAULT_MAX_GENERATION_RECORDS,
     ) -> None:
+        retention = int(max_records)
+        if retention <= 0:
+            raise ValueError("max_records must be positive")
         self._lock = threading.RLock()
         self._next_id = 0
         self._current_id: Optional[int] = None
         self._records: dict[int, GenerationRecord] = {}
+        self.max_records = retention
         self._cancel_listeners: list[Callable[[GenerationCancelled], None]] = []
         if on_cancel is not None:
             self._cancel_listeners.append(on_cancel)
+
+    @property
+    def retained_record_count(self) -> int:
+        with self._lock:
+            return len(self._records)
 
     @property
     def current_generation_id(self) -> Optional[int]:
@@ -147,9 +158,26 @@ class GenerationController:
             record = GenerationRecord(self._next_id)
             self._records[record.generation_id] = record
             self._current_id = record.generation_id
+            self._prune_records_locked()
 
         self._notify_cancel(previous_event, listeners)
         return record
+
+    def _prune_records_locked(self) -> None:
+        """Retain a bounded oldest-to-newest grace window under ``_lock``."""
+
+        while len(self._records) > self.max_records:
+            candidates = [
+                generation_id
+                for generation_id in self._records
+                if generation_id != self._current_id
+            ]
+            if not candidates:
+                # Defensive protection for the current record.  Under normal
+                # monotonic allocation this branch is unreachable.
+                return
+            oldest = min(candidates)
+            del self._records[oldest]
 
     def cancel_generation(self, generation_id: int, *, reason: str = "") -> bool:
         """Cancel a record once; return ``True`` only on the first transition."""
@@ -723,6 +751,7 @@ class SentenceDeliveryQueue:
 __all__ = [
     "AudioFinished",
     "AudioStarted",
+    "DEFAULT_MAX_GENERATION_RECORDS",
     "DEFAULT_MAX_PENDING_SENTENCES",
     "DeliveryLedger",
     "GenerationCancelled",
