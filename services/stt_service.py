@@ -3,6 +3,7 @@
 import os
 import sys
 import gc
+from dataclasses import dataclass, field
 
 # Monkey-patch torchaudio.load to use soundfile/miniaudio (avoids torchcodec/ffmpeg dependency).
 # Must happen before funasr imports torchaudio.
@@ -54,6 +55,32 @@ from services.logger import get_logger
 logger = get_logger(__name__)
 
 
+_RECORDING_SENTINEL = object()
+
+
+@dataclass
+class _RecordingState:
+    """Ownership bundle for one microphone recording.
+
+    The callback and collector close over this object instead of looking up
+    mutable service-level queue/list fields.  That keeps a completed
+    recording isolated from a later recording and gives shutdown one place to
+    order accepted frames before the sentinel.
+    """
+
+    audio_queue: queue.Queue
+    recorded_audio: list
+    stream: object | None = None
+    accepting_frames: bool = False
+    stop_requested: bool = False
+    sentinel_enqueued: bool = False
+    vad_triggered: bool = False
+    vad_silence_frames: int = 0
+    vad_speech_frames: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    collector_thread: threading.Thread | None = field(default=None, repr=False)
+
+
 class STTService:
     """Speech-to-Text service using FunASR (Fun-ASR-Nano-2512)."""
     
@@ -66,6 +93,8 @@ class STTService:
         self.audio_queue = queue.Queue()
         self.recorded_audio = []
         self.stream = None
+        self._recording_state: _RecordingState | None = None
+        self._recording_state_lock = threading.RLock()
 
         # VAD state
         self._vad_triggered = False
@@ -165,9 +194,19 @@ class STTService:
     
     def start_recording(self):
         """Start recording audio from microphone."""
-        self.is_recording = True
-        self.recorded_audio = []
-        self.audio_queue = queue.Queue() # Clear queue
+        recording_state = _RecordingState(
+            audio_queue=queue.Queue(),
+            recorded_audio=[],
+            accepting_frames=True,
+        )
+        with self._recording_state_lock:
+            self._recording_state = recording_state
+            # Keep the historical public attributes as compatibility aliases;
+            # worker code below uses the recording-local state object.
+            self.audio_queue = recording_state.audio_queue
+            self.recorded_audio = recording_state.recorded_audio
+            self.is_recording = True
+
         self._vad_triggered = False
         self._vad_silence_frames = 0
         self._vad_speech_frames = 0
@@ -175,24 +214,40 @@ class STTService:
         def audio_callback(indata, frames, time, status):
             if status:
                 logger.debug(f"Audio status: {status}")
-            if self.is_recording:
-                self.audio_queue.put(indata.copy())
+            should_stop = False
+            with recording_state.lock:
+                if not recording_state.accepting_frames:
+                    return
 
-                # VAD: energy-based silence detection
+                # Put the accepted frame before requesting stop.  The same
+                # recording lock protects this ordering against manual stop.
+                recording_state.audio_queue.put(indata.copy())
+
+                # VAD: energy-based silence detection.  This policy remains
+                # unchanged in this hardening step; only shutdown mechanics
+                # are changing.
                 if self._vad_enabled:
                     rms = np.sqrt(np.mean(indata ** 2))
                     if rms < VAD_SILENCE_THRESHOLD:
-                        self._vad_silence_frames += frames
+                        recording_state.vad_silence_frames += frames
                     else:
-                        self._vad_silence_frames = 0
-                        self._vad_speech_frames += frames
+                        recording_state.vad_silence_frames = 0
+                        recording_state.vad_speech_frames += frames
 
-                    silence_sec = self._vad_silence_frames / SAMPLE_RATE
-                    speech_sec = self._vad_speech_frames / SAMPLE_RATE
-                    if (silence_sec >= VAD_SILENCE_DURATION
-                            and speech_sec >= VAD_SPEECH_MIN_DURATION):
-                        self._vad_triggered = True
-                        self.is_recording = False
+                    silence_sec = recording_state.vad_silence_frames / SAMPLE_RATE
+                    speech_sec = recording_state.vad_speech_frames / SAMPLE_RATE
+                    should_stop = (
+                        silence_sec >= VAD_SILENCE_DURATION
+                        and speech_sec >= VAD_SPEECH_MIN_DURATION
+                    )
+
+                with self._recording_state_lock:
+                    if self._recording_state is recording_state:
+                        self._vad_silence_frames = recording_state.vad_silence_frames
+                        self._vad_speech_frames = recording_state.vad_speech_frames
+
+            if should_stop:
+                self._request_recording_stop(recording_state, vad_triggered=True)
         
         try:
             device_id = None
@@ -253,30 +308,105 @@ class STTService:
                 blocksize=1024,
                 device=device_id
             )
-            self.stream.start()
-            
-            # Start a thread to collect audio from queue
+            recording_state.stream = self.stream
+
+            # Start the collector before opening the stream.  A device may
+            # deliver a callback immediately from ``start()``; the collector
+            # must already be waiting so a stop request can always drain the
+            # accepted frame followed by the sentinel.
             def collect_audio():
-                while self.is_recording:
+                while True:
+                    audio_chunk = recording_state.audio_queue.get()
                     try:
-                        audio_chunk = self.audio_queue.get(timeout=0.1)
-                        self.recorded_audio.append(audio_chunk)
-                    except queue.Empty:
-                        continue
+                        if audio_chunk is _RECORDING_SENTINEL:
+                            break
+                        recording_state.recorded_audio.append(audio_chunk)
+                    finally:
+                        recording_state.audio_queue.task_done()
+
                 # VAD auto-stop (or manual stop) reached: close the recording
-                # stream from this collector thread, not from the audio callback.
-                self._stop_stream()
-                        
-            self.collect_thread = threading.Thread(target=collect_audio, daemon=True)
-            self.collect_thread.start()
-            
+                # stream from this collector thread, not from the audio
+                # callback.  The sentinel proves all accepted frames were
+                # drained before this point.
+                self._close_stream_handle(recording_state.stream)
+                with self._recording_state_lock:
+                    if self._recording_state is recording_state:
+                        self.stream = None
+                        self.is_recording = False
+
+            recording_state.collector_thread = threading.Thread(
+                target=collect_audio,
+                daemon=True,
+            )
+            self.collect_thread = recording_state.collector_thread
+            recording_state.collector_thread.start()
+
+            # Open the stream only after the collector is ready.
+            self.stream.start()
+
         except Exception as e:
             logger.warning(f"Error starting recording stream: {e}")
-            self.is_recording = False
+            self._request_recording_stop(recording_state)
+            collector = recording_state.collector_thread
+            if collector is not None and collector is not threading.current_thread():
+                collector.join()
+            with self._recording_state_lock:
+                if self._recording_state is recording_state:
+                    self.is_recording = False
+                    self.stream = None
             # We can't easily propagate error to UI thread from here without the queue
             # But main.py checks self.is_recording state or we could print it.
             # Ideally the UI should know.
             logger.exception("Exception occurred")
+
+    def _request_recording_stop(
+        self,
+        recording_state: _RecordingState | None = None,
+        *,
+        vad_triggered: bool = False,
+    ) -> bool:
+        """Request one lossless recording shutdown and enqueue one sentinel.
+
+        The caller may be the audio callback or a UI/manual-stop thread.  A
+        per-recording lock makes the accepted-frame -> sentinel ordering
+        deterministic without holding a lock while closing the stream.
+        """
+        state = recording_state or self._recording_state
+        if state is None:
+            self.is_recording = False
+            return False
+
+        with state.lock:
+            if vad_triggered:
+                state.vad_triggered = True
+            if state.stop_requested:
+                with self._recording_state_lock:
+                    if self._recording_state is state and state.vad_triggered:
+                        self._vad_triggered = True
+                return False
+
+            state.accepting_frames = False
+            state.stop_requested = True
+            state.sentinel_enqueued = True
+            state.audio_queue.put(_RECORDING_SENTINEL)
+
+        with self._recording_state_lock:
+            if self._recording_state is state:
+                self.is_recording = False
+                if state.vad_triggered:
+                    self._vad_triggered = True
+        return True
+
+    @staticmethod
+    def _close_stream_handle(stream) -> None:
+        """Close one recording stream outside the PortAudio callback."""
+        if stream is None:
+            return
+        try:
+            stream.stop()
+            stream.close()
+        except Exception as e:
+            logger.warning(f"Error closing recording stream: {e}")
         
     def _stop_stream(self):
         """Close the microphone input stream if it is still open.
@@ -285,26 +415,39 @@ class STTService:
         (sounddevice forbids closing the active stream from inside it).
         """
         stream = getattr(self, "stream", None)
-        if stream is not None:
-            try:
-                stream.stop()
-                stream.close()
-            except Exception as e:
-                logger.warning(f"Error closing recording stream: {e}")
-            self.stream = None
+        self._close_stream_handle(stream)
+        self.stream = None
 
     def stop_recording(self) -> np.ndarray:
         """Stop recording and return the audio data."""
-        self.is_recording = False
-        self._stop_stream()
-            
-        # Wait for collect thread to finish
-        if hasattr(self, 'collect_thread') and self.collect_thread.is_alive():
-            self.collect_thread.join(timeout=1.0)
-            
-        # Concatenate all audio chunks
-        if self.recorded_audio:
-            audio = np.concatenate(self.recorded_audio, axis=0)
+        recording_state = self._recording_state
+        if recording_state is None:
+            self.is_recording = False
+            self._stop_stream()
+            chunks = self.recorded_audio
+        else:
+            self._request_recording_stop(recording_state)
+
+            collector = recording_state.collector_thread
+            if collector is not None and collector is not threading.current_thread():
+                # The collector exits only after consuming the sentinel, so
+                # joining here is the drain completion point.
+                collector.join()
+            elif collector is None:
+                # Defensive path for a partially-started stream.  Normal
+                # starts create the collector before opening the stream.
+                self._close_stream_handle(recording_state.stream)
+
+            chunks = recording_state.recorded_audio
+            with self._recording_state_lock:
+                if self._recording_state is recording_state:
+                    self._recording_state = None
+                    self.stream = None
+                    self.is_recording = False
+
+        # Concatenate all audio chunks exactly once after the collector drain.
+        if chunks:
+            audio = np.concatenate(chunks, axis=0)
             return audio.flatten()
         return np.array([])
 
