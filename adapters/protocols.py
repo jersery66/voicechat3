@@ -16,6 +16,8 @@
 #
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
+from adapters.tts_results import PlaybackResult
+
 
 @runtime_checkable
 class LLMBackend(Protocol):
@@ -80,7 +82,7 @@ class RAGBackend(Protocol):
 class TTSBackend(Protocol):
     """Speech synthesis + playback."""
 
-    def generate_and_play(self, text: str) -> None: ...
+    def generate_and_play(self, text: str) -> PlaybackResult: ...
 
     def stop_playing(self) -> None: ...
 

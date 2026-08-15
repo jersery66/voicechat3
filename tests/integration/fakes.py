@@ -11,6 +11,8 @@ Fakes record every call so tests can assert on what the pipeline sent.
 
 from typing import Any, Dict, List, Optional
 
+from adapters.tts_results import PlaybackResult, PlaybackStatus
+
 
 class FakeLLM:
     """Canned streaming LLM. Pops one full response per chat() call and
@@ -220,6 +222,7 @@ class FakeTTS:
 
     def generate_and_play(self, text: str):
         self.played.append(text)
+        return PlaybackResult(PlaybackStatus.COMPLETED)
 
     def stop_playing(self):
         pass

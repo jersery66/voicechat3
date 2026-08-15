@@ -11,6 +11,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from adapters.tts_results import PlaybackResult, PlaybackStatus
 from services.logger import get_logger
 
 logger = get_logger(__name__)
@@ -202,12 +203,12 @@ class TTSService:
 
         return text
 
-    def generate_and_play(self, text: str, **kwargs):
+    def generate_and_play(self, text: str, **kwargs) -> PlaybackResult:
         with self._play_lock:
             self.stop_playing()
             return self._generate_and_play_inner(text, **kwargs)
 
-    def _generate_and_play_inner(self, text: str, **kwargs):
+    def _generate_and_play_inner(self, text: str, **kwargs) -> PlaybackResult:
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
@@ -218,7 +219,7 @@ class TTSService:
         if not clean_text:
             logger.warning("Empty text after preprocessing")
             self.is_playing = False
-            return
+            return PlaybackResult(PlaybackStatus.FAILED, "empty_text")
 
         cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
         inference_timesteps = kwargs.get("inference_timesteps", config.VOXCPM_INFERENCE_TIMESTEPS)
@@ -237,6 +238,9 @@ class TTSService:
         done_flag = _threading.Event()
         started = _threading.Event()
         min_prebuffer = int(self.sample_rate * 0.8)
+        generated_samples = 0
+        generation_error = None
+        worker_error = None
 
         def _callback(outdata, frames, time_info, status):
             nonlocal read_pos
@@ -262,27 +266,33 @@ class TTSService:
                 read_pos += n
 
         def _stream_worker():
-            # Wait for minimum pre-buffer before opening the stream
-            while self.is_playing:
-                with lock:
-                    if write_pos >= min_prebuffer:
-                        break
-                if done_flag.is_set():
-                    break
-                _threading.Event().wait(0.01)
-            if not self.is_playing:
-                return
-            started.set()
-            stream = sd.OutputStream(
-                samplerate=self.sample_rate, channels=1,
-                dtype='float32', blocksize=0, callback=_callback,
-            )
-            with stream:
+            nonlocal worker_error
+            try:
+                # Wait for minimum pre-buffer before opening the stream
                 while self.is_playing:
-                    _threading.Event().wait(0.1)
                     with lock:
-                        if done_flag.is_set() and write_pos <= read_pos:
+                        if write_pos >= min_prebuffer:
                             break
+                    if done_flag.is_set():
+                        break
+                    _threading.Event().wait(0.01)
+                if not self.is_playing:
+                    return
+                started.set()
+                stream = sd.OutputStream(
+                    samplerate=self.sample_rate, channels=1,
+                    dtype='float32', blocksize=0, callback=_callback,
+                )
+                with stream:
+                    while self.is_playing:
+                        _threading.Event().wait(0.1)
+                        with lock:
+                            if done_flag.is_set() and write_pos <= read_pos:
+                                break
+            except Exception as exc:
+                worker_error = exc
+                logger.error("VoxCPM2 output worker failed: %s", exc)
+                logger.exception("VoxCPM2 output worker exception")
 
         stream_thread = _threading.Thread(target=_stream_worker, daemon=True)
         stream_thread.start()
@@ -313,6 +323,7 @@ class TTSService:
                             buf[start:] = audio_np[:first]
                             buf[:n - first] = audio_np[first:]
                         write_pos += n
+                        generated_samples += n
             else:
                 for chunk in self.model.generate_streaming(
                     text=clean_text,
@@ -337,17 +348,40 @@ class TTSService:
                             buf[start:] = audio_np[:first]
                             buf[:n - first] = audio_np[first:]
                         write_pos += n
+                        generated_samples += n
         except Exception as e:
+            generation_error = e
             logger.error(f"generate_and_play generation error: {e}")
+            logger.exception("VoxCPM2 generation exception")
         finally:
             done_flag.set()
             stream_thread.join(timeout=60)
+            worker_timed_out = stream_thread.is_alive()
             if gen is not None:
                 try:
                     gen.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("VoxCPM2 streaming generator close failed: %s", exc)
+            cancelled = not self.is_playing
             self.is_playing = False
+
+        if cancelled:
+            return PlaybackResult(PlaybackStatus.CANCELLED, "stopped")
+        if generation_error is not None:
+            return PlaybackResult(
+                PlaybackStatus.FAILED,
+                f"generation_error:{type(generation_error).__name__}",
+            )
+        if worker_error is not None:
+            return PlaybackResult(
+                PlaybackStatus.FAILED,
+                f"output_worker_error:{type(worker_error).__name__}",
+            )
+        if worker_timed_out:
+            return PlaybackResult(PlaybackStatus.FAILED, "output_worker_timeout")
+        if generated_samples <= 0:
+            return PlaybackResult(PlaybackStatus.FAILED, "no_audio")
+        return PlaybackResult(PlaybackStatus.COMPLETED)
 
     def generate(self, text: str, **kwargs) -> np.ndarray:
         if self.model is None:

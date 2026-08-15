@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from adapters.tts_results import PlaybackResult, PlaybackStatus
 
 ROOT = Path(__file__).resolve().parents[1]
 PHASE7_BASELINE = "38d16ecf2cf59f1d0c74a90b2245b0ebc6e19425"
@@ -273,6 +274,7 @@ class _FakeTTS:
         self.calls.append(text)
         self.started.set()
         self.release.wait(timeout=2)
+        return PlaybackResult(PlaybackStatus.COMPLETED)
 
     def stop_playing(self):
         self.stopped += 1

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from threading import Event, Lock
 from typing import Any, Iterable, Optional
 
+from adapters.tts_results import PlaybackResult, PlaybackStatus
 from app.engine import SessionEngine
 from conversation.contracts import (
     RouterAction,
@@ -208,6 +209,7 @@ class TraceTTS:
             raise RuntimeError("scripted TTS failure")
         if self.block:
             self.release.wait(timeout=2.0)
+        return PlaybackResult(PlaybackStatus.COMPLETED)
 
     def stop_playing(self):
         self.trace.tts_stop_calls += 1

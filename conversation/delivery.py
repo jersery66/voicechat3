@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
+from adapters.tts_results import PlaybackResult, PlaybackStatus
 from core.tags import clean_for_display
 
 
@@ -75,7 +76,13 @@ class AudioStarted:
 class AudioFinished:
     generation_id: int
     seq: int
-    ok: bool
+    status: PlaybackStatus
+
+    @property
+    def ok(self) -> bool:
+        """Backward-compatible view of the explicit playback status."""
+
+        return self.status is PlaybackStatus.COMPLETED
 
 
 @dataclass(frozen=True)
@@ -576,14 +583,38 @@ class SentenceDeliveryQueue:
                 self._emit(AudioStarted(item.generation_id, item.seq))
                 if not self.controller.is_current(item.generation_id):
                     continue
-                ok = False
+                result = PlaybackResult(
+                    PlaybackStatus.FAILED,
+                    "provider_result_missing",
+                )
                 try:
-                    self.tts.generate_and_play(item.tts_text or item.text)
-                    ok = True
-                except Exception:
-                    ok = False
+                    candidate = self.tts.generate_and_play(item.tts_text or item.text)
+                    if (
+                        isinstance(candidate, PlaybackResult)
+                        and isinstance(candidate.status, PlaybackStatus)
+                    ):
+                        result = candidate
+                    else:
+                        # ``None`` and legacy booleans are intentionally not
+                        # treated as success: the provider must report an
+                        # explicit terminal state.
+                        result = PlaybackResult(
+                            PlaybackStatus.FAILED,
+                            "invalid_playback_result",
+                        )
+                except Exception as exc:
+                    result = PlaybackResult(
+                        PlaybackStatus.FAILED,
+                        f"{type(exc).__name__}: {exc}",
+                    )
                 if self.controller.is_current(item.generation_id):
-                    self._emit(AudioFinished(item.generation_id, item.seq, ok))
+                    self._emit(
+                        AudioFinished(
+                            item.generation_id,
+                            item.seq,
+                            result.status,
+                        )
+                    )
             finally:
                 self._active = None
                 self._queue.task_done()
@@ -603,4 +634,6 @@ __all__ = [
     "SentenceReady",
     "SentenceSegmenter",
     "TextChunk",
+    "PlaybackResult",
+    "PlaybackStatus",
 ]
