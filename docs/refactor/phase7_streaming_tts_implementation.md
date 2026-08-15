@@ -72,7 +72,7 @@
 
 ## Final Git result
 
-- Implementation commit: `4858cd9a0a45228ba86e48ef97d0eddd43c4ad0d`
+- Implementation commit: `4858cd90debdd1d68df200f1c5394a288df26098`
   (`feat: enable cancellable sentence streaming tts`).
 - Pushed remote HEAD verified after connectivity recovered:
   `40fbc9ce856ba4edbe61f5c218159669899af7bb`.
