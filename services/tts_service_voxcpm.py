@@ -8,6 +8,8 @@ import torch
 import torchaudio
 import sounddevice as sd
 import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
@@ -20,6 +22,17 @@ logger = get_logger(__name__)
 VOXCPM_MIN_GPU_MEMORY_GB = 8
 
 
+@dataclass
+class _PlaybackState:
+    """Request-local cancellation and resource ownership for one playback."""
+
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    done_event: threading.Event = field(default_factory=threading.Event)
+    stream: Optional[Any] = None
+    generator: Optional[Any] = None
+    stream_thread: Optional[threading.Thread] = None
+
+
 class TTSService:
     def __init__(self):
         self.model = None
@@ -27,6 +40,8 @@ class TTSService:
         self.prompt_cache = None
         self.is_playing = False
         self._play_lock = __import__('threading').Lock()
+        self._active_playback: Optional[_PlaybackState] = None
+        self._active_playback_lock = threading.RLock()
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_audio")
         os.makedirs(self.temp_dir, exist_ok=True)
         self._cleanup_old_temps(max_age_seconds=3600)
@@ -203,9 +218,92 @@ class TTSService:
 
         return text
 
+    def _clear_active_playback(self, state: _PlaybackState) -> None:
+        """Clear the active reference only when it still points to ``state``."""
+
+        with self._active_playback_lock:
+            if self._active_playback is state:
+                self._active_playback = None
+
+    def _publish_stream(self, state: _PlaybackState, stream: Any) -> bool:
+        """Publish an output stream or abort/close it if cancellation won the race."""
+
+        with self._active_playback_lock:
+            accepted = (
+                self._active_playback is state
+                and not state.cancel_event.is_set()
+            )
+            if accepted:
+                state.stream = stream
+        if accepted:
+            return True
+
+        self._abort_stream(stream)
+        self._close_stream(stream)
+        return False
+
+    def _clear_stream(self, state: _PlaybackState, stream: Any) -> None:
+        with self._active_playback_lock:
+            if state.stream is stream:
+                state.stream = None
+
+    def _publish_generator(self, state: _PlaybackState, generator: Any) -> bool:
+        """Publish a provider generator unless this request is already stale."""
+
+        with self._active_playback_lock:
+            accepted = (
+                self._active_playback is state
+                and not state.cancel_event.is_set()
+            )
+            if accepted:
+                state.generator = generator
+        if accepted:
+            return True
+
+        self._close_generator(generator)
+        return False
+
+    def _clear_generator(self, state: _PlaybackState, generator: Any) -> None:
+        with self._active_playback_lock:
+            if state.generator is generator:
+                state.generator = None
+
+    @staticmethod
+    def _abort_stream(stream: Any) -> None:
+        abort = getattr(stream, "abort", None)
+        if not callable(abort):
+            return
+        try:
+            abort()
+        except Exception as exc:
+            logger.warning("VoxCPM2 stream abort failed: %s", exc)
+
+    @staticmethod
+    def _close_stream(stream: Any) -> None:
+        close = getattr(stream, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            logger.warning("VoxCPM2 stream close failed: %s", exc)
+
+    @staticmethod
+    def _close_generator(generator: Any) -> None:
+        close = getattr(generator, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            logger.warning("VoxCPM2 generator close failed: %s", exc)
+
     def generate_and_play(self, text: str, **kwargs) -> PlaybackResult:
+        # Cancel any currently active request before waiting on the serial
+        # playback lock. ``stop_playing`` intentionally never acquires this
+        # lock, so delivery cancellation cannot deadlock a producer.
+        self.stop_playing()
         with self._play_lock:
-            self.stop_playing()
             return self._generate_and_play_inner(text, **kwargs)
 
     def _generate_and_play_inner(self, text: str, **kwargs) -> PlaybackResult:
@@ -214,11 +312,18 @@ class TTSService:
 
         logger.debug(f"generate_and_play called with text length: {len(text)}")
         self.is_playing = True
+        state = _PlaybackState()
+        with self._active_playback_lock:
+            self._active_playback = state
 
         clean_text = self._preprocess_text(text)
         if not clean_text:
             logger.warning("Empty text after preprocessing")
-            self.is_playing = False
+            with self._active_playback_lock:
+                if self._active_playback is state:
+                    self._active_playback = None
+                    self.is_playing = False
+                state.done_event.set()
             return PlaybackResult(PlaybackStatus.FAILED, "empty_text")
 
         cfg_value = kwargs.get("cfg_value", config.VOXCPM_CFG_VALUE)
@@ -246,6 +351,9 @@ class TTSService:
             nonlocal read_pos
             if status:
                 logger.debug(f"OutputStream: {status}")
+            if state.cancel_event.is_set():
+                outdata[:, 0] = 0
+                raise sd.CallbackStop
             with lock:
                 avail = write_pos - read_pos
                 if avail <= 0:
@@ -269,32 +377,42 @@ class TTSService:
             nonlocal worker_error
             try:
                 # Wait for minimum pre-buffer before opening the stream
-                while self.is_playing:
+                while not state.cancel_event.is_set():
                     with lock:
                         if write_pos >= min_prebuffer:
                             break
                     if done_flag.is_set():
                         break
-                    _threading.Event().wait(0.01)
-                if not self.is_playing:
+                    state.cancel_event.wait(0.01)
+                if state.cancel_event.is_set():
                     return
                 started.set()
                 stream = sd.OutputStream(
                     samplerate=self.sample_rate, channels=1,
                     dtype='float32', blocksize=0, callback=_callback,
                 )
-                with stream:
-                    while self.is_playing:
-                        _threading.Event().wait(0.1)
-                        with lock:
-                            if done_flag.is_set() and write_pos <= read_pos:
-                                break
+                if not self._publish_stream(state, stream):
+                    return
+                entered = False
+                try:
+                    with stream:
+                        entered = True
+                        while not state.cancel_event.is_set():
+                            with lock:
+                                if done_flag.is_set() and write_pos <= read_pos:
+                                    break
+                            state.cancel_event.wait(0.1)
+                finally:
+                    self._clear_stream(state, stream)
+                    if not entered:
+                        self._close_stream(stream)
             except Exception as exc:
                 worker_error = exc
                 logger.error("VoxCPM2 output worker failed: %s", exc)
                 logger.exception("VoxCPM2 output worker exception")
 
         stream_thread = _threading.Thread(target=_stream_worker, daemon=True)
+        state.stream_thread = stream_thread
         stream_thread.start()
 
         gen = None
@@ -307,48 +425,57 @@ class TTSService:
                     inference_timesteps=inference_timesteps,
                     streaming=True,
                 )
-                for wav, _, _ in gen:
-                    if not self.is_playing:
-                        break
-                    audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
-                    if audio_np.ndim == 0 or len(audio_np) == 0:
-                        continue
-                    with lock:
-                        n = len(audio_np)
-                        start = write_pos % buf_len
-                        if start + n <= buf_len:
-                            buf[start:start + n] = audio_np
-                        else:
-                            first = buf_len - start
-                            buf[start:] = audio_np[:first]
-                            buf[:n - first] = audio_np[first:]
-                        write_pos += n
-                        generated_samples += n
+                if self._publish_generator(state, gen):
+                    for wav, _, _ in gen:
+                        if state.cancel_event.is_set():
+                            break
+                        audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
+                        if audio_np.ndim == 0 or len(audio_np) == 0:
+                            continue
+                        with lock:
+                            n = len(audio_np)
+                            start = write_pos % buf_len
+                            if start + n <= buf_len:
+                                buf[start:start + n] = audio_np
+                            else:
+                                first = buf_len - start
+                                buf[start:] = audio_np[:first]
+                                buf[:n - first] = audio_np[first:]
+                            write_pos += n
+                            generated_samples += n
+                else:
+                    # _publish_generator already closed a stale generator;
+                    # do not close the same object again in the finalizer.
+                    gen = None
             else:
-                for chunk in self.model.generate_streaming(
+                gen = self.model.generate_streaming(
                     text=clean_text,
                     reference_wav_path=config.VOICE_PROMPT_PATH,
                     prompt_wav_path=config.VOICE_PROMPT_PATH,
                     prompt_text=config.VOICE_PROMPT_TEXT or "",
                     cfg_value=cfg_value,
                     inference_timesteps=inference_timesteps,
-                ):
-                    if not self.is_playing:
-                        break
-                    audio_np = chunk.astype(np.float32)
-                    if audio_np.ndim == 0 or len(audio_np) == 0:
-                        continue
-                    with lock:
-                        n = len(audio_np)
-                        start = write_pos % buf_len
-                        if start + n <= buf_len:
-                            buf[start:start + n] = audio_np
-                        else:
-                            first = buf_len - start
-                            buf[start:] = audio_np[:first]
-                            buf[:n - first] = audio_np[first:]
-                        write_pos += n
-                        generated_samples += n
+                )
+                if self._publish_generator(state, gen):
+                    for chunk in gen:
+                        if state.cancel_event.is_set():
+                            break
+                        audio_np = chunk.astype(np.float32)
+                        if audio_np.ndim == 0 or len(audio_np) == 0:
+                            continue
+                        with lock:
+                            n = len(audio_np)
+                            start = write_pos % buf_len
+                            if start + n <= buf_len:
+                                buf[start:start + n] = audio_np
+                            else:
+                                first = buf_len - start
+                                buf[start:] = audio_np[:first]
+                                buf[:n - first] = audio_np[first:]
+                            write_pos += n
+                            generated_samples += n
+                else:
+                    gen = None
         except Exception as e:
             generation_error = e
             logger.error(f"generate_and_play generation error: {e}")
@@ -358,12 +485,14 @@ class TTSService:
             stream_thread.join(timeout=60)
             worker_timed_out = stream_thread.is_alive()
             if gen is not None:
-                try:
-                    gen.close()
-                except Exception as exc:
-                    logger.warning("VoxCPM2 streaming generator close failed: %s", exc)
-            cancelled = not self.is_playing
-            self.is_playing = False
+                self._close_generator(gen)
+                self._clear_generator(state, gen)
+            with self._active_playback_lock:
+                cancelled = state.cancel_event.is_set()
+                if self._active_playback is state:
+                    self._active_playback = None
+                    self.is_playing = False
+                state.done_event.set()
 
         if cancelled:
             return PlaybackResult(PlaybackStatus.CANCELLED, "stopped")
@@ -422,8 +551,40 @@ class TTSService:
             return np.array([])
 
     def stop_playing(self):
-        self.is_playing = False
-        sd.stop()
+        """Cancel the active explicit OutputStream without taking _play_lock."""
+
+        with self._active_playback_lock:
+            state = self._active_playback
+            if state is None:
+                self.is_playing = False
+                legacy_stream_only = True
+            else:
+                legacy_stream_only = False
+            if state is not None and state.cancel_event.is_set():
+                self.is_playing = False
+                return
+            if state is not None:
+                state.cancel_event.set()
+                stream = state.stream
+                generator = state.generator
+                self.is_playing = False
+            else:
+                stream = None
+                generator = None
+
+        # PortAudio calls are deliberately outside the state lock.  The
+        # explicit OutputStream, not module-level sd.stop(), owns playback.
+        if stream is not None:
+            self._abort_stream(stream)
+        if generator is not None:
+            self._close_generator(generator)
+        if legacy_stream_only:
+            # Preserve the legacy ``sd.play`` convenience path.  This branch
+            # is unreachable while an explicit request-local stream exists.
+            try:
+                sd.stop()
+            except Exception as exc:
+                logger.warning("Legacy VoxCPM stream stop failed: %s", exc)
 
     def play_audio(self, audio: np.ndarray):
         with self._play_lock:
@@ -440,6 +601,9 @@ class TTSService:
 
         try:
             # Non-blocking: do NOT hold the calling (possibly GUI) thread.
+            # This is the legacy convenience-stream path; it is intentionally
+            # separate from explicit OutputStream cancellation above.
+            sd.stop()
             sd.play(audio, samplerate=self.sample_rate)
         except Exception as e:
             logger.error(f"play_audio error: {e}")
@@ -454,7 +618,7 @@ class TTSService:
         torchaudio.save(filepath, audio_tensor, self.sample_rate)
 
     def cleanup(self):
-        sd.stop()
+        self.stop_playing()
         self.unload_model()
 
 

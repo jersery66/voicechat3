@@ -192,6 +192,9 @@ def _provider_service(monkeypatch, chunks):
     service.sample_rate = 10
     service.prompt_cache = None
     service.is_playing = False
+    service._play_lock = threading.Lock()
+    service._active_playback = None
+    service._active_playback_lock = threading.RLock()
     monkeypatch.setattr("services.tts_service_voxcpm.sd.OutputStream", _FakeOutputStream)
     return service
 
@@ -207,6 +210,7 @@ def test_voxcpm_normal_audio_is_completed(monkeypatch):
     service = _provider_service(monkeypatch, [np.ones(16, dtype=np.float32)])
     result = service._generate_and_play_inner("你好。")
     assert result.status is PlaybackStatus.COMPLETED
+    assert service._active_playback is None
 
 
 def test_voxcpm_zero_generated_samples_is_failed(monkeypatch):
