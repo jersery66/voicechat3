@@ -71,6 +71,10 @@ are not presented as real hardware validation.
 
 ## Finalization
 
-- Implementation commit: `fix: make tts completion status explicit`
-- Remote push: pending until the code commit is created and verified.
-- Working tree status: to be recorded after commit/push verification.
+- Implementation commit: `8a0510d701383a6a16912508e0abf4de2153aa34`
+  (`fix: make tts completion status explicit`).
+- Remote branch verified after the implementation push:
+  `origin/codex/a100-vllm-safety = 8a0510d701383a6a16912508e0abf4de2153aa34`.
+- Implementation-push synchronization: `ahead/behind = 0/0`.
+- Working tree after implementation-push verification: clean.
+- Real-device smoke: **NOT RUN / environment unavailable**.
