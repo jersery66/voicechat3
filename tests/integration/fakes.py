@@ -28,14 +28,15 @@ class FakeLLM:
         self.conversation_history: List[Dict[str, str]] = []
         self.history_context: str = ""
 
-    def chat(self, text: str, system_suffix: str = ""):
+    def chat(self, text: str, system_suffix: str = "", *, commit_history: bool = True):
         full = self.responses.pop(0) if self.responses else self.default_response
         self.calls.append({"user_text": text, "system_suffix": system_suffix, "full": full})
         self.conversation_history.append({"role": "user", "content": text})
         # stream in ~8-char chunks
         for i in range(0, len(full), 8):
             yield full[i:i + 8]
-        self.conversation_history.append({"role": "assistant", "content": full})
+        if commit_history:
+            self.conversation_history.append({"role": "assistant", "content": full})
 
     def reset_conversation(self, clear_context: bool = False):
         self.conversation_history = []

@@ -23,10 +23,16 @@ class LLMBackend(Protocol):
 
     conversation_history: List[Dict[str, str]]
 
-    def chat(self, user_message: str, system_suffix: Optional[str] = None):
+    def chat(
+        self,
+        user_message: str,
+        system_suffix: Optional[str] = None,
+        *,
+        commit_history: bool = True,
+    ):
         """Yield response chunks (str). Must append the user message to
-        conversation_history on start and the full assistant reply at the
-        end (real LLMService parity)."""
+        conversation_history on start and, when ``commit_history`` is true,
+        the full assistant reply at the end (real LLMService parity)."""
         ...
 
     def reset_conversation(self, clear_context: bool = False) -> None: ...

@@ -76,7 +76,13 @@ class LLMService:
         # Check for system suffix in options (passed via kwargs or we can add explicit arg)
         # But we need to change signature. Let's start with just modifying chat.
         
-    def chat(self, user_message: str, system_suffix: Optional[str] = None) -> Generator[str, None, None]:
+    def chat(
+        self,
+        user_message: str,
+        system_suffix: Optional[str] = None,
+        *,
+        commit_history: bool = True,
+    ) -> Generator[str, None, None]:
         """Send a message and yield streamed response chunks.
 
         Args:
@@ -88,17 +94,36 @@ class LLMService:
             Response text chunks as they arrive.
 
         Notes:
+            commit_history: When false, defer the assistant history commit to
+                the generation delivery ledger. The user message is still
+                added at request start.
+
             On a streaming exception:
-              * If no chunk has been yielded yet → roll back the user message.
+              * If no chunk has been yielded yet → roll back this request's
+                user message.
               * If at least one chunk has been yielded → persist the partial
-                ``full_response`` as an assistant message so UI / history stay
-                consistent, then re-raise.
+                ``full_response`` only when ``commit_history`` is true; the
+                delivery-scoped path leaves history finalization to its
+                visible-text ledger, then re-raises.
         """
         # Add user message to history
-        self.conversation_history.append({
+        user_entry = {
             "role": "user",
             "content": user_message
-        })
+        }
+        self.conversation_history.append(user_entry)
+
+        def _rollback_user_entry() -> None:
+            """Remove only this request's user entry after a failed stream.
+
+            Multiple generations may overlap while an interrupted provider
+            iterator winds down.  Looking only at ``history[-1]`` could remove
+            the newer turn instead of the failed request's own entry.
+            """
+            for index in range(len(self.conversation_history) - 1, -1, -1):
+                if self.conversation_history[index] is user_entry:
+                    self.conversation_history.pop(index)
+                    return
 
         # Build messages list with system prompt
         current_system_prompt = self.system_prompt
@@ -192,9 +217,9 @@ class LLMService:
         except Exception as e:
             logger.error(f"LLM Generation Failed (chunks_yielded={chunks_yielded}): {e}")
             if chunks_yielded == 0:
-                if self.conversation_history and self.conversation_history[-1]["role"] == "user":
-                    self.conversation_history.pop()
-            else:
+                if commit_history:
+                    _rollback_user_entry()
+            elif commit_history:
                 self.conversation_history.append({
                     "role": "assistant",
                     "content": full_response,
@@ -209,8 +234,8 @@ class LLMService:
                 f"model={self.model}, user_msg={user_message[:80]!r}"
             )
             # Rollback user message — no assistant response was generated
-            if self.conversation_history and self.conversation_history[-1]["role"] == "user":
-                self.conversation_history.pop()
+            if commit_history:
+                _rollback_user_entry()
             raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
         # Retry once if truly empty (no thinking, no content)
@@ -235,8 +260,8 @@ class LLMService:
 
             if not full_response.strip():
                 # Rollback user message — no assistant response was generated
-                if self.conversation_history and self.conversation_history[-1]["role"] == "user":
-                    self.conversation_history.pop()
+                if commit_history:
+                    _rollback_user_entry()
                 raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
         # Log raw LLM output for debugging
@@ -251,13 +276,14 @@ class LLMService:
             # recovered response once so the UI and TTS receive it.
             yield full_response
 
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": self._history_visible_text(full_response)
-        })
+        if commit_history:
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": self._history_visible_text(full_response)
+            })
 
-        # Compress history if too long
-        self._maybe_summarize()
+            # Compress history if too long
+            self._maybe_summarize()
 
     @staticmethod
     def _history_visible_text(text: str) -> str:

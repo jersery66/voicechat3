@@ -43,14 +43,29 @@ class VLLMCompatibleLLMService:
         parts = [self.system_prompt, self.history_context, system_suffix or ""]
         return "\n".join(part for part in parts if part)
 
-    def chat(self, user_message: str, system_suffix: Optional[str] = None) -> Generator[str, None, None]:
+    def chat(
+        self,
+        user_message: str,
+        system_suffix: Optional[str] = None,
+        *,
+        commit_history: bool = True,
+    ) -> Generator[str, None, None]:
         # Keep the outgoing request to at most ``MAX_HISTORY_TURNS`` dialogue
         # turns, counting the current user message.  Trim complete prior turns
         # before appending so no orphaned assistant message is retained.
         max_prior_messages = (self.MAX_HISTORY_TURNS - 1) * 2
         if len(self.conversation_history) > max_prior_messages:
             self.conversation_history = self.conversation_history[-max_prior_messages:]
-        self.conversation_history.append({"role": "user", "content": user_message})
+        user_entry = {"role": "user", "content": user_message}
+        self.conversation_history.append(user_entry)
+
+        def _rollback_user_entry() -> None:
+            # Overlapping generations may append a newer user turn while this
+            # provider iterator is winding down; remove only this request.
+            for index in range(len(self.conversation_history) - 1, -1, -1):
+                if self.conversation_history[index] is user_entry:
+                    self.conversation_history.pop(index)
+                    return
         full_response = ""
         messages = [{"role": "system", "content": self._system_context(system_suffix)}]
         messages.extend(self.conversation_history)
@@ -59,9 +74,9 @@ class VLLMCompatibleLLMService:
                 full_response += chunk
                 yield chunk
         except Exception:
-            if not full_response and self.conversation_history[-1]["role"] == "user":
-                self.conversation_history.pop()
-            elif full_response:
+            if not full_response and commit_history:
+                _rollback_user_entry()
+            elif full_response and commit_history:
                 self.conversation_history.append({
                     "role": "assistant",
                     "content": self._history_visible_text(full_response),
@@ -69,13 +84,15 @@ class VLLMCompatibleLLMService:
             raise
 
         if not full_response.strip():
-            self.conversation_history.pop()
+            if commit_history:
+                _rollback_user_entry()
             raise RuntimeError("LLM_NO_FINAL_CONTENT")
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": self._history_visible_text(full_response),
-        })
-        self._maybe_summarize()
+        if commit_history:
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": self._history_visible_text(full_response),
+            })
+            self._maybe_summarize()
 
     @staticmethod
     def _history_visible_text(text: str) -> str:

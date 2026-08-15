@@ -81,6 +81,13 @@ from conversation.contracts import (
 )
 from conversation.turn_policy import TurnPolicy
 from conversation.turn_signals import collect_turn_signals
+from conversation.delivery import (
+    DeliveryLedger,
+    GenerationController,
+    SentenceDeliveryQueue,
+    SentenceReady,
+    SentenceSegmenter,
+)
 
 
 # Natural-language versions of scale questions for conversational delivery.
@@ -360,6 +367,9 @@ class PipelineConfig:
     router_proposal: Optional[RouterProposal] = None
     turn_decision: Optional[TurnDecision] = None
     session_state: str = "CHATTING"
+    # Phase 7: caller-supplied delivery generation.  When absent, direct
+    # compatibility callers keep the legacy unscoped event surface.
+    generation_id: Optional[int] = None
 
 
 # ==================== Unified Conversation Pipeline ====================
@@ -367,7 +377,7 @@ class PipelineConfig:
 class ConversationPipeline:
     """
     Unified pipeline: STT(optional) -> Intent+Emotion -> RAG -> LLM stream
-    -> tag parse -> TTS(optional) -> post-process.
+    -> generation-scoped sentence delivery -> TTS(optional) -> post-process.
 
     Merges _process_pipeline and _process_text_pipeline into a single flow.
     The caller provides an emit callback for thread-safe UI updates.
@@ -378,7 +388,8 @@ class ConversationPipeline:
                  rag_service, agent_service, report_service, data_manager,
                  session_emotions: list, emotion_tracker=None,
                  turn_policy: TurnPolicy | None = None,
-                 session_state_provider: Callable[[], Any] | None = None):
+                 session_state_provider: Callable[[], Any] | None = None,
+                 delivery_controller: GenerationController | None = None):
         self.stt = stt_service
         self.llm = llm_service
         self.tts = tts_service
@@ -390,6 +401,13 @@ class ConversationPipeline:
         self.emotion_tracker = emotion_tracker
         self.turn_policy = turn_policy or TurnPolicy()
         self._session_state_provider = session_state_provider
+        self.delivery_controller = delivery_controller or GenerationController()
+        self.delivery_ledger = DeliveryLedger(self.delivery_controller)
+        self.delivery_queue = SentenceDeliveryQueue(
+            self.delivery_controller,
+            self.tts,
+        )
+        self._last_stream_generation_id: Optional[int] = None
         # Scale administration has one mutable owner.  Pipeline keeps only
         # symptom observations used to build TurnSignals; it never mirrors
         # active item, waiting, answers, pause, or completion state.
@@ -422,6 +440,10 @@ class ConversationPipeline:
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception as e:
             logger.debug(f"executor shutdown error: {e}")
+        try:
+            self.delivery_queue.shutdown()
+        except Exception as e:
+            logger.debug(f"delivery queue shutdown error: {e}")
 
     def reset_session(self):
         """Reset per-session state without touching unrelated services."""
@@ -946,18 +968,30 @@ class ConversationPipeline:
             result.clean_spoken = clean_for_display(spoken)
             result.tts_text = clean_for_tts(spoken)
             result.intent = "counseling"
-            emit("start_ai_message", None)
-            emit("stream_text", result.clean_spoken)
-            emit("finish_streaming", None)
-            if self.data:
+            if config.generation_id is None:
+                emit("start_ai_message", None)
+                emit("stream_text", result.clean_spoken)
+                emit("finish_streaming", None)
+            else:
+                emit("start_ai_message", config.generation_id)
+                self._emit_generation_text(
+                    config.generation_id,
+                    spoken,
+                    emit,
+                )
+                emit("finish_streaming", config.generation_id)
+            if self.data and config.generation_id is None:
                 self.data.save_assistant_message(None, result.clean_spoken, sample_rate=48000)
             if self.llm and hasattr(self.llm, "conversation_history"):
                 self.llm.conversation_history.append({"role": "user", "content": result.user_text})
-                # Only store normalized participant-facing text in history.
-                self.llm.conversation_history.append({"role": "assistant", "content": clean_for_display(spoken)})
-            if config.use_tts and self.tts and result.tts_text:
+                # Generation-scoped history is finalized after visible UI
+                # commits; compatibility callers retain the old fast-path
+                # append behavior.
+                if config.generation_id is None:
+                    self.llm.conversation_history.append({"role": "assistant", "content": clean_for_display(spoken)})
+            if config.use_tts and self.tts and result.tts_text and config.generation_id is None:
                 emit("status", "正在播放...")
-                self._executor.submit(self._play_tts, result.tts_text)
+                self._queue_complete_tts_compat(result.tts_text)
             metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
             return result
 
@@ -1135,7 +1169,7 @@ class ConversationPipeline:
         # --- LLM stream + Agent classification (concurrent) ---
         # Start LLM immediately with RAG/scale context; agent runs in parallel.
         # This saves 1-3s of agent wait time before first LLM token.
-        emit("start_ai_message", None)
+        emit("start_ai_message", config.generation_id)
         agent_future = self._executor.submit(
             self._classify_intent_emotion, result.user_text
         )
@@ -1143,7 +1177,12 @@ class ConversationPipeline:
         try:
             with metrics.timer("llm.stream"):
                 result.full_response, result.analysis_text, result.spoken_text = \
-                    self._stream_llm(result.user_text, final_suffix, emit)
+                    self._stream_llm(
+                        result.user_text,
+                        final_suffix,
+                        emit,
+                        generation_id=config.generation_id,
+                    )
 
             # Log raw LLM response before post-processing
             logger.warning(
@@ -1157,20 +1196,32 @@ class ConversationPipeline:
                 result.spoken_text = "不好意思，刚才没组织好语言。[breath]你能再说一遍吗？"
                 result.analysis_text = ""
                 result.full_response = result.spoken_text
-                emit("stream_text", clean_for_display(result.spoken_text))
+                if config.generation_id is None:
+                    emit("stream_text", clean_for_display(result.spoken_text))
+                else:
+                    self._emit_generation_text(config.generation_id, result.spoken_text, emit)
             else:
                 logger.exception(f"[Pipeline] LLM RuntimeError: {e}")
                 result.spoken_text = "系统出了点小问题。[breath]你能再说一遍吗？"
                 result.analysis_text = ""
                 result.full_response = result.spoken_text
-                emit("stream_text", clean_for_display(result.spoken_text))
+                if config.generation_id is None:
+                    emit("stream_text", clean_for_display(result.spoken_text))
+                else:
+                    self._emit_generation_text(config.generation_id, result.spoken_text, emit)
         except Exception as e:
             logger.exception(f"[Pipeline] LLM failed: {e}")
             result.spoken_text = "系统出了点小问题。[breath]你能再说一遍吗？"
             result.analysis_text = ""
             result.full_response = result.spoken_text
-            emit("stream_text", clean_for_display(result.spoken_text))
-        emit("finish_streaming", None)
+            if config.generation_id is None:
+                emit("stream_text", clean_for_display(result.spoken_text))
+            else:
+                self._emit_generation_text(config.generation_id, result.spoken_text, emit)
+        if config.generation_id is None:
+            emit("finish_streaming", None)
+        else:
+            emit("finish_streaming", config.generation_id)
 
         # --- Prepare TTS text immediately ---
         # Limit to one question per reply to prevent rapid-fire questioning
@@ -1187,7 +1238,8 @@ class ConversationPipeline:
                 result.spoken_text = make_safe_fallback_reply(result.user_text)
 
         result.clean_spoken = clean_for_display(result.spoken_text)
-        emit("clean_last_ai", result.clean_spoken)
+        if config.generation_id is None:
+            emit("clean_last_ai", result.clean_spoken)
         result.tts_text = clean_for_tts(result.spoken_text)
 
         # Model tags are no longer parsed on the live path.  A legacy tag is
@@ -1325,7 +1377,7 @@ class ConversationPipeline:
         )
 
         # --- Save assistant message ---
-        if self.data:
+        if self.data and config.generation_id is None:
             self.data.save_assistant_message(None, result.clean_spoken, sample_rate=48000)
 
         # --- TTS + Agent post-processing (concurrent) ---
@@ -1336,9 +1388,15 @@ class ConversationPipeline:
         skip_normal_tts = bool(result.end_type)
         if skip_normal_tts:
             logger.info("[TTS] Skipping normal response TTS — authoritative session-end flow handles farewell.")
-        if config.use_tts and self.tts and result.tts_text and not skip_normal_tts:
+        if (
+            config.use_tts
+            and self.tts
+            and result.tts_text
+            and not skip_normal_tts
+            and config.generation_id is None
+        ):
             emit("status", "正在播放...")
-            tts_future = self._executor.submit(self._play_tts, result.tts_text)
+            self._queue_complete_tts_compat(result.tts_text)
             latency_ms = (time.perf_counter() - pipeline_started) * 1000.0
             logger.warning(f"[Latency] input→TTS: {latency_ms:.0f}ms | spoken_len={len(result.spoken_text)}")
 
@@ -1382,24 +1440,30 @@ class ConversationPipeline:
 
         logger.info(f"[Pipeline] RAG suffix: {bool(final_suffix)}")
 
-        # Don't block pipeline waiting for TTS — let it play in background.
-        # Use a callback to log errors without holding up the UI.
-        if tts_future is not None:
-            tts_future.add_done_callback(
-                lambda f: logger.warning(f"TTS error: {f.exception()}") if f.exception() else None
-            )
-
         result.scale_active = bool(self.scale_runtime.snapshot().active_scale)
         metrics.record("pipeline.total", (time.perf_counter() - pipeline_started) * 1000.0)
         return result
 
-    def _play_tts(self, text: str):
-        """Generate and play TTS. Runs on a worker thread."""
-        try:
-            with get_metrics().timer("tts.play"):
-                self.tts.generate_and_play(text)
-        except Exception as e:
-            logger.warning(f"TTS error: {e}")
+    def _queue_complete_tts_compat(self, text: str) -> Optional[int]:
+        """Queue a complete compatibility response through the shared worker.
+
+        Direct pipeline callers from before Phase 7 do not provide a delivery
+        generation.  They still receive asynchronous whole-response audio,
+        but the call now uses the same single sentence worker as the live
+        generation path instead of creating an unscoped TTS thread/future.
+        Compatibility audio is deliberately not written to the delivery
+        ledger: those callers already persist their assistant text directly.
+        """
+        if not self.tts or not str(text or "").strip():
+            return None
+        record = self.delivery_controller.start_generation()
+        self.delivery_queue.start()
+        segmenter = SentenceSegmenter()
+        events = segmenter.feed(record.generation_id, str(text))
+        events.extend(segmenter.flush(record.generation_id))
+        for event in events:
+            self.delivery_queue.enqueue(event)
+        return record.generation_id
 
     def _classify_intent_emotion(self, text: str) -> tuple[str, dict]:
         """Run the ordinary intent and emotion classifiers in parallel."""
@@ -1761,26 +1825,141 @@ class ConversationPipeline:
 
         return system_suffix
 
-    def _stream_llm(self, text: str, system_suffix: Optional[str],
-                    emit: Callable[[str, Any], None]):
+    def _ensure_delivery_generation(self, generation_id: int):
+        record = self.delivery_controller.get_record(generation_id)
+        if record is None:
+            # Compatibility callers may provide an ID without constructing the
+            # shared MainWindow controller first.  The controller remains the
+            # only allocator; the supplied value is never treated as policy.
+            record = self.delivery_controller.start_generation()
+        starter = getattr(self.delivery_queue, "start", None)
+        if callable(starter):
+            starter()
+        return record
+
+    def _emit_generation_sentence(
+        self,
+        event: SentenceReady,
+        emit: Callable[[str, Any], None],
+    ) -> None:
+        """Normalize one stable sentence, emit it to UI, and queue TTS."""
+        normalized_tts = clean_for_tts(event.text)
+        normalized_display = clean_for_display(event.text)
+        if not normalized_display and not normalized_tts:
+            return
+        normalized = SentenceReady(
+            event.generation_id,
+            event.seq,
+            normalized_display or normalized_tts,
+            normalized_tts,
+        )
+        if not self.delivery_controller.is_current(event.generation_id):
+            return
+        # Queue first so a worker cannot run against a sentence that was never
+        # accepted by the generation owner.  UI commits visibility separately.
+        self.delivery_queue.enqueue(normalized)
+        emit("stream_text", normalized)
+
+    def _emit_generation_text(
+        self,
+        generation_id: int,
+        text: str,
+        emit: Callable[[str, Any], None],
+    ) -> None:
+        """Emit fallback text through the same sentence delivery path."""
+        self._ensure_delivery_generation(generation_id)
+        self.delivery_ledger.record_generated(generation_id, text)
+        segmenter = SentenceSegmenter()
+        for event in segmenter.feed(generation_id, text):
+            self._emit_generation_sentence(event, emit)
+        for event in segmenter.flush(generation_id):
+            self._emit_generation_sentence(event, emit)
+
+    def _stream_llm(
+        self,
+        text: str,
+        system_suffix: Optional[str],
+        emit: Callable[[str, Any], None],
+        *,
+        generation_id: Optional[int] = None,
+    ):
         """Stream provider text and normalize it without business parsing.
 
-        ``ResponseBuilder`` keeps a narrow adapter for historical tagged
-        transcripts, but the live pipeline treats the generated value as
-        language only.  No model text can become an action, score, or command.
-        Returns ``(generated_text, legacy_analysis, tts_ready_text)``.
+        Compatibility callers without ``generation_id`` retain the Phase 6
+        complete-text event surface.  The live MainWindow path supplies an ID:
+        chunks are then assembled into stable sentence events and queued for
+        TTS before provider completion.
         """
-        generated_text = "".join(
-            chunk for chunk in self.llm.chat(text, system_suffix=system_suffix)
-        )
+        self._last_stream_generation_id = generation_id
+        if generation_id is None:
+            generated_text = "".join(
+                chunk for chunk in self.llm.chat(text, system_suffix=system_suffix)
+            )
+            built = ResponseBuilder.build(generated_text)
+            if not built.tts_text.strip():
+                logger.warning(
+                    f"generated text empty after normalization; head={generated_text[:300]!r}"
+                )
+                generated_text = make_safe_fallback_reply(text)
+                built = ResponseBuilder.build(generated_text)
+            if built.spoken_text:
+                emit("stream_text", built.spoken_text)
+            return generated_text, built.analysis_text, built.tts_text
+
+        record = self._ensure_delivery_generation(generation_id)
+        segmenter = SentenceSegmenter()
+        generated_parts: list[str] = []
+        deferred_history_supported = True
+        history = getattr(self.llm, "conversation_history", None)
+        history_before = len(history) if isinstance(history, list) else 0
+        try:
+            chunks = self.llm.chat(
+                text,
+                system_suffix=system_suffix,
+                commit_history=False,
+            )
+        except TypeError:
+            # Older test/integration adapters may not expose the optional
+            # history-defer keyword.  Their transport still remains usable;
+            # delivery finalization below controls the production history.
+            deferred_history_supported = False
+            chunks = self.llm.chat(text, system_suffix=system_suffix)
+
+        for chunk in chunks:
+            if not self.delivery_controller.is_current(generation_id):
+                break
+            content = str(chunk or "")
+            if not content:
+                continue
+            generated_parts.append(content)
+            self.delivery_ledger.record_generated(generation_id, content)
+            for event in segmenter.feed(generation_id, content):
+                self._emit_generation_sentence(event, emit)
+            for event in segmenter.flush_if_due(generation_id):
+                self._emit_generation_sentence(event, emit)
+
+        generated_text = "".join(generated_parts)
+        if not deferred_history_supported and isinstance(history, list):
+            # Compatibility adapters may append the full assistant response
+            # themselves. Remove that unscoped projection; the UI ledger will
+            # commit delivered_text exactly once at finish_streaming.
+            while len(history) > history_before and history[-1].get("role") == "assistant":
+                history.pop()
+        for event in segmenter.flush(generation_id):
+            self._emit_generation_sentence(event, emit)
+
         built = ResponseBuilder.build(generated_text)
         if not built.tts_text.strip():
             logger.warning(
                 f"generated text empty after normalization; head={generated_text[:300]!r}"
             )
             generated_text = make_safe_fallback_reply(text)
+            self.delivery_ledger.record_generated(generation_id, generated_text)
             built = ResponseBuilder.build(generated_text)
+            fallback_segmenter = SentenceSegmenter()
+            for event in fallback_segmenter.feed(generation_id, generated_text):
+                self._emit_generation_sentence(event, emit)
+            for event in fallback_segmenter.flush(generation_id):
+                self._emit_generation_sentence(event, emit)
 
-        if built.spoken_text:
-            emit("stream_text", built.spoken_text)
         return generated_text, built.analysis_text, built.tts_text

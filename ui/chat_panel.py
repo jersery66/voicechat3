@@ -52,6 +52,8 @@ class ChatPanel(FrostedPanel):
         self.setMaximumHeight(600)
         self._messages = []
         self._current_streaming_bubble = None
+        self._active_generation_id = None
+        self._next_generation_seq = 0
         self._setup_ui()
 
     def _setup_ui(self):
@@ -241,27 +243,43 @@ class ChatPanel(FrostedPanel):
                 self._scroll_to_bottom()
                 break
 
-    def start_ai_message(self):
+    def start_ai_message(self, generation_id=None):
         """Start a new AI message bubble for streaming."""
+        self._active_generation_id = generation_id
+        self._next_generation_seq = 0
         bubble = MessageBubble("", is_user=False)
         self._add_bubble(bubble)
         self._messages.append({"type": "ai", "text": "", "bubble": bubble})
         self._current_streaming_bubble = bubble
         self.status_indicator.set_state("generating")
 
-    def stream_text(self, chunk):
+    def stream_text(self, chunk, generation_id=None, seq=None):
         """Append text chunk to current streaming message."""
+        if generation_id is not None:
+            if generation_id != self._active_generation_id:
+                return False
+            if seq is not None:
+                if seq != self._next_generation_seq:
+                    return False
+                self._next_generation_seq += 1
         if self._current_streaming_bubble:
             self._current_streaming_bubble.append_text(chunk)
             if self._messages:
                 self._messages[-1]["text"] = self._current_streaming_bubble.full_text
             self._scroll_to_bottom()
+            return True
+        return False
 
-    def finish_streaming(self):
+    def finish_streaming(self, generation_id=None):
         """Mark streaming as complete."""
+        if generation_id is not None and generation_id != self._active_generation_id:
+            return False
         self._current_streaming_bubble = None
+        self._active_generation_id = None
+        self._next_generation_seq = 0
         self.status_indicator.set_state("idle")
         self._scroll_to_bottom()
+        return True
 
     def set_ai_status(self, status):
         """External control: 'idle', 'thinking', 'generating', 'speaking'."""

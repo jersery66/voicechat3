@@ -40,6 +40,8 @@ from .dialogs import (
 from .styles import get_style
 from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineConfig
 from services.report_service import EndType
+from conversation.delivery import GenerationController, SentenceReady, SentenceSegmenter
+from core.tags import clean_for_display, clean_for_tts
 
 
 class MainWindow(QMainWindow):
@@ -70,9 +72,11 @@ class MainWindow(QMainWindow):
         self._end_request_in_progress = False
         self._pre_end_relax_prompted = False
 
-        # Pipeline generation token — used to cancel stale results
-        self._pipeline_generation = 0
-        self._pipeline_cancel_generation = -1
+        # Phase 7 delivery generation owner.  It is intentionally separate
+        # from SessionEngine (lifecycle) and TurnPolicy (business action).
+        self.delivery_controller = GenerationController()
+        self._history_finalized_generations: set[int] = set()
+        self._active_ui_generation: int | None = None
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
@@ -331,9 +335,10 @@ class MainWindow(QMainWindow):
             return
 
         if self._pipeline_busy:
-            self.chat_panel.add_system_message("正在回复中，请稍等")
-            self.control_panel.reset_recording()
-            return
+            # A new user turn is an explicit interruption boundary.  The old
+            # worker may finish in the background, but its generation is now
+            # stale and cannot touch UI/TTS/history.
+            self._cancel_active_pipeline(reason="new user recording")
 
         # Stop any playing TTS
         if self.tts_service:
@@ -376,32 +381,52 @@ class MainWindow(QMainWindow):
         self.control_panel.set_status("正在处理...")
 
         if self.stt_service:
-            self._pipeline_generation += 1
-            gen = self._pipeline_generation
+            gen = self.delivery_controller.start_generation().generation_id
             threading.Thread(target=self._run_pipeline, args=(None, gen), daemon=True).start()
         else:
             self.control_panel.set_status("测试模式 - 服务未加载")
             self.control_panel.reset_recording()
 
     def _cancel_active_pipeline(self, reason=""):
-        """Cancel any in-flight pipeline result to prevent stale TTS/UI updates."""
-        self._pipeline_cancel_generation = self._pipeline_generation
+        """Cancel the active delivery generation and stale all callbacks."""
+        generation = self.delivery_controller.current_generation_id
         logger.warning(
-            f"[PipelineCancel] cancel active pipeline gen={self._pipeline_cancel_generation}, reason={reason}"
+            f"[PipelineCancel] cancel active pipeline gen={generation}, reason={reason}"
         )
         try:
+            if generation is not None:
+                self.delivery_controller.cancel_generation(generation, reason=reason)
+                self._finalize_delivery_generation(generation)
             if self.tts_service:
                 self.tts_service.stop_playing()
         except Exception:
             pass
+
+    def _finalize_delivery_generation(self, generation_id: int | None) -> str:
+        """Commit visible assistant text once; raw model tails never qualify."""
+        if generation_id is None or generation_id in self._history_finalized_generations:
+            return ""
+        pipeline = getattr(self, "pipeline", None)
+        ledger = getattr(pipeline, "delivery_ledger", None)
+        if ledger is None:
+            return ""
+        delivered = ledger.finalize_history(
+            generation_id,
+            self.llm_service,
+            self.data_manager,
+            sample_rate=48000,
+        )
+        self._history_finalized_generations.add(generation_id)
+        if not delivered:
+            return ""
+        return delivered
 
     def _on_text_submitted(self, text):
         """Handle text input from chat panel."""
         if not text.strip():
             return
         if self._pipeline_busy:
-            self.chat_panel.add_system_message("正在回复中，请稍等")
-            return
+            self._cancel_active_pipeline(reason="new user text")
         if not self.models_loaded or not self.pipeline:
             self.chat_panel.add_system_message("模型尚未加载完成，请稍候")
             return
@@ -412,8 +437,7 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message("请先填写左侧基本信息并确认")
             return
         self.processing_queue.put(("status", "正在思考..."))
-        self._pipeline_generation += 1
-        gen = self._pipeline_generation
+        gen = self.delivery_controller.start_generation().generation_id
         threading.Thread(target=self._run_pipeline, args=(text, gen), daemon=True).start()
 
     # ==================== Pipeline ====================
@@ -421,14 +445,17 @@ class MainWindow(QMainWindow):
     def _run_pipeline(self, text=None, generation=None):
         """Unified pipeline entry point. Runs on a background thread.
         text=None for voice mode (STT+TTS), text=str for text mode.
-        generation: monotonically increasing token for stale result suppression."""
+        generation: delivery generation ID for stale result suppression."""
         if generation is None:
-            generation = self._pipeline_generation
+            generation = self.delivery_controller.current_generation_id
         self._pipeline_busy = True
 
         def safe_put(mt, ct):
             """Suppress callbacks from stale/cancelled pipeline results."""
-            if generation <= self._pipeline_cancel_generation or self._lifecycle_state_name() in (
+            if (
+                generation is not None
+                and not self.delivery_controller.is_current(generation)
+            ) or self._lifecycle_state_name() in (
                 "SESSION_ENDING", "SESSION_ENDED"
             ):
                 logger.warning(f"[PipelineCancel] suppress callback {mt} from gen={generation}")
@@ -459,6 +486,7 @@ class MainWindow(QMainWindow):
                     user_text=text,
                     extra_system_suffix=extra,
                     session_state=self._lifecycle_state_name(),
+                    generation_id=generation,
                 )
             else:
                 # Voice mode: STT + TTS
@@ -491,6 +519,7 @@ class MainWindow(QMainWindow):
                     audio_data=audio_data,
                     extra_system_suffix=extra,
                     session_state=self._lifecycle_state_name(),
+                    generation_id=generation,
                 )
 
             coordinator = getattr(self, "conversation_coordinator", None)
@@ -504,12 +533,15 @@ class MainWindow(QMainWindow):
                     self._scale_tags[scale_name].update(answers)
 
             # Drop stale pipeline results (user clicked end/relaxation during processing)
-            if generation <= self._pipeline_cancel_generation or self._lifecycle_state_name() in (
+            if (
+                generation is not None
+                and not self.delivery_controller.is_current(generation)
+            ) or self._lifecycle_state_name() in (
                 "SESSION_ENDING", "SESSION_ENDED"
             ):
                 logger.warning(
                     f"[PipelineCancel] drop stale pipeline result gen={generation}, "
-                    f"cancel_gen={self._pipeline_cancel_generation}, state={self._lifecycle_state_name()}"
+                    f"current_gen={self.delivery_controller.current_generation_id}, state={self._lifecycle_state_name()}"
                 )
                 return
             if self._lifecycle_state_name() != "CHATTING":
@@ -528,8 +560,9 @@ class MainWindow(QMainWindow):
             else:
                 self.processing_queue.put(("error", f"处理出错: {err_msg}"))
         finally:
-            self._pipeline_busy = False
-            if text is not None:
+            if generation is None or self.delivery_controller.current_generation_id == generation:
+                self._pipeline_busy = False
+            if text is not None and self.delivery_controller.current_generation_id == generation:
                 self.processing_queue.put(("set_buttons_state", "normal"))
 
     def _post_pipeline_routing(self, result):
@@ -650,10 +683,30 @@ class MainWindow(QMainWindow):
                         self.chat_panel.start_ai_message()
 
                 elif msg_type == "start_ai_message":
-                    self.chat_panel.start_ai_message()
+                    generation_id = content if isinstance(content, int) else None
+                    if (
+                        generation_id is not None
+                        and not self.delivery_controller.is_current(generation_id)
+                    ):
+                        continue
+                    self._active_ui_generation = generation_id
+                    self.chat_panel.start_ai_message(generation_id)
 
                 elif msg_type == "stream_text":
-                    self.chat_panel.stream_text(content)
+                    if isinstance(content, SentenceReady):
+                        generation_id = content.generation_id
+                        if not self.delivery_controller.is_current(generation_id):
+                            continue
+                        ledger = getattr(getattr(self, "pipeline", None), "delivery_ledger", None)
+                        if ledger is None or not ledger.commit_visible(content):
+                            continue
+                        self.chat_panel.stream_text(
+                            clean_for_display(content.text),
+                            generation_id,
+                            content.seq,
+                        )
+                    else:
+                        self.chat_panel.stream_text(content)
 
                 elif msg_type == "clear_last_ai":
                     if self.chat_panel._messages and self.chat_panel._messages[-1].get("type") == "ai":
@@ -664,7 +717,11 @@ class MainWindow(QMainWindow):
                         self.chat_panel._current_streaming_bubble = None
 
                 elif msg_type == "finish_streaming":
-                    self.chat_panel.finish_streaming()
+                    generation_id = content if isinstance(content, int) else self._active_ui_generation
+                    if generation_id is not None:
+                        self._finalize_delivery_generation(generation_id)
+                    self.chat_panel.finish_streaming(generation_id)
+                    self._active_ui_generation = None
 
                 elif msg_type == "clean_last_ai":
                     if content and self.chat_panel._messages:
@@ -706,10 +763,22 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(delay_ms, lambda rk=relax_key: self._highlight_relax_safe(rk))
 
                 elif msg_type == "replace_greeting":
-                    self._replace_greeting(content)
+                    if isinstance(content, tuple) and len(content) == 2:
+                        generation_id, replacement = content
+                        if not self.delivery_controller.is_current(generation_id):
+                            continue
+                        self._replace_greeting(replacement, generation_id)
+                    else:
+                        self._replace_greeting(content)
 
                 elif msg_type == "replace_last_system":
-                    self._replace_last_system(content)
+                    if isinstance(content, tuple) and len(content) == 2:
+                        generation_id, replacement = content
+                        if not self.delivery_controller.is_current(generation_id):
+                            continue
+                        self._replace_last_system(replacement, generation_id)
+                    else:
+                        self._replace_last_system(content)
 
                 elif msg_type == "auto_end_session":
                     self._handle_session_end(
@@ -949,6 +1018,7 @@ class MainWindow(QMainWindow):
                 session_emotions=self.session_emotions,
                 emotion_tracker=self.emotion_tracker,
                 session_state_provider=self._lifecycle_state_name,
+                delivery_controller=self.delivery_controller,
             )
 
             # New authoritative turn boundary: every text turn now enters via
@@ -1007,6 +1077,7 @@ class MainWindow(QMainWindow):
         or report_service.start_session(). Those are deferred to _start_new_session()
         which runs only when the next subject confirms their info.
         """
+        self._cancel_active_pipeline(reason="next subject")
         self.chat_panel.clear_chat()
         self.session_emotions = []
         self._scale_tags = {}
@@ -1041,6 +1112,7 @@ class MainWindow(QMainWindow):
             logger.warning(f"SessionEngine command failed: {e}")
 
     def _start_new_session(self):
+        self._cancel_active_pipeline(reason="new session")
         self.chat_panel.clear_chat()
         try:
             from app.contracts import StartSessionCommand, SubjectInfo
@@ -1098,16 +1170,8 @@ class MainWindow(QMainWindow):
 
     def _play_tts_then_auto_end(self, text, end_type):
         """Play a short auto-end notice, then enter the full session-end flow."""
-        def runner():
-            try:
-                if self.tts_service and text:
-                    self.tts_service.generate_and_play(text)
-            except Exception as e:
-                logger.warning(f"Auto-end notice TTS failed: {e}")
-            finally:
-                self.processing_queue.put(("auto_end_session", end_type))
-
-        threading.Thread(target=runner, daemon=True).start()
+        self._play_tts_async(text)
+        self.processing_queue.put(("auto_end_session", end_type))
 
     def _on_continue_chosen(self):
         """用户选择继续聊天"""
@@ -1380,23 +1444,33 @@ class MainWindow(QMainWindow):
     # ==================== Audio Playback ====================
 
     def _play_tts_async(self, text):
-        """Play TTS in the background when the service is available."""
+        """Queue one auxiliary spoken sentence under a delivery generation."""
         if not self.tts_service or not text:
-            return
-
-        def runner():
-            try:
-                self.tts_service.generate_and_play(text)
-            except Exception as e:
-                logger.warning(f"TTS playback failed: {e}")
-
-        threading.Thread(target=runner, daemon=True).start()
+            return None
+        pipeline = getattr(self, "pipeline", None)
+        delivery_queue = getattr(pipeline, "delivery_queue", None)
+        if delivery_queue is None:
+            logger.warning("TTS delivery queue unavailable; dropping unscoped auxiliary audio")
+            return None
+        record = self.delivery_controller.start_generation()
+        starter = getattr(delivery_queue, "start", None)
+        if callable(starter):
+            starter()
+        event = SentenceReady(
+            record.generation_id,
+            0,
+            clean_for_display(text),
+            clean_for_tts(text),
+        )
+        if not delivery_queue.enqueue(event):
+            logger.warning("Auxiliary TTS sentence became stale before queueing")
+        return record.generation_id
 
     def _play_opening_greeting(self):
         """Play the opening greeting - dynamically generated or fallback."""
         fallback = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
         self.chat_panel.add_system_message(fallback, as_ai=True)
-        self._play_tts_async(fallback)
+        greeting_generation = self._play_tts_async(fallback)
 
         def _try_generate():
             generated = ""
@@ -1414,11 +1488,14 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 60:
                     generated = generated[:60]
-                self.processing_queue.put(("replace_greeting", generated))
+                if greeting_generation is not None:
+                    self.processing_queue.put(("replace_greeting", (greeting_generation, generated)))
         threading.Thread(target=_try_generate, daemon=True).start()
 
-    def _replace_greeting(self, new_greeting):
+    def _replace_greeting(self, new_greeting, generation_id=None):
         """Replace the last AI message with a new greeting."""
+        if generation_id is not None and not self.delivery_controller.is_current(generation_id):
+            return
         msgs = self.chat_panel._messages
         if msgs and msgs[-1]["type"] == "ai":
             bubble = msgs[-1]["bubble"]
@@ -1430,7 +1507,7 @@ class MainWindow(QMainWindow):
         """Play post-relaxation greeting - dynamically generated or fallback."""
         fallback = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "做完啦，身上有没有舒服点呀？"
         self.chat_panel.add_system_message(fallback)
-        self._play_tts_async(fallback)
+        greeting_generation = self._play_tts_async(fallback)
 
         relax_type = self._engine_relaxation_type() or ""
         relax_name = {"breathing": "呼吸放松", "muscle": "肌肉放松", "meditation": "冥想"}.get(relax_type, "放松训练")
@@ -1451,11 +1528,14 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 50:
                     generated = generated[:50]
-                self.processing_queue.put(("replace_last_system", generated))
+                if greeting_generation is not None:
+                    self.processing_queue.put(("replace_last_system", (greeting_generation, generated)))
         threading.Thread(target=_try_generate, daemon=True).start()
 
-    def _replace_last_system(self, new_text):
+    def _replace_last_system(self, new_text, generation_id=None):
         """Replace the last system message text."""
+        if generation_id is not None and not self.delivery_controller.is_current(generation_id):
+            return
         msgs = self.chat_panel._messages
         if msgs and msgs[-1]["type"] == "system":
             bubble = msgs[-1]["bubble"]
@@ -1837,6 +1917,7 @@ class MainWindow(QMainWindow):
     def _force_quit_now(self):
         """Immediate quit — stop all services and exit, no farewell/report."""
         import os as _os
+        self._cancel_active_pipeline(reason="application shutdown")
         # Stop timers
         for timer_name in ("_queue_timer", "_progress_timer", "_keepalive_timer", "_post_relaxation_timer"):
             timer = getattr(self, timer_name, None)
@@ -2025,6 +2106,8 @@ class MainWindow(QMainWindow):
         relaxation_tag = self._engine_relaxation_type()
 
         def generate_farewell_and_reports():
+            farewell_generation_id = None
+            farewell_sentences: list[SentenceReady] = []
             try:
                 user_id = self.current_user_id or "default_user"
                 current_user_info = getattr(self, "user_info", {})
@@ -2042,9 +2125,22 @@ class MainWindow(QMainWindow):
                 full_feedback = ""
                 if is_exit:
                     full_feedback = "本次会话已结束，系统正在保存报告。"
-                    self.processing_queue.put(("append_chat", ("ai", full_feedback)))
+                    farewell_generation_id = self.delivery_controller.start_generation().generation_id
+                    self.processing_queue.put(("start_ai_message", farewell_generation_id))
+                    farewell_sentence = SentenceReady(
+                        farewell_generation_id,
+                        0,
+                        clean_for_display(full_feedback),
+                        clean_for_tts(full_feedback),
+                    )
+                    farewell_sentences.append(farewell_sentence)
+                    self.processing_queue.put(("stream_text", farewell_sentence))
+                    self.processing_queue.put(("finish_streaming", farewell_generation_id))
                 else:
-                    self.processing_queue.put(("start_ai_message", None))
+                    farewell_generation_id = self.delivery_controller.start_generation().generation_id
+                    self.processing_queue.put(("start_ai_message", farewell_generation_id))
+                    farewell_segmenter = SentenceSegmenter()
+                    delivery_ledger = getattr(self.pipeline, "delivery_ledger", None)
                     try:
                         stream_gen = self.report_service.generate_visitor_feedback(
                             conversation_history, end_type, relaxation_rec or relax_str,
@@ -2052,16 +2148,55 @@ class MainWindow(QMainWindow):
                         )
                         for chunk in stream_gen:
                             full_feedback += chunk
-                            clean = re.sub(r'<\|[^>]+\|>', '', chunk)
-                            clean = re.sub(r'\[REC_[A-Z_]+\]', '', clean)
-                            clean = re.sub(r'\[END_[A-Z_]+\]', '', clean)
-                            clean = re.sub(r'\[SCALE:[^]]+\]', '', clean)
-                            if clean.strip():
-                                self.processing_queue.put(("stream_text", clean.strip()))
+                            if not self.delivery_controller.is_current(farewell_generation_id):
+                                break
+                            if delivery_ledger is not None:
+                                delivery_ledger.record_generated(farewell_generation_id, chunk)
+                            for event in farewell_segmenter.feed(farewell_generation_id, chunk):
+                                normalized = SentenceReady(
+                                    event.generation_id,
+                                    event.seq,
+                                    clean_for_display(event.text) or clean_for_tts(event.text),
+                                    clean_for_tts(event.text),
+                                )
+                                if normalized.text:
+                                    farewell_sentences.append(normalized)
+                                    self.processing_queue.put(("stream_text", normalized))
                     except Exception as e:
                         logger.warning(f"Visitor feedback generation failed: {e}")
                         full_feedback = "今天的聊天到此结束，希望对你有所帮助。有事儿随时来找我唠。"
-                    self.processing_queue.put(("finish_streaming", None))
+                    for event in farewell_segmenter.flush(farewell_generation_id):
+                        normalized = SentenceReady(
+                            event.generation_id,
+                            event.seq,
+                            clean_for_display(event.text) or clean_for_tts(event.text),
+                            clean_for_tts(event.text),
+                        )
+                        if normalized.text:
+                            farewell_sentences.append(normalized)
+                            self.processing_queue.put(("stream_text", normalized))
+                    if not farewell_sentences and full_feedback:
+                        for event in farewell_segmenter.feed(farewell_generation_id, full_feedback):
+                            normalized = SentenceReady(
+                                event.generation_id,
+                                event.seq,
+                                clean_for_display(event.text) or clean_for_tts(event.text),
+                                clean_for_tts(event.text),
+                            )
+                            if normalized.text:
+                                farewell_sentences.append(normalized)
+                                self.processing_queue.put(("stream_text", normalized))
+                        for event in farewell_segmenter.flush(farewell_generation_id):
+                            normalized = SentenceReady(
+                                event.generation_id,
+                                event.seq,
+                                clean_for_display(event.text) or clean_for_tts(event.text),
+                                clean_for_tts(event.text),
+                            )
+                            if normalized.text:
+                                farewell_sentences.append(normalized)
+                                self.processing_queue.put(("stream_text", normalized))
+                    self.processing_queue.put(("finish_streaming", farewell_generation_id))
 
                 # --- Phase 2: Save raw snapshot → Generate report + PDF FIRST ---
                 # Reports MUST complete before farewell TTS plays.
@@ -2174,8 +2309,14 @@ class MainWindow(QMainWindow):
                 if not is_exit and full_feedback and self.tts_service:
                     logger.info("[SessionEnd] report/PDF done, now playing farewell TTS")
                     try:
-                        self.tts_service.generate_and_play(full_feedback)
-                        logger.info("[SessionEnd] farewell TTS finished")
+                        delivery_queue = getattr(self.pipeline, "delivery_queue", None)
+                        if delivery_queue is not None and farewell_generation_id is not None:
+                            delivery_queue.start()
+                            for sentence in farewell_sentences:
+                                delivery_queue.enqueue(sentence)
+                            logger.info("[SessionEnd] farewell TTS queued")
+                        else:
+                            self._play_tts_async(full_feedback)
                     except Exception as e:
                         logger.warning(f"[SessionEnd] farewell TTS failed: {e}")
 
