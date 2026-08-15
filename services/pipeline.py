@@ -1,6 +1,7 @@
 # Pipeline - Unified conversation pipeline and shared constants
 
 import re
+import threading
 import time
 import traceback
 from typing import Optional, Any, Callable, List, Dict
@@ -372,6 +373,17 @@ class PipelineConfig:
     generation_id: Optional[int] = None
 
 
+@dataclass
+class _SentenceFlushRegistration:
+    """One identity-scoped segmenter registration for the pipeline watchdog."""
+
+    generation_id: int
+    segmenter: SentenceSegmenter
+    emit: Callable[[str, Any], None]
+    lock: Any = field(default_factory=threading.RLock, repr=False)
+    next_deadline: Optional[float] = field(default=None, repr=False)
+
+
 # ==================== Unified Conversation Pipeline ====================
 
 class ConversationPipeline:
@@ -408,6 +420,11 @@ class ConversationPipeline:
             self.tts,
         )
         self._last_stream_generation_id: Optional[int] = None
+        self._sentence_segmenter_factory = SentenceSegmenter
+        self._flush_condition = threading.Condition()
+        self._active_flush_registration: Optional[_SentenceFlushRegistration] = None
+        self._flush_watchdog_thread: Optional[threading.Thread] = None
+        self._flush_watchdog_shutdown = threading.Event()
         # Scale administration has one mutable owner.  Pipeline keeps only
         # symptom observations used to build TurnSignals; it never mirrors
         # active item, waiting, answers, pause, or completion state.
@@ -435,7 +452,11 @@ class ConversationPipeline:
         )
 
     def shutdown(self):
-        """Release the shared classification executor. Call on app exit."""
+        """Release shared workers, including the sentence flush watchdog."""
+        try:
+            self._shutdown_sentence_flush_watchdog()
+        except Exception as e:
+            logger.debug(f"sentence flush watchdog shutdown error: {e}")
         try:
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception as e:
@@ -1825,6 +1846,233 @@ class ConversationPipeline:
 
         return system_suffix
 
+    def _ensure_sentence_flush_state(self) -> None:
+        """Lazily initialize watchdog state for lightweight test doubles."""
+        if not hasattr(self, "_sentence_segmenter_factory"):
+            self._sentence_segmenter_factory = SentenceSegmenter
+        if not hasattr(self, "_flush_condition"):
+            self._flush_condition = threading.Condition()
+        if not hasattr(self, "_active_flush_registration"):
+            self._active_flush_registration = None
+        if not hasattr(self, "_flush_watchdog_thread"):
+            self._flush_watchdog_thread = None
+        if not hasattr(self, "_flush_watchdog_shutdown"):
+            self._flush_watchdog_shutdown = threading.Event()
+
+    def _new_sentence_segmenter(self) -> SentenceSegmenter:
+        """Build a segmenter, with a narrow factory seam for deadline tests."""
+        factory = getattr(self, "_sentence_segmenter_factory", SentenceSegmenter)
+        return factory()
+
+    def _register_sentence_flush(
+        self,
+        generation_id: int,
+        segmenter: SentenceSegmenter,
+        emit: Callable[[str, Any], None],
+    ) -> _SentenceFlushRegistration:
+        """Replace the one active watchdog registration by object identity."""
+        self._ensure_sentence_flush_state()
+        registration = _SentenceFlushRegistration(generation_id, segmenter, emit)
+        with self._flush_condition:
+            self._active_flush_registration = registration
+            self._flush_condition.notify_all()
+        return registration
+
+    def _start_sentence_flush_watchdog(self) -> None:
+        """Start the single watchdog only once buffered text needs a deadline."""
+        self._ensure_sentence_flush_state()
+        with self._flush_condition:
+            if self._flush_watchdog_shutdown.is_set():
+                return
+            watchdog = self._flush_watchdog_thread
+            if watchdog is None or not watchdog.is_alive():
+                watchdog = threading.Thread(
+                    target=self._run_sentence_flush_watchdog,
+                    name="sentence-flush-watchdog",
+                    daemon=True,
+                )
+                self._flush_watchdog_thread = watchdog
+                watchdog.start()
+            self._flush_condition.notify_all()
+
+    def _is_active_flush_registration(
+        self,
+        registration: _SentenceFlushRegistration,
+    ) -> bool:
+        with self._flush_condition:
+            return (
+                self._active_flush_registration is registration
+                and not self._flush_watchdog_shutdown.is_set()
+            )
+
+    def _retire_flush_registration(
+        self,
+        registration: _SentenceFlushRegistration,
+    ) -> bool:
+        """Clear only this registration; never clear a newer generation."""
+        with self._flush_condition:
+            if self._active_flush_registration is not registration:
+                return False
+            self._active_flush_registration = None
+            self._flush_condition.notify_all()
+            return True
+
+    def _wake_sentence_flush_watchdog(self) -> None:
+        with self._flush_condition:
+            self._flush_condition.notify_all()
+
+    @staticmethod
+    def _set_flush_deadline_locked(
+        registration: _SentenceFlushRegistration,
+        now: Optional[float] = None,
+    ) -> None:
+        """Refresh the registration deadline from the segmenter's latest feed."""
+        if registration.segmenter.buffered_text:
+            current = time.monotonic() if now is None else now
+            registration.next_deadline = (
+                current + registration.segmenter.max_wait_ms / 1000.0
+            )
+        else:
+            registration.next_deadline = None
+
+    def _emit_registered_segment_events_locked(
+        self,
+        registration: _SentenceFlushRegistration,
+        events: list[SentenceReady],
+    ) -> None:
+        """Serialize segmenter mutation and emission for one registration."""
+        for event in events:
+            self._emit_generation_sentence(event, registration.emit)
+
+    def _feed_sentence_registration(
+        self,
+        registration: _SentenceFlushRegistration,
+        content: str,
+    ) -> bool:
+        """Feed one provider chunk under the registration's serialization lock."""
+        with registration.lock:
+            if not self._is_active_flush_registration(registration):
+                return False
+            if not self.delivery_controller.is_current(registration.generation_id):
+                self._retire_flush_registration(registration)
+                return False
+            now = time.monotonic()
+            events = registration.segmenter.feed(
+                registration.generation_id,
+                content,
+            )
+            self._emit_registered_segment_events_locked(registration, events)
+            due_events = registration.segmenter.flush_if_due(
+                registration.generation_id,
+                now=now,
+            )
+            self._emit_registered_segment_events_locked(registration, due_events)
+            self._set_flush_deadline_locked(registration, now)
+            needs_watchdog = bool(registration.segmenter.buffered_text)
+        if needs_watchdog:
+            self._start_sentence_flush_watchdog()
+        self._wake_sentence_flush_watchdog()
+        return True
+
+    def _run_sentence_flush_watchdog(self) -> None:
+        """Enforce one active segmenter's deadline without provider threads."""
+        while True:
+            with self._flush_condition:
+                if self._flush_watchdog_shutdown.is_set():
+                    return
+                registration = self._active_flush_registration
+                if registration is None:
+                    self._flush_condition.wait(timeout=0.5)
+                    continue
+
+            stale = False
+            has_buffer = False
+            deadline: Optional[float] = None
+            with registration.lock:
+                if not self._is_active_flush_registration(registration):
+                    continue
+                if not self.delivery_controller.is_current(registration.generation_id):
+                    stale = True
+                else:
+                    has_buffer = bool(registration.segmenter.buffered_text)
+                    if has_buffer:
+                        if registration.next_deadline is None:
+                            self._set_flush_deadline_locked(registration)
+                        deadline = registration.next_deadline
+                    else:
+                        registration.next_deadline = None
+
+            if stale:
+                self._retire_flush_registration(registration)
+                continue
+            if not has_buffer or deadline is None:
+                with self._flush_condition:
+                    if self._flush_watchdog_shutdown.is_set():
+                        return
+                    if self._active_flush_registration is registration:
+                        self._flush_condition.wait(timeout=0.5)
+                continue
+
+            wait_for = max(0.0, deadline - time.monotonic())
+            if wait_for > 0:
+                with self._flush_condition:
+                    if self._flush_watchdog_shutdown.is_set():
+                        return
+                    if self._active_flush_registration is registration:
+                        self._flush_condition.wait(timeout=wait_for)
+                continue
+
+            with registration.lock:
+                if not self._is_active_flush_registration(registration):
+                    continue
+                if not self.delivery_controller.is_current(registration.generation_id):
+                    self._retire_flush_registration(registration)
+                    continue
+                now = time.monotonic()
+                events = registration.segmenter.flush_if_due(
+                    registration.generation_id,
+                    now=now,
+                )
+                self._emit_registered_segment_events_locked(registration, events)
+                if registration.segmenter.buffered_text:
+                    # A short (< min_stable_chars) buffer is intentionally not
+                    # forced into TTS; retry on a bounded deadline instead of
+                    # spinning when a test injects max_wait_ms=0.
+                    retry_ms = max(registration.segmenter.max_wait_ms, 10)
+                    registration.next_deadline = now + retry_ms / 1000.0
+                else:
+                    registration.next_deadline = None
+
+    def _finalize_sentence_flush_registration(
+        self,
+        registration: _SentenceFlushRegistration,
+    ) -> None:
+        """Finalize one stream without clearing a replacement registration."""
+        with registration.lock:
+            if not self._is_active_flush_registration(registration):
+                return
+            if not self.delivery_controller.is_current(registration.generation_id):
+                self._retire_flush_registration(registration)
+                return
+            self._retire_flush_registration(registration)
+            events = registration.segmenter.flush(registration.generation_id)
+            self._emit_registered_segment_events_locked(registration, events)
+
+    def _shutdown_sentence_flush_watchdog(self, timeout: float = 2.0) -> None:
+        """Stop the single pipeline watchdog with a bounded join."""
+        self._ensure_sentence_flush_state()
+        with self._flush_condition:
+            self._flush_watchdog_shutdown.set()
+            self._active_flush_registration = None
+            watchdog = self._flush_watchdog_thread
+            self._flush_condition.notify_all()
+        if watchdog and watchdog is not threading.current_thread():
+            watchdog.join(timeout=timeout)
+        with self._flush_condition:
+            if self._flush_watchdog_thread is watchdog and watchdog is not None:
+                if not watchdog.is_alive():
+                    self._flush_watchdog_thread = None
+
     def _ensure_delivery_generation(self, generation_id: int):
         record = self.delivery_controller.get_record(generation_id)
         if record is None:
@@ -1869,7 +2117,7 @@ class ConversationPipeline:
         """Emit fallback text through the same sentence delivery path."""
         self._ensure_delivery_generation(generation_id)
         self.delivery_ledger.record_generated(generation_id, text)
-        segmenter = SentenceSegmenter()
+        segmenter = self._new_sentence_segmenter()
         for event in segmenter.feed(generation_id, text):
             self._emit_generation_sentence(event, emit)
         for event in segmenter.flush(generation_id):
@@ -1906,37 +2154,42 @@ class ConversationPipeline:
                 emit("stream_text", built.spoken_text)
             return generated_text, built.analysis_text, built.tts_text
 
-        record = self._ensure_delivery_generation(generation_id)
-        segmenter = SentenceSegmenter()
+        self._ensure_delivery_generation(generation_id)
+        segmenter = self._new_sentence_segmenter()
+        registration = self._register_sentence_flush(
+            generation_id,
+            segmenter,
+            emit,
+        )
         generated_parts: list[str] = []
         deferred_history_supported = True
         history = getattr(self.llm, "conversation_history", None)
         history_before = len(history) if isinstance(history, list) else 0
         try:
-            chunks = self.llm.chat(
-                text,
-                system_suffix=system_suffix,
-                commit_history=False,
-            )
-        except TypeError:
-            # Older test/integration adapters may not expose the optional
-            # history-defer keyword.  Their transport still remains usable;
-            # delivery finalization below controls the production history.
-            deferred_history_supported = False
-            chunks = self.llm.chat(text, system_suffix=system_suffix)
-
-        for chunk in chunks:
-            if not self.delivery_controller.is_current(generation_id):
-                break
-            content = str(chunk or "")
-            if not content:
-                continue
-            generated_parts.append(content)
-            self.delivery_ledger.record_generated(generation_id, content)
-            for event in segmenter.feed(generation_id, content):
-                self._emit_generation_sentence(event, emit)
-            for event in segmenter.flush_if_due(generation_id):
-                self._emit_generation_sentence(event, emit)
+            try:
+                chunks = self.llm.chat(
+                    text,
+                    system_suffix=system_suffix,
+                    commit_history=False,
+                )
+            except TypeError:
+                # Older test/integration adapters may not expose the optional
+                # history-defer keyword.  Their transport still remains usable;
+                # delivery finalization below controls the production history.
+                deferred_history_supported = False
+                chunks = self.llm.chat(text, system_suffix=system_suffix)
+            for chunk in chunks:
+                if not self.delivery_controller.is_current(generation_id):
+                    break
+                content = str(chunk or "")
+                if not content:
+                    continue
+                generated_parts.append(content)
+                self.delivery_ledger.record_generated(generation_id, content)
+                if not self._feed_sentence_registration(registration, content):
+                    break
+        finally:
+            self._finalize_sentence_flush_registration(registration)
 
         generated_text = "".join(generated_parts)
         if not deferred_history_supported and isinstance(history, list):
@@ -1945,9 +2198,6 @@ class ConversationPipeline:
             # commit delivered_text exactly once at finish_streaming.
             while len(history) > history_before and history[-1].get("role") == "assistant":
                 history.pop()
-        for event in segmenter.flush(generation_id):
-            self._emit_generation_sentence(event, emit)
-
         built = ResponseBuilder.build(generated_text)
         if not built.tts_text.strip():
             logger.warning(
@@ -1956,7 +2206,7 @@ class ConversationPipeline:
             generated_text = make_safe_fallback_reply(text)
             self.delivery_ledger.record_generated(generation_id, generated_text)
             built = ResponseBuilder.build(generated_text)
-            fallback_segmenter = SentenceSegmenter()
+            fallback_segmenter = self._new_sentence_segmenter()
             for event in fallback_segmenter.feed(generation_id, generated_text):
                 self._emit_generation_sentence(event, emit)
             for event in fallback_segmenter.flush(generation_id):
