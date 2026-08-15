@@ -50,6 +50,7 @@ from config import (
     USE_VAD_AUTO_STOP, VAD_SILENCE_THRESHOLD,
     VAD_SILENCE_DURATION, VAD_SPEECH_MIN_DURATION
 )
+from services.fsmn_vad_adapter import FSMNVADAdapter, VadEvent
 from services.logger import get_logger
 
 logger = get_logger(__name__)
@@ -81,6 +82,9 @@ class _RecordingState:
     vad_triggered: bool = False
     vad_silence_frames: int = 0
     vad_speech_frames: int = 0
+    vad_buffer: list = field(default_factory=list, repr=False)
+    vad_buffer_samples: int = 0
+    vad_speech_started: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     collector_thread: threading.Thread | None = field(default=None, repr=False)
 
@@ -99,6 +103,11 @@ class STTService:
         self.stream = None
         self._recording_state: _RecordingState | None = None
         self._recording_state_lock = threading.RLock()
+        self.vad_adapter: FSMNVADAdapter | None = None
+        self._vad_backend = "RMS_FALLBACK"
+        self._vad_device = os.getenv("FSMN_VAD_DEVICE", "cpu")
+        self._vad_adapter_attempted = False
+        self._vad_lock = threading.Lock()
 
         # VAD state
         self._vad_triggered = False
@@ -195,9 +204,51 @@ class STTService:
             progress_callback("STT model loaded!")
             
         return True
+
+    def _ensure_fsmn_vad(self) -> None:
+        """Load FSMN-VAD once when a real recording is about to begin.
+
+        VAD loading is kept separate from the Fun-ASR-Nano recognizer.  If
+        the optional endpoint model is unavailable, the already-supported RMS
+        endpoint detector remains the explicitly logged fallback.
+        """
+        if not self._vad_enabled or self.vad_adapter is not None:
+            return
+        if self._vad_adapter_attempted:
+            return
+        # Unit/test services can exercise recording mechanics without loading
+        # a real ASR model; do not trigger a network model download there.
+        if self.model is None:
+            return
+
+        self._vad_adapter_attempted = True
+        adapter = FSMNVADAdapter(device=self._vad_device)
+        try:
+            adapter.load()
+        except Exception as exc:
+            self._vad_backend = "RMS_FALLBACK"
+            logger.warning(
+                "FSMN_VAD unavailable; using RMS_FALLBACK: %s",
+                exc,
+                exc_info=True,
+            )
+            try:
+                adapter.close()
+            except Exception:
+                pass
+            return
+
+        self.vad_adapter = adapter
+        self._vad_backend = "FSMN_VAD"
+        logger.info(
+            "VAD backend active: FSMN_VAD device=%s chunk_samples=%s",
+            self._vad_device,
+            FSMNVADAdapter.CHUNK_SAMPLES,
+        )
     
     def start_recording(self):
         """Start recording audio from microphone."""
+        self._ensure_fsmn_vad()
         recording_state = _RecordingState(
             audio_queue=queue.Queue(),
             recorded_audio=[],
@@ -214,11 +265,22 @@ class STTService:
         self._vad_triggered = False
         self._vad_silence_frames = 0
         self._vad_speech_frames = 0
+        if self.vad_adapter is not None and self._vad_backend == "FSMN_VAD":
+            try:
+                with self._vad_lock:
+                    self.vad_adapter.reset()
+            except Exception as exc:
+                logger.warning(
+                    "FSMN_VAD reset failed; using RMS_FALLBACK: %s",
+                    exc,
+                    exc_info=True,
+                )
+                self.vad_adapter = None
+                self._vad_backend = "RMS_FALLBACK"
         
         def audio_callback(indata, frames, time, status):
             if status:
                 logger.debug(f"Audio status: {status}")
-            should_stop = False
             with recording_state.lock:
                 if not recording_state.accepting_frames:
                     return
@@ -226,32 +288,6 @@ class STTService:
                 # Put the accepted frame before requesting stop.  The same
                 # recording lock protects this ordering against manual stop.
                 recording_state.audio_queue.put(indata.copy())
-
-                # VAD: energy-based silence detection.  This policy remains
-                # unchanged in this hardening step; only shutdown mechanics
-                # are changing.
-                if self._vad_enabled:
-                    rms = np.sqrt(np.mean(indata ** 2))
-                    if rms < VAD_SILENCE_THRESHOLD:
-                        recording_state.vad_silence_frames += frames
-                    else:
-                        recording_state.vad_silence_frames = 0
-                        recording_state.vad_speech_frames += frames
-
-                    silence_sec = recording_state.vad_silence_frames / SAMPLE_RATE
-                    speech_sec = recording_state.vad_speech_frames / SAMPLE_RATE
-                    should_stop = (
-                        silence_sec >= VAD_SILENCE_DURATION
-                        and speech_sec >= VAD_SPEECH_MIN_DURATION
-                    )
-
-                with self._recording_state_lock:
-                    if self._recording_state is recording_state:
-                        self._vad_silence_frames = recording_state.vad_silence_frames
-                        self._vad_speech_frames = recording_state.vad_speech_frames
-
-            if should_stop:
-                self._request_recording_stop(recording_state, vad_triggered=True)
         
         try:
             device_id = None
@@ -328,6 +364,8 @@ class STTService:
                     finally:
                         recording_state.audio_queue.task_done()
 
+                    self._process_vad_audio(recording_state, audio_chunk)
+
                 # VAD auto-stop (or manual stop) reached: close the recording
                 # stream from this collector thread, not from the audio
                 # callback.  The sentinel proves all accepted frames were
@@ -364,6 +402,113 @@ class STTService:
             raise RecordingStartError(
                 f"Unable to start microphone recording: {e}"
             ) from e
+
+    def _process_vad_audio(self, recording_state: _RecordingState, audio_chunk) -> None:
+        """Run the active endpoint detector from the collector thread only."""
+        if not self._vad_enabled:
+            return
+        if self._vad_backend == "FSMN_VAD" and self.vad_adapter is not None:
+            self._process_fsmn_vad_audio(recording_state, audio_chunk)
+            return
+        if self._vad_backend == "RMS_FALLBACK":
+            self._update_rms_vad(recording_state, audio_chunk)
+
+    def _process_fsmn_vad_audio(
+        self,
+        recording_state: _RecordingState,
+        audio_chunk,
+    ) -> None:
+        """Accumulate 200 ms PCM chunks and feed FSMN-VAD in order."""
+        flat_chunk = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
+        if flat_chunk.size == 0:
+            return
+        with self._vad_lock:
+            with self._recording_state_lock:
+                if self._recording_state is not recording_state:
+                    return
+                if recording_state.stop_requested:
+                    return
+            recording_state.vad_buffer.append(flat_chunk.copy())
+            recording_state.vad_buffer_samples += int(flat_chunk.size)
+
+            chunk_samples = FSMNVADAdapter.CHUNK_SAMPLES
+            while recording_state.vad_buffer_samples >= chunk_samples:
+                merged = np.concatenate(recording_state.vad_buffer)
+                vad_chunk = merged[:chunk_samples]
+                remaining = merged[chunk_samples:]
+                recording_state.vad_buffer = (
+                    [remaining] if remaining.size else []
+                )
+                recording_state.vad_buffer_samples = int(remaining.size)
+                try:
+                    event = self.vad_adapter.feed(vad_chunk, is_final=False)
+                except Exception as exc:
+                    logger.warning(
+                        "FSMN_VAD feed failed; switching to RMS_FALLBACK: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    self.vad_adapter = None
+                    self._vad_backend = "RMS_FALLBACK"
+                    self._update_rms_vad(recording_state, vad_chunk)
+                    return
+                self._handle_vad_event(recording_state, event)
+                if recording_state.stop_requested:
+                    return
+
+    def _handle_vad_event(
+        self,
+        recording_state: _RecordingState,
+        event: VadEvent,
+    ) -> None:
+        """Apply one adapter event only to its still-current recording."""
+        if event is VadEvent.NONE:
+            return
+        with self._recording_state_lock:
+            if self._recording_state is not recording_state:
+                return
+            if recording_state.stop_requested:
+                return
+            if event is VadEvent.SPEECH_START:
+                recording_state.vad_speech_started = True
+                return
+            if event is VadEvent.SPEECH_END:
+                recording_state.vad_speech_started = (
+                    recording_state.vad_speech_started
+                    or bool(getattr(self.vad_adapter, "speech_seen", False))
+                )
+                if not recording_state.vad_speech_started:
+                    return
+        self._request_recording_stop(recording_state, vad_triggered=True)
+
+    def _update_rms_vad(self, recording_state: _RecordingState, audio_chunk) -> None:
+        """Legacy endpoint fallback used only when FSMN-VAD is unavailable."""
+        flat_chunk = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
+        if flat_chunk.size == 0:
+            return
+        with self._recording_state_lock:
+            if self._recording_state is not recording_state:
+                return
+            if recording_state.stop_requested:
+                return
+            rms = np.sqrt(np.mean(flat_chunk ** 2))
+            if rms < VAD_SILENCE_THRESHOLD:
+                recording_state.vad_silence_frames += int(flat_chunk.size)
+            else:
+                recording_state.vad_silence_frames = 0
+                recording_state.vad_speech_frames += int(flat_chunk.size)
+                recording_state.vad_speech_started = True
+
+            self._vad_silence_frames = recording_state.vad_silence_frames
+            self._vad_speech_frames = recording_state.vad_speech_frames
+            silence_sec = recording_state.vad_silence_frames / SAMPLE_RATE
+            speech_sec = recording_state.vad_speech_frames / SAMPLE_RATE
+            should_stop = (
+                silence_sec >= VAD_SILENCE_DURATION
+                and speech_sec >= VAD_SPEECH_MIN_DURATION
+            )
+        if should_stop:
+            self._request_recording_stop(recording_state, vad_triggered=True)
 
     def _request_recording_stop(
         self,
@@ -564,6 +709,13 @@ class STTService:
     def cleanup(self):
         """Stop capture and release the loaded ASR model before application exit."""
         self.stop_recording()
+        if self.vad_adapter is not None:
+            try:
+                with self._vad_lock:
+                    self.vad_adapter.close()
+            except Exception as exc:
+                logger.warning("Error releasing FSMN_VAD model: %s", exc)
+            self.vad_adapter = None
         self.model_kwargs = {}
         if self.model is not None:
             try:
