@@ -245,6 +245,30 @@ class STTService:
             self._vad_device,
             FSMNVADAdapter.CHUNK_SAMPLES,
         )
+
+    def _startup_attempt_is_current(self, recording_state: _RecordingState) -> bool:
+        """Check startup ownership without holding locks across provider calls."""
+        # Keep the same state-lock -> service-lock ordering used by the stop
+        # path.  The locks are held only for the in-memory check.
+        with recording_state.lock:
+            if recording_state.stop_requested:
+                return False
+            with self._recording_state_lock:
+                return self._recording_state is recording_state
+
+    def _discard_startup_state(self, recording_state: _RecordingState) -> None:
+        """Retire a startup attempt without publishing a stale stream."""
+        self._request_recording_stop(recording_state)
+        with self._recording_state_lock:
+            if self._recording_state is not recording_state:
+                return
+            self._recording_state = None
+            self.is_recording = False
+            self.stream = None
+            if self.recorded_audio is recording_state.recorded_audio:
+                self.recorded_audio = []
+            if self.audio_queue is recording_state.audio_queue:
+                self.audio_queue = queue.Queue()
     
     def start_recording(self):
         """Start recording audio from microphone."""
@@ -340,7 +364,10 @@ class STTService:
             
             device_id = best_device_id
 
-            self.stream = sd.InputStream(
+            # Keep a newly constructed stream local until the complete startup
+            # attempt has passed its stale/cancellation checks.  Publishing it
+            # early would let a late start thread overwrite a newer recording.
+            candidate_stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype=np.float32,
@@ -348,12 +375,23 @@ class STTService:
                 blocksize=1024,
                 device=device_id
             )
-            recording_state.stream = self.stream
+
+            if not self._startup_attempt_is_current(recording_state):
+                self._close_stream_handle(candidate_stream)
+                return False
+
+            # PortAudio may block here.  The candidate remains unpublished so
+            # a concurrent stop can retire this attempt safely.
+            candidate_stream.start()
+
+            if not self._startup_attempt_is_current(recording_state):
+                self._close_stream_handle(candidate_stream)
+                return False
 
             # Start the collector before opening the stream.  A device may
-            # deliver a callback immediately from ``start()``; the collector
-            # must already be waiting so a stop request can always drain the
-            # accepted frame followed by the sentinel.
+            # deliver a callback immediately after ``start()``; the recording
+            # queue already exists and the collector is committed atomically
+            # below before startup is reported successful.
             def collect_audio():
                 while True:
                     audio_chunk = recording_state.audio_queue.get()
@@ -376,28 +414,44 @@ class STTService:
                         self.stream = None
                         self.is_recording = False
 
-            recording_state.collector_thread = threading.Thread(
+            collector = threading.Thread(
                 target=collect_audio,
                 daemon=True,
             )
-            self.collect_thread = recording_state.collector_thread
-            recording_state.collector_thread.start()
 
-            # Open the stream only after the collector is ready.
-            self.stream.start()
+            # Commit the stream and collector as one lifecycle transition.
+            # No PortAudio operation is performed while these locks are held.
+            committed = False
+            with recording_state.lock:
+                with self._recording_state_lock:
+                    if (
+                        not recording_state.stop_requested
+                        and self._recording_state is recording_state
+                    ):
+                        recording_state.stream = candidate_stream
+                        recording_state.collector_thread = collector
+                        self.stream = candidate_stream
+                        self.collect_thread = collector
+                        collector.start()
+                        committed = True
+
+            if not committed:
+                self._close_stream_handle(candidate_stream)
+                return False
+
             return True
 
         except Exception as e:
             logger.warning(f"Error starting recording stream: {e}")
-            self._request_recording_stop(recording_state)
-            collector = recording_state.collector_thread
-            if collector is not None and collector is not threading.current_thread():
-                collector.join()
-            with self._recording_state_lock:
-                if self._recording_state is recording_state:
-                    self._recording_state = None
-                    self.is_recording = False
-                    self.stream = None
+            candidate = locals().get("candidate_stream")
+            if candidate is not None:
+                self._close_stream_handle(candidate)
+
+            if not self._startup_attempt_is_current(recording_state):
+                self._discard_startup_state(recording_state)
+                return False
+
+            self._discard_startup_state(recording_state)
             logger.exception("Exception occurred")
             raise RecordingStartError(
                 f"Unable to start microphone recording: {e}"

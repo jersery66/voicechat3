@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import threading
 from pathlib import Path
 
 import pytest
@@ -158,3 +159,62 @@ def test_main_window_uses_attempt_correlated_failure_event_without_pipeline_star
     assert "reset_recording" in failure_source
     assert "_run_pipeline" not in failure_source
     assert "recording_start_failed" in queue_source
+
+
+def test_cancelled_start_during_input_stream_open_returns_false_and_closes_candidate(
+    monkeypatch,
+):
+    opened = threading.Event()
+    release = threading.Event()
+    candidates = []
+
+    class BlockingStream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+            self.started = False
+            self.closed = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    def construct_stream(**kwargs):
+        opened.set()
+        assert release.wait(timeout=2), "test did not release blocked stream open"
+        stream = BlockingStream(**kwargs)
+        candidates.append(stream)
+        return stream
+
+    _patch_microphone(monkeypatch, stream_factory=construct_stream)
+    service = STTService()
+    result = {}
+
+    def start_attempt():
+        try:
+            result["returned"] = service.start_recording()
+        except Exception as exc:  # pragma: no cover - assertion reports value
+            result["error"] = exc
+
+    thread = threading.Thread(target=start_attempt, daemon=True)
+    thread.start()
+    assert opened.wait(timeout=2)
+    cancelled_state = service._recording_state
+    assert cancelled_state is not None
+
+    service.stop_recording()
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+
+    assert result == {"returned": False}
+    assert candidates and candidates[0].started is False
+    assert candidates[0].closed is True
+    assert cancelled_state.collector_thread is None
+    assert service._recording_state is None
+    assert service.stream is None
+    assert service.is_recording is False
