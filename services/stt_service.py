@@ -575,7 +575,10 @@ class STTService:
         if recording_state is None:
             self.is_recording = False
             self._stop_stream()
-            chunks = self.recorded_audio
+            # A completed recording is consumed by the first stop call.  The
+            # compatibility alias must never turn historical samples into a
+            # second utterance when stop_recording() is called again.
+            return np.array([])
         else:
             self._request_recording_stop(recording_state)
 
@@ -589,12 +592,21 @@ class STTService:
                 # starts create the collector before opening the stream.
                 self._close_stream_handle(recording_state.stream)
 
-            chunks = recording_state.recorded_audio
+            completed_chunks = recording_state.recorded_audio
             with self._recording_state_lock:
                 if self._recording_state is recording_state:
                     self._recording_state = None
                     self.stream = None
                     self.is_recording = False
+                    # Detach compatibility aliases only after the collector
+                    # has drained; the local completed_chunks remains the
+                    # sole owner used to build this first return value.
+                    if self.recorded_audio is completed_chunks:
+                        self.recorded_audio = []
+                    if self.audio_queue is recording_state.audio_queue:
+                        self.audio_queue = queue.Queue()
+
+            chunks = completed_chunks
 
         # Concatenate all audio chunks exactly once after the collector drain.
         if chunks:

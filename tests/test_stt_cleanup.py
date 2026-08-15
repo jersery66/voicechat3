@@ -1,5 +1,8 @@
 """STT resource-release regression tests."""
 
+import numpy as np
+
+from services import stt_service as stt_module
 from services.stt_service import STTService
 
 
@@ -75,3 +78,46 @@ def test_load_model_normalizes_a_mixed_dtype_checkpoint(monkeypatch, tmp_path):
     assert mixed.float_called is True
     assert mixed.eval_called is True
     assert service.model_kwargs["language"] == "zh"
+
+
+def test_stop_recording_consumes_completed_audio_once(monkeypatch):
+    class Stream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+            self.closed = False
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    stream_holder = {}
+
+    monkeypatch.setattr(
+        stt_module.sd,
+        "query_devices",
+        lambda kind=None: [{"name": "Test Microphone", "max_input_channels": 1}],
+    )
+    monkeypatch.setattr(
+        stt_module.sd,
+        "InputStream",
+        lambda **kwargs: stream_holder.setdefault("stream", Stream(**kwargs)),
+    )
+
+    service = STTService()
+    service.set_vad_enabled(False)
+    assert service.start_recording() is True
+    frame = np.ones((1024, 1), dtype=np.float32)
+    stream_holder["stream"].callback(frame, 1024, None, None)
+
+    first = service.stop_recording()
+    second = service.stop_recording()
+    service.cleanup()
+
+    assert len(first) == 1024
+    assert second.size == 0
+    assert stream_holder["stream"].closed is True
