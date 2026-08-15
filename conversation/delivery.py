@@ -487,6 +487,7 @@ class SentenceDeliveryQueue:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
+        self._stopping = False
         self._next_seq: dict[int, int] = {}
         self._active: Optional[SentenceReady] = None
         self.controller.add_cancel_listener(self._on_cancel)
@@ -498,15 +499,23 @@ class SentenceDeliveryQueue:
 
     def start(self) -> None:
         with self._lock:
-            if self._thread and self._thread.is_alive():
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                # A timed-out shutdown still owns this live worker.  Do not
+                # clear its stop event or create a second delivery thread.
                 return
+            if thread is not None:
+                # Retire only a definitively terminated worker reference.
+                self._thread = None
             self._stop.clear()
-            self._thread = threading.Thread(
+            self._stopping = False
+            worker = threading.Thread(
                 target=self._run,
                 name="sentence-tts-worker",
                 daemon=True,
             )
-            self._thread.start()
+            self._thread = worker
+            worker.start()
 
     def enqueue(self, event: SentenceReady) -> bool:
         if not self.controller.is_current(event.generation_id):
@@ -515,6 +524,8 @@ class SentenceDeliveryQueue:
         if not text:
             return False
         with self._lock:
+            if self._stopping:
+                return False
             expected = self._next_seq.get(event.generation_id, 0)
             if event.seq != expected:
                 return False
@@ -542,7 +553,8 @@ class SentenceDeliveryQueue:
             self._queue.task_done()
         for item in retained:
             self._queue.put(item)
-        active = self._active
+        with self._lock:
+            active = self._active
         if active is not None and active.generation_id == generation_id:
             try:
                 self.tts.stop_playing()
@@ -550,12 +562,34 @@ class SentenceDeliveryQueue:
                 pass
 
     def shutdown(self, timeout: float = 2.0) -> None:
-        self._stop.set()
-        self._queue.put(None)
-        thread = self._thread
-        if thread:
+        with self._lock:
+            was_stopping = self._stopping
+            self._stopping = True
+            self._stop.set()
+            thread = self._thread
+            active = self._active
+
+        if thread and thread is not threading.current_thread():
             thread.join(timeout=timeout)
-        self._thread = None
+
+        # The provider may be blocked in a synchronous playback call.  Give
+        # the requested stop state its timeout first, then interrupt the
+        # provider best-effort without a second unbounded join.  Ownership is
+        # retained below if the worker is still alive.
+        if (
+            active is not None
+            and not was_stopping
+            and thread is not None
+            and thread.is_alive()
+        ):
+            try:
+                self.tts.stop_playing()
+            except Exception:
+                pass
+
+        with self._lock:
+            if self._thread is thread and thread is not None and not thread.is_alive():
+                self._thread = None
 
     def _on_cancel(self, event: GenerationCancelled) -> None:
         self.cancel_generation(event.generation_id)
@@ -576,12 +610,13 @@ class SentenceDeliveryQueue:
             if item is None:
                 self._queue.task_done()
                 break
-            self._active = item
+            with self._lock:
+                self._active = item
             try:
-                if not self.controller.is_current(item.generation_id):
+                if self._stop.is_set() or not self.controller.is_current(item.generation_id):
                     continue
                 self._emit(AudioStarted(item.generation_id, item.seq))
-                if not self.controller.is_current(item.generation_id):
+                if self._stop.is_set() or not self.controller.is_current(item.generation_id):
                     continue
                 result = PlaybackResult(
                     PlaybackStatus.FAILED,
@@ -607,7 +642,10 @@ class SentenceDeliveryQueue:
                         PlaybackStatus.FAILED,
                         f"{type(exc).__name__}: {exc}",
                     )
-                if self.controller.is_current(item.generation_id):
+                if (
+                    not self._stop.is_set()
+                    and self.controller.is_current(item.generation_id)
+                ):
                     self._emit(
                         AudioFinished(
                             item.generation_id,
@@ -616,7 +654,9 @@ class SentenceDeliveryQueue:
                         )
                     )
             finally:
-                self._active = None
+                with self._lock:
+                    if self._active is item:
+                        self._active = None
                 self._queue.task_done()
 
 
