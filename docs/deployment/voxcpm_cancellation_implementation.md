@@ -94,10 +94,12 @@ by this commit.
 
 ## Finalization
 
-The production implementation commit and remote verification are recorded
-after the implementation commit is created and pushed:
+The production implementation and remote verification are complete:
 
-- Implementation commit: pending commit creation (`fix: harden voxcpm cancellation semantics`).
+- Implementation commit: `7aa8f78b90423e2cc8a52462edc702203d5f473f`
+  (`fix: harden voxcpm cancellation semantics`).
 - Remote branch: `origin/codex/a100-vllm-safety`.
-- Remote synchronization: to be verified after push (`ahead/behind = 0/0`).
-- Working tree: to be verified clean after push.
+- Remote HEAD after implementation push:
+  `7aa8f78b90423e2cc8a52462edc702203d5f473f`.
+- Implementation-push synchronization: `ahead/behind = 0/0`.
+- Working tree after implementation-push verification: clean.
