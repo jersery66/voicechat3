@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 
 
 VOXCPM_MIN_GPU_MEMORY_GB = 8
+VOXCPM_PLAYBACK_BUFFER_SECONDS = 120
 
 
 @dataclass
@@ -339,12 +340,14 @@ class TTSService:
         # as they are generated. No open/close overhead between batches.
         import threading as _threading
 
-        buf_len = int(self.sample_rate * 120)
+        buf_len = int(self.sample_rate * VOXCPM_PLAYBACK_BUFFER_SECONDS)
         buf = np.zeros(buf_len, dtype=np.float32)
         write_pos = 0
         read_pos = 0
         lock = _threading.Lock()
+        buffer_condition = _threading.Condition(lock)
         done_flag = _threading.Event()
+        worker_failed_event = _threading.Event()
         started = _threading.Event()
         min_prebuffer = int(self.sample_rate * 0.8)
         generated_samples = 0
@@ -358,7 +361,7 @@ class TTSService:
             if state.cancel_event.is_set():
                 outdata[:, 0] = 0
                 raise sd.CallbackStop
-            with lock:
+            with buffer_condition:
                 avail = write_pos - read_pos
                 if avail <= 0:
                     if done_flag.is_set():
@@ -376,13 +379,48 @@ class TTSService:
                 if n < frames:
                     outdata[n:, 0] = 0
                 read_pos += n
+                buffer_condition.notify_all()
+
+        def _append_audio_bounded(audio_np) -> bool:
+            """Append generated samples without overwriting unread audio."""
+
+            nonlocal write_pos, generated_samples
+            offset = 0
+            total = len(audio_np)
+            while offset < total:
+                if state.cancel_event.is_set() or worker_failed_event.is_set():
+                    return False
+                with buffer_condition:
+                    while True:
+                        if state.cancel_event.is_set() or worker_failed_event.is_set():
+                            return False
+                        used = write_pos - read_pos
+                        free = buf_len - used
+                        if free > 0:
+                            break
+                        # Cancellation is request-local and stop_playing cannot
+                        # safely acquire this lock. A bounded wait keeps the
+                        # producer responsive while the callback makes space.
+                        buffer_condition.wait(timeout=0.05)
+                    n = min(total - offset, free)
+                    start = write_pos % buf_len
+                    if start + n <= buf_len:
+                        buf[start:start + n] = audio_np[offset:offset + n]
+                    else:
+                        first = buf_len - start
+                        buf[start:] = audio_np[offset:offset + first]
+                        buf[:n - first] = audio_np[offset + first:offset + n]
+                    write_pos += n
+                    generated_samples += n
+                    offset += n
+            return True
 
         def _stream_worker():
             nonlocal worker_error
             try:
                 # Wait for minimum pre-buffer before opening the stream
                 while not state.cancel_event.is_set():
-                    with lock:
+                    with buffer_condition:
                         if write_pos >= min_prebuffer:
                             break
                     if done_flag.is_set():
@@ -412,6 +450,9 @@ class TTSService:
                         self._close_stream(stream)
             except Exception as exc:
                 worker_error = exc
+                worker_failed_event.set()
+                with buffer_condition:
+                    buffer_condition.notify_all()
                 logger.error("VoxCPM2 output worker failed: %s", exc)
                 logger.exception("VoxCPM2 output worker exception")
 
@@ -436,17 +477,8 @@ class TTSService:
                         audio_np = wav.squeeze(0).cpu().numpy().astype(np.float32)
                         if audio_np.ndim == 0 or len(audio_np) == 0:
                             continue
-                        with lock:
-                            n = len(audio_np)
-                            start = write_pos % buf_len
-                            if start + n <= buf_len:
-                                buf[start:start + n] = audio_np
-                            else:
-                                first = buf_len - start
-                                buf[start:] = audio_np[:first]
-                                buf[:n - first] = audio_np[first:]
-                            write_pos += n
-                            generated_samples += n
+                        if not _append_audio_bounded(audio_np):
+                            break
                 else:
                     # _publish_generator already closed a stale generator;
                     # do not close the same object again in the finalizer.
@@ -467,17 +499,8 @@ class TTSService:
                         audio_np = chunk.astype(np.float32)
                         if audio_np.ndim == 0 or len(audio_np) == 0:
                             continue
-                        with lock:
-                            n = len(audio_np)
-                            start = write_pos % buf_len
-                            if start + n <= buf_len:
-                                buf[start:start + n] = audio_np
-                            else:
-                                first = buf_len - start
-                                buf[start:] = audio_np[:first]
-                                buf[:n - first] = audio_np[first:]
-                            write_pos += n
-                            generated_samples += n
+                        if not _append_audio_bounded(audio_np):
+                            break
                 else:
                     gen = None
         except Exception as e:
