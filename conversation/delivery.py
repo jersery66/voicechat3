@@ -17,6 +17,9 @@ from adapters.tts_results import PlaybackResult, PlaybackStatus
 from core.tags import clean_for_display
 
 
+DEFAULT_MAX_PENDING_SENTENCES = 32
+
+
 @dataclass
 class GenerationRecord:
     """Mutable delivery record for one assistant output generation."""
@@ -479,11 +482,18 @@ class SentenceDeliveryQueue:
         tts: Any,
         *,
         on_event: Optional[Callable[[Any], None]] = None,
+        max_pending_sentences: int = DEFAULT_MAX_PENDING_SENTENCES,
     ) -> None:
+        capacity = int(max_pending_sentences)
+        if capacity <= 0:
+            raise ValueError("max_pending_sentences must be positive")
         self.controller = controller
         self.tts = tts
         self.on_event = on_event
-        self._queue: queue.Queue[Optional[SentenceReady]] = queue.Queue()
+        self.max_pending_sentences = capacity
+        self._queue: queue.Queue[Optional[SentenceReady]] = queue.Queue(
+            maxsize=self.max_pending_sentences
+        )
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
@@ -523,43 +533,92 @@ class SentenceDeliveryQueue:
         text = str(event.text or "").strip()
         if not text:
             return False
+        candidate = SentenceReady(
+            event.generation_id,
+            event.seq,
+            text,
+            event.tts_text or text,
+        )
         with self._lock:
-            if self._stopping:
+            if self._stopping or not self.controller.is_current(event.generation_id):
                 return False
             expected = self._next_seq.get(event.generation_id, 0)
             if event.seq != expected:
                 return False
+            try:
+                self._queue.put_nowait(candidate)
+            except queue.Full:
+                # A current sentence may not evict another current sentence.
+                # First remove only generations that the controller has made
+                # stale, then retry admission without ever blocking the
+                # provider/pipeline producer.
+                self._compact_stale_locked()
+                if self._stopping or not self.controller.is_current(
+                    event.generation_id
+                ):
+                    return False
+                try:
+                    self._queue.put_nowait(candidate)
+                except queue.Full:
+                    return False
             self._next_seq[event.generation_id] = expected + 1
-            self._queue.put(
-                SentenceReady(
-                    event.generation_id,
-                    event.seq,
-                    text,
-                    event.tts_text or text,
-                )
-            )
         return True
 
     def cancel_generation(self, generation_id: int) -> None:
         """Discard queued items and interrupt the currently playing item."""
-        retained: list[Optional[SentenceReady]] = []
-        while True:
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            if item is None or item.generation_id != generation_id:
-                retained.append(item)
-            self._queue.task_done()
-        for item in retained:
-            self._queue.put(item)
         with self._lock:
+            self._remove_generation_locked(generation_id)
+            self._next_seq.pop(generation_id, None)
             active = self._active
         if active is not None and active.generation_id == generation_id:
             try:
                 self.tts.stop_playing()
             except Exception:
                 pass
+
+    def _compact_stale_locked(self) -> None:
+        """Drop stale queued sentences while retaining current FIFO items."""
+
+        self._rebuild_queue_locked(
+            lambda item: item is None
+            or self.controller.is_current(item.generation_id)
+        )
+
+    def _remove_generation_locked(self, generation_id: int) -> None:
+        """Remove one generation's pending work with balanced task counts."""
+
+        self._rebuild_queue_locked(
+            lambda item: item is None or item.generation_id != generation_id
+        )
+
+    def _discard_pending_locked(self) -> None:
+        """Discard all queued work without touching an active provider call."""
+
+        self._rebuild_queue_locked(lambda _item: False)
+
+    def _rebuild_queue_locked(
+        self,
+        retain: Callable[[Optional[SentenceReady]], bool],
+    ) -> None:
+        """Drain, account, and reinsert retained items in original order.
+
+        ``Queue.task_done`` is called for every removed item before retained
+        items are re-admitted.  Re-inserting with ``put_nowait`` is safe here:
+        the queue has just been drained and no producer can enter while the
+        queue lock is held.
+        """
+
+        retained: list[Optional[SentenceReady]] = []
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if retain(item):
+                retained.append(item)
+            self._queue.task_done()
+        for item in retained:
+            self._queue.put_nowait(item)
 
     def shutdown(self, timeout: float = 2.0) -> None:
         with self._lock:
@@ -568,6 +627,7 @@ class SentenceDeliveryQueue:
             self._stop.set()
             thread = self._thread
             active = self._active
+            self._discard_pending_locked()
 
         if thread and thread is not threading.current_thread():
             thread.join(timeout=timeout)
@@ -663,6 +723,7 @@ class SentenceDeliveryQueue:
 __all__ = [
     "AudioFinished",
     "AudioStarted",
+    "DEFAULT_MAX_PENDING_SENTENCES",
     "DeliveryLedger",
     "GenerationCancelled",
     "GenerationController",
