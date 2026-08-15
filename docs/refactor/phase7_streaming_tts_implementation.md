@@ -72,6 +72,7 @@
 
 ## Final Git result
 
-- Implementation commit: to be filled after the production commit is created.
-- Pushed remote HEAD: to be filled after push verification.
-- Final working-tree status: to be filled after push verification.
+- Implementation commit: `4858cd9a0a45228ba86e48ef97d0eddd43c4ad0d`
+  (`feat: enable cancellable sentence streaming tts`).
+- Pushed remote HEAD: pending push verification.
+- Final working-tree status: pending push verification.
