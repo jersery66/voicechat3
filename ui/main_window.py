@@ -85,6 +85,8 @@ class MainWindow(QMainWindow):
 
         # State
         self.is_recording = False
+        self._recording_attempt_id = 0
+        self._active_recording_attempt_id: int | None = None
         self.models_loaded = False
         self._dark_mode = False
         # SessionEngine is the single lifecycle owner.  MainWindow only sends
@@ -362,6 +364,9 @@ class MainWindow(QMainWindow):
         if self.current_user_id is None:
             self.current_user_id = new_user_id
 
+        self._recording_attempt_id += 1
+        attempt_id = self._recording_attempt_id
+        self._active_recording_attempt_id = attempt_id
         self.is_recording = True
         self.control_panel.set_recording_state(True)
         self.control_panel.set_status("正在录音...")
@@ -370,13 +375,20 @@ class MainWindow(QMainWindow):
             self.control_panel.stop_all_blinks()
 
         if self.stt_service:
-            threading.Thread(target=self.stt_service.start_recording, daemon=True).start()
+            threading.Thread(
+                target=self._start_recording_worker,
+                args=(attempt_id,),
+                daemon=True,
+            ).start()
+        else:
+            self.processing_queue.put(("recording_start_failed", attempt_id))
 
     def _on_record_stopped(self):
         if not self.is_recording:
             return
 
         self.is_recording = False
+        self._active_recording_attempt_id = None
         self.control_panel.set_recording_state(False)
         self.control_panel.set_status("正在处理...")
 
@@ -386,6 +398,45 @@ class MainWindow(QMainWindow):
         else:
             self.control_panel.set_status("测试模式 - 服务未加载")
             self.control_panel.reset_recording()
+
+    def _start_recording_worker(self, attempt_id):
+        """Start one microphone attempt and report failures through the UI queue.
+
+        This worker never touches Qt widgets.  The attempt token prevents a
+        late failure from resetting a newer recording attempt.
+        """
+        from services.stt_service import RecordingStartError
+
+        try:
+            self.stt_service.start_recording()
+        except RecordingStartError:
+            logger.exception("Microphone recording startup failed")
+            self.processing_queue.put(("recording_start_failed", attempt_id))
+        except Exception:
+            # Keep the UI fail-safe even if a provider violates the explicit
+            # startup-error contract; the technical traceback remains in the
+            # log and the participant still receives a safe status.
+            logger.exception("Unexpected microphone recording startup failure")
+            self.processing_queue.put(("recording_start_failed", attempt_id))
+
+    def _handle_recording_start_failed(self, attempt_id):
+        """Reset the current recording UI for a matching startup failure."""
+        if attempt_id != self._active_recording_attempt_id:
+            logger.info(
+                "Ignoring stale microphone startup failure attempt=%s current=%s",
+                attempt_id,
+                self._active_recording_attempt_id,
+            )
+            return
+
+        self._active_recording_attempt_id = None
+        self.is_recording = False
+        # Set the guard before reset_recording(): RecordButton emits its
+        # stopped signal while it resets, and that signal must not create an
+        # empty conversation turn after a failed microphone start.
+        self.control_panel.set_recording_state(False)
+        self.control_panel.reset_recording()
+        self.control_panel.set_status("麦克风启动失败，请检查麦克风连接后重试")
 
     def _cancel_active_pipeline(self, reason=""):
         """Cancel the active delivery generation and stale all callbacks."""
@@ -667,6 +718,9 @@ class MainWindow(QMainWindow):
 
                 if msg_type == "engine_event":
                     self._handle_engine_event(content)
+
+                elif msg_type == "recording_start_failed":
+                    self._handle_recording_start_failed(content)
 
                 elif msg_type == "status":
                     self.control_panel.set_status(content)

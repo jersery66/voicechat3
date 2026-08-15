@@ -58,6 +58,10 @@ logger = get_logger(__name__)
 _RECORDING_SENTINEL = object()
 
 
+class RecordingStartError(RuntimeError):
+    """Raised when a microphone recording cannot be started."""
+
+
 @dataclass
 class _RecordingState:
     """Ownership bundle for one microphone recording.
@@ -343,6 +347,7 @@ class STTService:
 
             # Open the stream only after the collector is ready.
             self.stream.start()
+            return True
 
         except Exception as e:
             logger.warning(f"Error starting recording stream: {e}")
@@ -352,12 +357,13 @@ class STTService:
                 collector.join()
             with self._recording_state_lock:
                 if self._recording_state is recording_state:
+                    self._recording_state = None
                     self.is_recording = False
                     self.stream = None
-            # We can't easily propagate error to UI thread from here without the queue
-            # But main.py checks self.is_recording state or we could print it.
-            # Ideally the UI should know.
             logger.exception("Exception occurred")
+            raise RecordingStartError(
+                f"Unable to start microphone recording: {e}"
+            ) from e
 
     def _request_recording_stop(
         self,
