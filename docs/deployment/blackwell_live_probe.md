@@ -47,6 +47,16 @@ Server-side per-request metrics and `/metrics` are opportunistic. Missing
 metrics are recorded as `UNAVAILABLE / NOT ENABLED` and do not fail an
 otherwise valid inference. Client-side timing is always collected.
 
+The production-client smoke calls and the raw acceptance calls are separate
+and explicitly labeled in the artifacts. The smoke calls prove that the
+profile-built `VLLMOpenAIClient` works. The raw streaming acceptance call is
+the sole owner of its own request start, first-content timestamp, stream end,
+visible content, usage, throughput, and raw reasoning/control-tag inspection.
+Metrics from separate requests are never combined, so TTFT and token usage
+remain request-consistent. A WSL `nvidia-smi` command-not-found result is
+retried through `/usr/lib/wsl/lib/nvidia-smi`; no driver or WSL configuration
+is changed.
+
 The current acceptance contract rejects multiple visible NVIDIA GPUs rather
 than guessing GPU 0. It compares Windows and WSL GPU family and memory, but
 does not approve VRAM budgets or impose TTFT/throughput thresholds.

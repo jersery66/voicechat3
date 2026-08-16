@@ -137,6 +137,18 @@ def _query_gpu(command: Sequence[str], *, timeout_seconds: float, include_utiliz
         result = run_command(command, timeout_seconds=timeout_seconds)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ProbeError("GPU_QUERY_FAILED", str(exc)) from exc
+    return _query_gpu_result(result, include_utilization=include_utilization)
+
+
+def _result_is_missing_executable(result: subprocess.CompletedProcess[str]) -> bool:
+    """Return whether a WSL command failed because the executable was absent."""
+    text = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    return result.returncode == 127 or "command not found" in text or "no such file or directory" in text
+
+
+def _query_gpu_result(
+    result: subprocess.CompletedProcess[str], *, include_utilization: bool = False
+) -> list[GPUObservation]:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "nvidia-smi failed").strip()
         raise ProbeError("GPU_QUERY_FAILED", detail)
@@ -160,7 +172,26 @@ def query_wsl_gpu(distro: str | None = None, *, timeout_seconds: float = 10.0,
     if distro:
         command.extend(["-d", distro])
     command.extend(["--", *_nvidia_smi_command(include_utilization=include_utilization)])
-    return _query_gpu(command, timeout_seconds=timeout_seconds, include_utilization=include_utilization)
+    try:
+        result = run_command(command, timeout_seconds=timeout_seconds)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProbeError("GPU_QUERY_FAILED", str(exc)) from exc
+    if _result_is_missing_executable(result):
+        fallback = ["wsl.exe"]
+        if distro:
+            fallback.extend(["-d", distro])
+        fallback.extend(
+            [
+                "--",
+                "/usr/lib/wsl/lib/nvidia-smi",
+                *_nvidia_smi_command(include_utilization=include_utilization)[1:],
+            ]
+        )
+        try:
+            result = run_command(fallback, timeout_seconds=timeout_seconds)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProbeError("GPU_QUERY_FAILED", str(exc)) from exc
+    return _query_gpu_result(result, include_utilization=include_utilization)
 
 
 def _normalized_gpu_name(name: str) -> str:

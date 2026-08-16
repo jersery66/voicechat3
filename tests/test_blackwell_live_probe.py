@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,6 +134,17 @@ def test_probe_11_agent_probe_uses_direct_json_request():
     assert calls[0]["messages"][1]["content"]
 
 
+@pytest.mark.parametrize("payload", [{}, {"status": "wrong"}])
+def test_probe_11b_agent_probe_requires_ok_status(payload):
+    with pytest.raises(support.ProbeError, match="AGENT_SEMANTIC_MISMATCH"):
+        probe.run_agent_json_probe(lambda **kwargs: payload)
+
+
+def test_probe_11c_agent_probe_accepts_exact_ok_status():
+    result = probe.run_agent_json_probe(lambda **kwargs: {"status": "ok"})
+    assert result["status"] == "PASS"
+
+
 def test_probe_12_invalid_agent_json_fails():
     def call_json(**kwargs):
         return "not-json"
@@ -203,6 +215,21 @@ def test_probe_17_qwen38_candidate_requires_non_thinking():
 
     with pytest.raises(support.ProbeError, match="THINKING_CONFIG_MISSING"):
         probe.validate_thinking_contract(profile, Client())
+
+
+def test_probe_17b_thinking_contract_is_profile_owned_after_profile_rename():
+    profile = replace(
+        get_deployment_profile("rtxpro6000_96g_qwen38_candidate"),
+        name="future_blackwell_dialogue_candidate",
+    )
+
+    class Client:
+        dialogue_enable_thinking = False
+
+        def _generation_options(self):
+            return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+
+    probe.validate_thinking_contract(profile, Client())
 
 
 def test_probe_18_qwen25_baseline_does_not_receive_thinking_kwargs():
@@ -291,3 +318,124 @@ def test_probe_30_probe_prompts_are_synthetic_fixed_text():
     assert "connectivity probe" in source
     assert "synthetic" in source.lower()
     assert "DataManager" not in source
+
+
+def _raw_chunk(content="", *, usage=None, reasoning_content=None):
+    delta = SimpleNamespace(content=content)
+    if reasoning_content is not None:
+        delta.reasoning_content = reasoning_content
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta)],
+        usage=usage,
+    )
+
+
+def _raw_client(chunks, calls):
+    class Completions:
+        def create(self, **request):
+            calls.append(request)
+            return iter(chunks)
+
+    class Client:
+        model = "dialogue-model"
+        request_mode = "chat"
+
+        def _prepare_chat_messages(self, messages):
+            return list(messages)
+
+        def _generation_options(self, requested_max_tokens=None):
+            return {"temperature": 0.7, "max_tokens": requested_max_tokens or 64}
+
+    client = Client()
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    return client
+
+
+def test_probe_raw_stream_evidence_uses_one_request_for_timing_usage_and_content():
+    calls = []
+    chunks = [
+        _raw_chunk("第一句"),
+        _raw_chunk("第二句"),
+        _raw_chunk(usage=SimpleNamespace(prompt_tokens=5, completion_tokens=4, total_tokens=9)),
+    ]
+    clock = iter([10.0, 10.2, 10.5]).__next__
+    result = probe.run_raw_stream_acceptance(_raw_client(chunks, calls), clock=clock)
+    assert len(calls) == 1
+    assert result["content"] == "第一句第二句"
+    assert result["completion_tokens"] == 4
+    assert result["raw_stream_ttft_ms"] == pytest.approx(200.0)
+    assert result["raw_stream_total_latency_ms"] == pytest.approx(500.0)
+    assert result["raw_stream_output_tokens_per_second"] == pytest.approx(8.0)
+
+
+def test_probe_production_stream_smoke_remains_separate_from_raw_acceptance():
+    smoke_calls = []
+
+    class SmokeClient:
+        def stream_messages(self, **kwargs):
+            smoke_calls.append(kwargs)
+            return iter(["smoke"])
+
+    smoke = probe.run_dialogue_stream_probe(
+        SmokeClient(),
+        timeout_seconds=2,
+        clock=iter([1.0, 1.1, 1.2]).__next__,
+    )
+    raw_calls = []
+    raw = probe.run_raw_stream_acceptance(
+        _raw_client([_raw_chunk("raw")], raw_calls),
+        clock=iter([2.0, 2.1, 2.2]).__next__,
+    )
+    assert smoke["content"] == "smoke"
+    assert raw["content"] == "raw"
+    assert len(smoke_calls) == 1
+    assert len(raw_calls) == 1
+
+
+def test_probe_raw_stream_reasoning_from_that_exact_stream_fails():
+    chunks = [_raw_chunk("可见内容", reasoning_content="隐藏推理")]
+    result = probe.run_raw_stream_acceptance(_raw_client(chunks, []), clock=iter([1.0, 1.1, 1.2]).__next__)
+    with pytest.raises(support.ProbeError, match="REASONING_FIELD_LEAK"):
+        probe._check_leakage_or_raise(result["content"], result["raw_chunks"])
+
+
+def test_probe_raw_stream_clean_evidence_passes_leakage_check():
+    result = probe.run_raw_stream_acceptance(
+        _raw_client([_raw_chunk("干净回复")], []),
+        clock=iter([1.0, 1.1, 1.2]).__next__,
+    )
+    report = probe._check_leakage_or_raise(result["content"], result["raw_chunks"])
+    assert report["reasoning_fields"] == {}
+
+
+def test_probe_wsl_nvidia_smi_falls_back_to_wsl_lib_path(monkeypatch):
+    calls = []
+    result_ok = SimpleNamespace(
+        returncode=0,
+        stdout="0, NVIDIA RTX PRO 6000 Blackwell, 98304, 200, 98104, 555.1, GPU-1\n",
+        stderr="",
+    )
+    result_missing = SimpleNamespace(returncode=127, stdout="", stderr="nvidia-smi: command not found")
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return result_missing if len(calls) == 1 else result_ok
+
+    monkeypatch.setattr(support, "run_command", fake_run)
+    observations = support.query_wsl_gpu("Ubuntu-24.04", timeout_seconds=3)
+    assert observations[0].name.startswith("NVIDIA RTX PRO 6000")
+    assert calls[0][4] == "nvidia-smi"
+    assert calls[1][4] == "/usr/lib/wsl/lib/nvidia-smi"
+
+
+def test_probe_wsl_nvidia_smi_fallback_failure_is_probe_error(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=127, stdout="", stderr="nvidia-smi: command not found")
+
+    monkeypatch.setattr(support, "run_command", fake_run)
+    with pytest.raises(support.ProbeError, match="GPU_QUERY_FAILED"):
+        support.query_wsl_gpu(timeout_seconds=3)
+    assert len(calls) == 2

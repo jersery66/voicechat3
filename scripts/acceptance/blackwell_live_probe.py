@@ -151,6 +151,11 @@ def run_agent_json_probe(call_json: Callable[..., Any], *, model: str | None = N
     except Exception as exc:
         raise support.ProbeError("AGENT_INFERENCE_FAILED", str(exc)) from exc
     payload = _parse_agent_response(response)
+    if payload.get("status") != "ok":
+        raise support.ProbeError(
+            "AGENT_SEMANTIC_MISMATCH",
+            f"Agent probe expected status='ok', received {payload.get('status')!r}",
+        )
     return {
         "status": "PASS",
         "json_valid": True,
@@ -232,11 +237,15 @@ def validate_thinking_contract(profile: DeploymentProfile, client: Any) -> None:
     extra_body = options.get("extra_body", {}) if isinstance(options, Mapping) else {}
     template_kwargs = extra_body.get("chat_template_kwargs", {}) if isinstance(extra_body, Mapping) else {}
     configured = getattr(client, "dialogue_enable_thinking", None)
-    if profile.name.endswith("qwen38_candidate"):
+    expected = profile.dialogue_enable_thinking
+    if expected is False:
         if configured is not False or template_kwargs.get("enable_thinking") is not False:
-            raise support.ProbeError("THINKING_CONFIG_MISSING", "Qwen3.8 candidate lacks enable_thinking=False")
-    elif "enable_thinking" in template_kwargs:
-        raise support.ProbeError("THINKING_CONFIG_UNEXPECTED", "baseline profile received Qwen3.8 thinking kwargs")
+            raise support.ProbeError("THINKING_CONFIG_MISSING", "profile requires enable_thinking=False")
+    elif expected is None:
+        if "enable_thinking" in template_kwargs:
+            raise support.ProbeError("THINKING_CONFIG_UNEXPECTED", "profile does not permit thinking kwargs")
+    elif configured != expected or template_kwargs.get("enable_thinking") != expected:
+        raise support.ProbeError("THINKING_CONFIG_MISMATCH", "client thinking options differ from profile contract")
 
 
 def _prepared_messages(client: Any, messages: Sequence[dict[str, str]]) -> list[dict[str, str]]:
@@ -256,7 +265,7 @@ def _raw_nonstream_response(client: Any, messages: Sequence[dict[str, str]]) -> 
     return client._client.chat.completions.create(**request)
 
 
-def _raw_stream_response(client: Any, messages: Sequence[dict[str, str]]) -> tuple[list[Any], dict[str, Any] | None]:
+def _raw_stream_request(client: Any, messages: Sequence[dict[str, str]]) -> Iterable[Any]:
     if getattr(client, "request_mode", "chat") != "chat":
         raise support.ProbeError("DIALOGUE_RAW_UNSUPPORTED", "Blackwell probe requires the chat request mode")
     request = {
@@ -274,9 +283,71 @@ def _raw_stream_response(client: Any, messages: Sequence[dict[str, str]]) -> tup
         # explicitly marked unavailable.
         request.pop("stream_options", None)
         stream = client._client.chat.completions.create(**request)
-    chunks = list(stream)
+    return stream
+
+
+def _raw_stream_response(client: Any, messages: Sequence[dict[str, str]]) -> tuple[list[Any], dict[str, Any] | None]:
+    chunks = list(_raw_stream_request(client, messages))
     usage = next((item for item in (_usage_dict(chunk) for chunk in chunks) if item), None)
     return chunks, usage
+
+
+def run_raw_stream_acceptance(
+    client: Any,
+    *,
+    messages: Sequence[dict[str, str]] | None = None,
+    clock: Callable[[], float] = time.perf_counter,
+) -> dict[str, Any]:
+    """Collect all acceptance evidence from one raw streaming request.
+
+    The raw stream owns its timing, visible content, usage, and leakage
+    evidence.  ``raw_chunks`` is intentionally an internal return value and
+    must not be persisted because it may contain sensitive reasoning text.
+    """
+    request_start = clock()
+    chunks: list[Any] = []
+    content_parts: list[str] = []
+    first_content_at: float | None = None
+    try:
+        stream = _raw_stream_request(client, list(messages or _default_messages()))
+        for chunk in stream:
+            chunks.append(chunk)
+            text = _response_content(chunk)
+            if text:
+                if first_content_at is None:
+                    first_content_at = clock()
+                content_parts.append(text)
+    except support.ProbeError:
+        raise
+    except Exception as exc:
+        raise support.ProbeError("DIALOGUE_RAW_STREAM_FAILED", str(exc)) from exc
+    stream_end = clock()
+    content = "".join(content_parts)
+    if not content.strip():
+        raise support.ProbeError("DIALOGUE_RAW_STREAM_EMPTY", "raw dialogue stream produced no participant content")
+    usage = next((item for item in (_usage_dict(chunk) for chunk in chunks) if item), None)
+    total_seconds = max(stream_end - request_start, 0.0)
+    first_content_at = stream_end if first_content_at is None else first_content_at
+    completion_tokens = usage.get("completion_tokens") if usage else None
+    throughput = None
+    if completion_tokens and total_seconds > 0:
+        throughput = completion_tokens / total_seconds
+    leakage = support.inspect_leakage(content, raw_values=chunks)
+    return {
+        "status": "PENDING_LEAKAGE_CHECK",
+        "content": content,
+        "request_start": request_start,
+        "first_content_at": first_content_at,
+        "stream_end": stream_end,
+        "raw_stream_ttft_ms": (first_content_at - request_start) * 1000.0,
+        "raw_stream_total_latency_ms": total_seconds * 1000.0,
+        "usage": usage,
+        "prompt_tokens": usage.get("prompt_tokens") if usage else None,
+        "completion_tokens": completion_tokens,
+        "raw_stream_output_tokens_per_second": throughput,
+        "leakage": leakage,
+        "raw_chunks": chunks,
+    }
 
 
 def _check_leakage_or_raise(content: str, raw_values: Iterable[Any]) -> dict[str, Any]:
@@ -342,8 +413,15 @@ def _summary_template(profile_name: str) -> dict[str, Any]:
         "agent_inference_status": "NOT RUN",
         "dialogue_nonstream_status": "NOT RUN",
         "dialogue_stream_status": "NOT RUN",
+        "production_client_nonstream_status": "NOT RUN",
+        "production_client_stream_status": "NOT RUN",
+        "raw_stream_acceptance_status": "NOT RUN",
         "client_ttft_ms": None,
         "client_total_latency_ms": None,
+        "raw_stream_ttft_ms": None,
+        "raw_stream_total_latency_ms": None,
+        "raw_stream_completion_tokens": None,
+        "raw_stream_output_tokens_per_second": None,
         "prompt_tokens": None,
         "completion_tokens": None,
         "client_output_tokens_per_second": None,
@@ -411,45 +489,59 @@ def run_probe(profile_name: str, *, distro: str | None = None,
         validate_thinking_contract(profile, client)
         nonstream = run_dialogue_nonstream_probe(client, timeout_seconds=timeout_seconds)
         raw_nonstream = _raw_nonstream_response(client, SYNTHETIC_DIALOGUE_MESSAGES)
-        nonstream_leak = support.inspect_leakage(nonstream["content"], raw_values=[raw_nonstream])
+        production_nonstream_leak = _check_leakage_or_raise(nonstream["content"], ())
+        raw_nonstream_content = _response_content(raw_nonstream)
+        if not raw_nonstream_content.strip():
+            raise support.ProbeError("DIALOGUE_RAW_NONSTREAM_EMPTY", "raw dialogue non-stream response was empty")
+        raw_nonstream_leak = _check_leakage_or_raise(raw_nonstream_content, [raw_nonstream])
         nonstream_usage = _usage_dict(raw_nonstream)
         _write_artifact(directory, "dialogue_nonstream.json", {
-            **nonstream,
-            "leakage": nonstream_leak,
-            "usage": nonstream_usage,
+            "production_client_smoke": {**nonstream, "leakage": production_nonstream_leak},
+            "raw_acceptance": {
+                "status": "PASS",
+                "content": raw_nonstream_content,
+                "leakage": raw_nonstream_leak,
+                "usage": nonstream_usage,
+            },
         })
-        _check_leakage_or_raise(nonstream["content"], [raw_nonstream])
         summary["dialogue_nonstream_status"] = "PASS"
+        summary["production_client_nonstream_status"] = "PASS"
 
         streaming = run_dialogue_stream_probe(client, timeout_seconds=timeout_seconds)
-        raw_chunks, stream_usage = _raw_stream_response(client, SYNTHETIC_DIALOGUE_MESSAGES)
-        usage = stream_usage or nonstream_usage
-        raw_stream_leak = support.inspect_leakage(streaming["content"], raw_values=raw_chunks)
-        combined_leak = {
-            "thinking_markup": sorted(set(nonstream_leak["thinking_markup"] + raw_stream_leak["thinking_markup"])),
-            "reasoning_fields": {**nonstream_leak["reasoning_fields"], **raw_stream_leak["reasoning_fields"]},
-            "control_tags": sorted(set(nonstream_leak["control_tags"] + raw_stream_leak["control_tags"])),
-        }
-        summary["client_ttft_ms"] = streaming["client_ttft_ms"]
-        summary["client_total_latency_ms"] = streaming["client_total_latency_ms"]
-        summary["thinking_leak"] = bool(combined_leak["thinking_markup"])
-        summary["reasoning_field_leak"] = bool(combined_leak["reasoning_fields"])
-        summary["control_tag_leak"] = bool(combined_leak["control_tags"])
-        if usage:
-            summary["prompt_tokens"] = usage.get("prompt_tokens")
-            summary["completion_tokens"] = usage.get("completion_tokens")
-            completion_tokens = usage.get("completion_tokens")
-            if completion_tokens and streaming["client_total_latency_ms"] > 0:
-                summary["client_output_tokens_per_second"] = completion_tokens / (streaming["client_total_latency_ms"] / 1000.0)
-        summary["server_per_request_metrics"] = support.extract_server_metrics([raw_nonstream, *raw_chunks])
-        _write_artifact(directory, "dialogue_stream.json", {
-            **streaming,
-            "leakage": combined_leak,
-            "usage": usage,
-            "server_per_request_metrics": summary["server_per_request_metrics"],
-        })
-        _check_leakage_or_raise(streaming["content"], raw_chunks)
+        production_stream_leak = _check_leakage_or_raise(streaming["content"], ())
         summary["dialogue_stream_status"] = "PASS"
+        summary["production_client_stream_status"] = "PASS"
+
+        raw_stream = run_raw_stream_acceptance(client, messages=SYNTHETIC_DIALOGUE_MESSAGES)
+        raw_stream_leak = raw_stream["leakage"]
+        raw_stream_artifact = {
+            "production_client_smoke": {**streaming, "leakage": production_stream_leak},
+            "raw_acceptance": {key: value for key, value in raw_stream.items() if key != "raw_chunks"},
+            "server_per_request_metrics": support.extract_server_metrics(raw_stream["raw_chunks"]),
+        }
+        try:
+            _check_leakage_or_raise(raw_stream["content"], raw_stream["raw_chunks"])
+        except support.ProbeError:
+            raw_stream_artifact["raw_acceptance"]["status"] = "FAIL"
+            _write_artifact(directory, "dialogue_stream.json", raw_stream_artifact)
+            raise
+        raw_stream["status"] = "PASS"
+        raw_stream_artifact["raw_acceptance"]["status"] = "PASS"
+        _write_artifact(directory, "dialogue_stream.json", raw_stream_artifact)
+        summary["raw_stream_acceptance_status"] = "PASS"
+        summary["raw_stream_ttft_ms"] = raw_stream["raw_stream_ttft_ms"]
+        summary["raw_stream_total_latency_ms"] = raw_stream["raw_stream_total_latency_ms"]
+        summary["raw_stream_completion_tokens"] = raw_stream["completion_tokens"]
+        summary["raw_stream_output_tokens_per_second"] = raw_stream["raw_stream_output_tokens_per_second"]
+        summary["client_ttft_ms"] = raw_stream["raw_stream_ttft_ms"]
+        summary["client_total_latency_ms"] = raw_stream["raw_stream_total_latency_ms"]
+        summary["prompt_tokens"] = raw_stream["prompt_tokens"]
+        summary["completion_tokens"] = raw_stream["completion_tokens"]
+        summary["client_output_tokens_per_second"] = raw_stream["raw_stream_output_tokens_per_second"]
+        summary["thinking_leak"] = bool(raw_stream_leak["thinking_markup"])
+        summary["reasoning_field_leak"] = bool(raw_stream_leak["reasoning_fields"])
+        summary["control_tag_leak"] = bool(raw_stream_leak["control_tags"])
+        summary["server_per_request_metrics"] = support.extract_server_metrics(raw_stream["raw_chunks"])
         _write_artifact(directory, "server_metrics.json", _query_metrics(profile.dialogue_base_url, timeout_seconds))
 
         after = support.validate_gpu_observation(
