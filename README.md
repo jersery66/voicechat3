@@ -45,18 +45,22 @@
     ↓
 📝 STT 语音转写
     ↓
-🧠 意图识别 + 情绪识别
+🧭 RouterProposal（仅提供建议）
     ↓
-📚 RAG 专家知识库增强
+⚖️ TurnPolicy
     ↓
-💬 LLM 流式生成
+✅ 唯一 TurnDecision
     ↓
-🏷️ 标签解析：END / REC / SCALE
+📊 ScaleRuntime / SessionEngine / TurnDecision.needs_rag
     ↓
-🔊 TTS 语音播放
+💬 72B 只负责生成自然语言
     ↓
-🖥️ UI 路由：继续对话 / 推荐放松 / 结束会话 / 生成报告
+🔊 句子交付 → TTS / UI / 历史记录
 ```
+
+`RouterProposal` 不能直接启动量表、放松、游戏或结束会话；`TurnPolicy`
+是每轮唯一的业务裁决者，系统只执行它产生的一个 `TurnDecision`。模型输出
+不再承担业务控制协议，`TurnDecision.needs_rag` 是生产 RAG 的唯一检索门。
 
 ---
 
@@ -164,20 +168,21 @@ flowchart TD
     A[🎤 用户语音 / 文本输入] --> B[📝 STT 转写 FunASR]
     B --> B2[🔤 ASR 纠错]
     B2 --> C[⚙️ ConversationPipeline]
-    C --> D[🧠 统一路由 Agent]
-    D -->|chat / start_scale / continue_scale / recommend_relaxation| E[📊 累计症状评分]
-    E -->|PHQ-9 / GAD-7 / PCL-5 达到阈值| F[📋 量表采样]
-    C --> C2[📚 RAG 专家知识库]
-    C2 --> H[💬 LLM 流式生成 vLLM / Ollama]
-    F --> H
-    H --> I[🏷️ 标签解析 + 内部标签过滤]
-    I --> J{🔀 路由决策}
-    J -->|普通回复| K[🔊 TTS VoxCPM2 播放]
-    J -->|放松推荐| M[🧘 放松训练 / 视频 / 游戏]
-    J -->|会话结束| N[📄 报告生成]
-    F --> O[📊 结构化量表结果]
-    O --> N
-    N --> P[💾 JSON + PDF 报告]
+    C --> D[🧭 RouterProposal<br/>仅提供建议]
+    D --> E[⚖️ TurnPolicy]
+    E --> F[✅ 唯一 TurnDecision]
+    F --> G[📊 ScaleRuntime / SessionEngine 执行]
+    F --> R{needs_rag?}
+    R -->|是| H[📚 curated production RAG]
+    R -->|否| I[🧩 对话上下文]
+    G --> I
+    H --> I
+    I --> J[💬 72B 语言实现<br/>(vLLM / Ollama)]
+    J --> K[📝 句子交付与标准化]
+    K --> L[🔊 TTS / UI / 历史记录]
+    G --> M[📋 量表结果 / 会话事件]
+    M --> N[📄 报告生成]
+    N --> O[💾 JSON + PDF 报告]
 ```
 
 ---
@@ -460,7 +465,13 @@ data/
 
 ---
 
-### 🏷️ 8. 控制标签协议
+### 🏷️ 8. 历史控制协议（仅兼容，不参与生产裁决）
+
+当前生产运行时不要求 72B 输出控制标签、分析块或 `|||` 分隔符。每轮业务
+动作已经由 `RouterProposal → TurnPolicy → TurnDecision` 确定，标签解析不能
+改变 `TurnDecision`、`ScaleRuntime`、`SessionEngine`、RAG 或 TTS 行为。
+
+下面的格式只为历史报告、旧 fixture 和防御性清理保留：
 
 #### 📝 回复分隔符
 
@@ -488,11 +499,20 @@ Phase 1 当前运行时不执行 `END_SAFETY`；历史枚举与旧报告数据�
 [SCALE:PHQ-9:Q1:S2]  [SCALE:GAD-7:Q3:S1]  [SCALE:PCL-5:Q4:S3]
 ```
 
-> 🔒 标签不会展示给用户，不会进入 TTS，仅用于后台评分与报告。
+> 🔒 这些标记不会成为新的生产控制协议；它们仅可用于历史兼容和清理，不能
+> 触发动作、量表评分、媒体播放、会话结束或 RAG 检索。
+
+### 🧪 9. 旧版开发脚本（已弃用）
+
+`scripts/test_conversation.py` 是仅面向 Ollama 的历史对话冒烟脚本，已标记
+为 **legacy / deprecated**。它不验证当前 vLLM、Blackwell profile、
+`RouterProposal → TurnPolicy → TurnDecision` authority chain、实时交付或
+`scripts/acceptance/blackwell_live_probe.py` 的验收结果。不要用它验收
+Qwen3.8 或正式部署。
 
 ---
 
-### ⚙️ 9. 配置说明
+### ⚙️ 10. 配置说明
 
 ```python
 MIN_ROUNDS_BEFORE_SCALE = 5    # 🔢 前几轮不启动新量表
@@ -502,7 +522,7 @@ POST_RELAXATION_TIMEOUT = 60   # ⏳ 放松后等待选择的超时时间
 
 ---
 
-### ⚠️ 10. 安全与伦理声明
+### ⚠️ 11. 安全与伦理声明
 
 ⚠️ **Phase 1 运行时限制：**危机/Guard 路由暂时从生产会话运行时拆除，相关历史源代码隔离在 `safety/`，生产应用不会导入它们。如出现自杀意念、自伤、暴力风险或严重精神症状，操作人员必须立即遵循机构处置流程并转交专业人员。
 
@@ -510,7 +530,7 @@ POST_RELAXATION_TIMEOUT = 60   # ⏳ 放松后等待选择的超时时间
 
 ---
 
-### 📜 11. 许可证
+### 📜 12. 许可证
 
 本项目采用 [MIT License](LICENSE) 🎉。
 
@@ -549,18 +569,24 @@ Supports natural voice and text input. Users express their concerns conversation
     ↓
 📝 STT transcription
     ↓
-🧠 Intent + emotion classification
+🧭 RouterProposal (advisory only)
     ↓
-📚 RAG knowledge base augmentation
+⚖️ TurnPolicy
     ↓
-💬 LLM streaming generation
+✅ Exactly one TurnDecision
     ↓
-🏷️ Tag parsing: END / REC / SCALE
+📊 ScaleRuntime / SessionEngine / TurnDecision.needs_rag
     ↓
-🔊 TTS playback
+💬 72B language realization only
     ↓
-🖥️ UI routing: continue / recommend relaxation / end session / generate reports
+🔊 Sentence delivery → TTS / UI / history
 ```
+
+`RouterProposal` is not executable: it cannot start a scale, relaxation, game,
+or session end. `TurnPolicy` is the sole per-turn business authority and the
+runtime executes only its one `TurnDecision`. Model output no longer carries a
+business-control protocol; `TurnDecision.needs_rag` is the sole production RAG
+gate.
 
 ---
 
@@ -667,21 +693,21 @@ All participant data saved locally by date and ID:
 flowchart TD
     A[🎤 User voice / text input] --> B[📝 STT - FunASR]
     B --> C[⚙️ ConversationPipeline]
-    C --> D[🧠 Intent Agent]
-    C --> E[😊 Emotion Agent]
-    C --> C2[📚 RAG knowledge base]
-    C2 --> H[💬 LLM streaming - vLLM / Ollama]
-    D --> H
-    E --> H
-    H --> I[🏷️ Tag parsing]
-    I --> J{🔀 Routing}
-    J -->|Normal reply| K[🔊 TTS - VoxCPM2]
-    J -->|Scale question| L[📋 Seamless scale module]
-    J -->|Relaxation| M[🧘 Training / video / game]
-    J -->|Session end| N[📄 Report generation]
-    L --> O[📊 Structured scale results]
-    O --> N
-    N --> P[💾 JSON + PDF reports]
+    C --> D[🧭 RouterProposal<br/>advisory only]
+    D --> E[⚖️ TurnPolicy]
+    E --> F[✅ Exactly one TurnDecision]
+    F --> G[📊 ScaleRuntime / SessionEngine execution]
+    F --> R{needs_rag?}
+    R -->|yes| H[📚 Curated production RAG]
+    R -->|no| I[🧩 Conversation context]
+    G --> I
+    H --> I
+    I --> J[💬 72B language realization<br/>(vLLM / Ollama)]
+    J --> K[📝 Sentence delivery + normalization]
+    K --> L[🔊 TTS / UI / history]
+    G --> M[📋 Scale results / session events]
+    M --> N[📄 Report generation]
+    N --> O[💾 JSON + PDF reports]
 ```
 
 ---
@@ -957,7 +983,15 @@ data/
 
 ---
 
-### 🏷️ 8. Control Tag Protocol
+### 🏷️ 8. Historical Control Protocol (Compatibility Only)
+
+The production runtime no longer requires 72B control tags, analysis blocks, or
+the `|||` separator. Per-turn behavior is already fixed by
+`RouterProposal → TurnPolicy → TurnDecision`; legacy parsing cannot change the
+`TurnDecision`, `ScaleRuntime`, `SessionEngine`, RAG, or TTS behavior.
+
+The formats below remain only for historical reports, old fixtures, and
+defensive cleanup:
 
 #### 📝 Response Delimiter
 
@@ -985,11 +1019,22 @@ The Phase 1 runtime does not execute `END_SAFETY`; the historical enum and legac
 [SCALE:PHQ-9:Q1:S2]  [SCALE:GAD-7:Q3:S1]  [SCALE:PCL-5:Q4:S3]
 ```
 
-> 🔒 Tags are never shown to the user or played via TTS. They are used only for backend scoring and reporting.
+> 🔒 These markers are not a new production control protocol. They may only be
+> used for historical compatibility and cleanup; they cannot trigger actions,
+> scale scoring, media playback, session end, or RAG retrieval.
+
+### 🧪 9. Legacy Development Script (Deprecated)
+
+`scripts/test_conversation.py` is a historical Ollama-only conversation smoke
+script and is explicitly **legacy / deprecated**. It does not validate the
+current vLLM or Blackwell profile, the
+`RouterProposal → TurnPolicy → TurnDecision` authority chain, sentence
+delivery, or the live probe. Do not use it to accept Qwen3.8 or a production
+deployment.
 
 ---
 
-### ⚙️ 9. Configuration
+### ⚙️ 10. Configuration
 
 ```python
 MIN_ROUNDS_BEFORE_SCALE = 5    # 🔢 Don't start new scales in early rounds
@@ -999,7 +1044,7 @@ POST_RELAXATION_TIMEOUT = 60   # ⏳ Seconds to wait for user choice after relax
 
 ---
 
-### ⚠️ 10. Safety and Ethics
+### ⚠️ 11. Safety and Ethics
 
 ⚠️ **Phase 1 operational limitation:** crisis/Guard routing is temporarily detached from the production conversation runtime. Legacy source is isolated under `safety/` and is not imported by the production application. If suicidal ideation, self-harm, violence risk, or severe psychiatric symptoms are reported, operators must immediately follow institutional procedures and refer the person to qualified professionals.
 
@@ -1007,7 +1052,7 @@ POST_RELAXATION_TIMEOUT = 60   # ⏳ Seconds to wait for user choice after relax
 
 ---
 
-### 📜 11. License
+### 📜 12. License
 
 This project is licensed under the [MIT License](LICENSE) 🎉.
 

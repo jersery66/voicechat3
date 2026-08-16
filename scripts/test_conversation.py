@@ -1,6 +1,11 @@
-"""
-对话效果测试脚本 - 测试 RAG + LLM 完整流程
-用法: python scripts/test_conversation.py
+"""LEGACY / DEPRECATED Ollama conversation smoke script.
+
+This historical development helper exercises the old Ollama + ``|||``
+response path only. It is not a production acceptance tool and must not be
+used to validate vLLM, Blackwell profiles, Qwen3.8, or the current
+``RouterProposal -> TurnPolicy -> TurnDecision`` authority chain.
+
+Usage (development diagnostics only): ``python scripts/test_conversation.py``
 """
 
 import sys
