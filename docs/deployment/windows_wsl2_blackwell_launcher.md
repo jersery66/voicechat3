@@ -66,6 +66,11 @@ sequence to those PIDs, and removes stale PID files. This is the manual
 operator stop path; it does not use broad
 `pkill`, `killall`, or `taskkill` patterns.
 
+The repository `.sh` files are invoked explicitly through `bash`, so launcher
+startup only requires them to be regular files. It does not depend on how a
+Windows/DrvFS mount presents Linux executable bits. The actual WSL vLLM
+executable remains subject to a strict executable check.
+
 After both exact models are ready, the launcher runs the existing
 `scripts/check_config.py` with the selected strict profile. Only a successful
 check starts the Windows `main.py`; PySide6 is never launched inside WSL.

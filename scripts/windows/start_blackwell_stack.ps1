@@ -139,8 +139,11 @@ function Test-WslPrerequisites {
     }
     $script:WslStartScript = "$ProjectWslRoot/scripts/wsl/start_vllm_service.sh"
     $script:WslStopScript = "$ProjectWslRoot/scripts/wsl/stop_vllm_service.sh"
-    [void](Invoke-WslChecked -Arguments @("test", "-x", $WslStartScript))
-    [void](Invoke-WslChecked -Arguments @("test", "-x", $WslStopScript))
+    # These repository scripts are invoked explicitly through bash. A
+    # Windows-mounted path may not present the executable bit, so only require
+    # regular files here; the vLLM executable check remains strict below.
+    [void](Invoke-WslChecked -Arguments @("test", "-f", $WslStartScript))
+    [void](Invoke-WslChecked -Arguments @("test", "-f", $WslStopScript))
     $checkResult = Invoke-WslCapture -Arguments @(
         "bash", $WslStartScript, "--check-executable", "--vllm-executable", $VllmExecutable
     )

@@ -78,6 +78,32 @@ def test_windows_launcher_checks_wsl_linux_and_nvidia_visibility():
     assert "wslpath" in source
 
 
+def test_repository_scripts_use_bash_and_do_not_require_executable_bits():
+    source = _read(WINDOWS_START)
+
+    assert '"bash", $WslStartScript' in source
+    assert '"bash", $WslStopScript' in source
+    assert '"test", "-f", $WslStartScript' in source
+    assert '"test", "-f", $WslStopScript' in source
+    assert '"test", "-x", $WslStartScript' not in source
+    assert '"test", "-x", $WslStopScript' not in source
+
+
+def test_only_the_vllm_executable_keeps_strict_executable_validation():
+    source = _read(WINDOWS_START)
+    wsl_source = _read(WSL_START)
+
+    assert "--check-executable" in source
+    assert '"--check-executable"' in source
+    assert '[[ -x "$vllm_executable" ]]' in wsl_source
+    assert "chmod" not in source.lower()
+    assert "chmod" not in wsl_source.lower()
+    assert "wsl.conf" not in source.lower()
+    assert "wsl.conf" not in wsl_source.lower()
+    assert "DrvFS" not in source
+    assert "DrvFS" not in wsl_source
+
+
 def test_windows_launcher_starts_agent_before_dialogue_and_waits_for_exact_models():
     source = _read(WINDOWS_START)
 
