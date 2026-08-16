@@ -164,10 +164,10 @@ def test_factory_builds_vllm_client_only_for_a_vllm_profile():
     assert build_dialogue_client(dev, resolve_runtime_models(dev)) is None
 
 
-def test_vllm_factory_honours_the_shared_dialogue_endpoint_override(monkeypatch):
+def test_vllm_factory_pins_a100_dialogue_endpoint_against_override(monkeypatch):
     profile = get_deployment_profile("a100_80g")
     monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://a100-host:8000/v1")
 
     client = build_dialogue_client(profile, resolve_runtime_models(profile))
 
-    assert client.base_url == "http://a100-host:8000/v1"
+    assert client.base_url == "http://127.0.0.1:8000/v1"

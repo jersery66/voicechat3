@@ -19,9 +19,14 @@ def build_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
     """
     if profile.runtime_backend != "vllm":
         return None
+    base_url = (
+        profile.dialogue_base_url
+        if profile.name in {"a100_80g", "a100_80g_qwen38_candidate"}
+        else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
+    )
     return VLLMOpenAIClient(
         model=models.dialogue,
-        base_url=os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url),
+        base_url=base_url,
         timeout=timeout,
         request_mode=profile.vllm_request_mode,
         system_role_mode=profile.vllm_system_role_mode,
