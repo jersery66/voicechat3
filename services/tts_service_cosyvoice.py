@@ -8,6 +8,8 @@ import threading
 import numpy as np
 import torch
 import torchaudio
+from dataclasses import dataclass
+from typing import Any
 try:
     import pyaudio
 except ImportError:
@@ -22,6 +24,16 @@ from services.logger import get_logger
 logger = get_logger(__name__)
 
 
+@dataclass
+class _CosyPlaybackState:
+    """Request-local cancellation and worker ownership for compatibility TTS."""
+
+    stop_event: threading.Event
+    done_event: threading.Event
+    playback_thread: threading.Thread | None = None
+    stream: Any = None
+
+
 class TTSService:
     """Text-to-Speech service using CosyVoice3 with streaming voice cloning."""
 
@@ -34,6 +46,8 @@ class TTSService:
         self.pyaudio = None
         self.stream = None
         self._play_lock = threading.Lock()
+        self._active_playback: _CosyPlaybackState | None = None
+        self._active_playback_lock = threading.RLock()
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_audio")
         os.makedirs(self.temp_dir, exist_ok=True)
         self._cleanup_old_temps(max_age_seconds=3600)
@@ -118,9 +132,45 @@ class TTSService:
             torch.cuda.empty_cache()
         return True
 
-    def _close_stream(self):
-        """Safely close the active playback stream, if any."""
-        stream = self.stream
+    def _ensure_playback_state(self) -> None:
+        """Initialize request state for legacy ``__new__`` test doubles."""
+        if not hasattr(self, "_active_playback"):
+            self._active_playback = None
+        if not hasattr(self, "_active_playback_lock"):
+            self._active_playback_lock = threading.RLock()
+
+    def _new_playback_state(self) -> _CosyPlaybackState:
+        self._ensure_playback_state()
+        return _CosyPlaybackState(threading.Event(), threading.Event())
+
+    def _set_active_playback(self, state: _CosyPlaybackState) -> None:
+        self._ensure_playback_state()
+        with self._active_playback_lock:
+            self._active_playback = state
+
+    def _clear_active_playback(self, state: _CosyPlaybackState) -> bool:
+        self._ensure_playback_state()
+        with self._active_playback_lock:
+            if self._active_playback is not state:
+                return False
+            self._active_playback = None
+            return True
+
+    def _close_stream(self, stream=None, *, state: _CosyPlaybackState | None = None):
+        """Safely close one request's stream without touching a replacement."""
+        self._ensure_playback_state()
+        with self._active_playback_lock:
+            if stream is None:
+                if state is not None:
+                    stream = state.stream
+                else:
+                    stream = getattr(self, "stream", None)
+            if stream is None:
+                return
+            if state is not None and state.stream is stream:
+                state.stream = None
+            if getattr(self, "stream", None) is stream:
+                self.stream = None
         if stream is not None:
             try:
                 if getattr(stream, "is_active", lambda: False)():
@@ -180,28 +230,45 @@ class TTSService:
 
     # ==================== Streaming Playback ====================
 
-    def _playback_worker(self, playback_queue, stream, stop_event, pre_buffer=5):
-        """Background thread that plays audio chunks from the queue."""
+    def _playback_worker(
+        self,
+        playback_queue,
+        stream,
+        stop_event,
+        pre_buffer=5,
+        state: _CosyPlaybackState | None = None,
+    ):
+        """Play queued chunks, flushing pre-buffer only on normal EOF."""
         buffered_chunks = []
         first_chunk = True
+        normal_end = False
         try:
-            while not stop_event.is_set():
+            while True:
+                if stop_event.is_set():
+                    break
                 try:
                     chunk = playback_queue.get(timeout=0.1)
                     if chunk is None:
+                        normal_end = True
                         break
 
+                    if stop_event.is_set():
+                        break
                     if first_chunk:
                         buffered_chunks.append(chunk)
                         if len(buffered_chunks) >= pre_buffer:
                             for c in buffered_chunks:
+                                if stop_event.is_set():
+                                    break
                                 if stream and stream.is_active():
                                     stream.write(c.tobytes())
+                            if stop_event.is_set():
+                                break
                             buffered_chunks = []
                             first_chunk = False
                         continue
 
-                    if stream and stream.is_active():
+                    if not stop_event.is_set() and stream and stream.is_active():
                         stream.write(chunk.tobytes())
 
                 except queue.Empty:
@@ -211,15 +278,32 @@ class TTSService:
                     stop_event.set()
                     break
 
-            # Flush remaining buffered chunks
-            if buffered_chunks:
+            # Only a provider EOF permits the unread pre-buffer to be played.
+            if normal_end and not stop_event.is_set() and buffered_chunks:
                 for c in buffered_chunks:
+                    if stop_event.is_set():
+                        break
                     if stream and stream.is_active():
                         stream.write(c.tobytes())
 
         finally:
+            buffered_chunks.clear()
             stop_event.set()
+            if state is not None:
+                state.done_event.set()
             logger.debug("Playback worker finished")
+
+    def _put_playback_chunk(self, playback_queue, chunk, stop_event, state=None) -> bool:
+        """Admit one compatibility chunk without an uninterruptible put."""
+        while not stop_event.is_set():
+            if state is not None and state.done_event.is_set():
+                return False
+            try:
+                playback_queue.put(chunk, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _build_synthesis_kwargs(self, clean_text: str, stream: bool) -> dict | None:
         """Build kwargs for model.inference_zero_shot. Returns None if no voice prompt available."""
@@ -249,6 +333,7 @@ class TTSService:
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
+        self._ensure_playback_state()
         logger.debug(f"generate_and_play called with text length: {len(text)}")
         self.is_playing = True
 
@@ -258,11 +343,21 @@ class TTSService:
             self.is_playing = False
             return
 
-        playback_queue = queue.Queue(maxsize=200)
-        stop_event = threading.Event()
+        # Validate the prompt before opening audio resources or starting a
+        # worker.  CosyVoice remains compatibility-only, so invalid requests
+        # must fail closed without leaving a request-local worker behind.
+        kwargs_gen = self._build_synthesis_kwargs(clean_text, stream=True)
+        if kwargs_gen is None:
+            logger.warning("No prompt_wav available, skipping TTS generation")
+            self.is_playing = False
+            return
 
-        p = None
+        playback_queue = queue.Queue(maxsize=200)
+        state = self._new_playback_state()
+        self._set_active_playback(state)
         stream = None
+        playback_thread = None
+        normal_completion = False
 
         try:
             if not self.pyaudio:
@@ -274,51 +369,67 @@ class TTSService:
                 output=True,
                 frames_per_buffer=2048
             )
-            self.stream = stream
+            with self._active_playback_lock:
+                if self._active_playback is state:
+                    state.stream = stream
+                    self.stream = stream
+
+            if state.stop_event.is_set():
+                return
 
             # Start playback thread
             playback_thread = threading.Thread(
                 target=self._playback_worker,
-                args=(playback_queue, stream, stop_event),
+                args=(playback_queue, stream, state.stop_event),
+                kwargs={"state": state},
                 daemon=True
             )
+            state.playback_thread = playback_thread
             playback_thread.start()
 
             # CosyVoice streaming synthesis
-            kwargs_gen = self._build_synthesis_kwargs(clean_text, stream=True)
-            if kwargs_gen is None:
-                logger.warning("No prompt_wav available, skipping TTS generation")
-                self.is_playing = False
-                return
-
             for chunk in self.model.inference_zero_shot(**kwargs_gen):
-                if not self.is_playing or stop_event.is_set():
+                if state.stop_event.is_set():
                     logger.debug("Playback interrupted.")
                     break
                 audio_np = chunk['tts_speech'].squeeze().float().cpu().numpy().astype(np.float32)
                 if audio_np.ndim == 0 or len(audio_np) == 0:
                     continue
-                try:
-                    playback_queue.put(audio_np, timeout=1.0)
-                except queue.Full:
-                    logger.warning("Playback queue full, stopping generation.")
+                if not self._put_playback_chunk(
+                    playback_queue,
+                    audio_np,
+                    state.stop_event,
+                    state,
+                ):
+                    logger.warning("Playback queue admission stopped.")
                     break
+            else:
+                normal_completion = True
 
-            # Signal end
-            try:
-                playback_queue.put(None, timeout=1.0)
-            except queue.Full:
-                pass
-            playback_thread.join(timeout=10)
+            if normal_completion and not state.stop_event.is_set():
+                self._put_playback_chunk(
+                    playback_queue,
+                    None,
+                    state.stop_event,
+                    state,
+                )
+            else:
+                state.stop_event.set()
 
         except Exception as e:
             logger.error(f"generate_and_play failed: {e}")
             logger.exception("Exception occurred")
 
         finally:
-            stop_event.set()
-            self._close_stream()
+            if not normal_completion:
+                state.stop_event.set()
+            if playback_thread is not None and playback_thread is not threading.current_thread():
+                playback_thread.join(timeout=2.0)
+                if playback_thread.is_alive():
+                    logger.warning("CosyVoice playback worker did not stop within timeout")
+            self._close_stream(stream, state=state)
             self.is_playing = False
+            self._clear_active_playback(state)
 
     def generate(self, text: str, **kwargs) -> np.ndarray:
         """Generate speech without playing (for saving)."""
@@ -353,6 +464,14 @@ class TTSService:
     def stop_playing(self):
         """Stop audio playback."""
         self.is_playing = False
+        self._ensure_playback_state()
+        with self._active_playback_lock:
+            state = self._active_playback
+            stream = state.stream if state is not None else None
+            if state is not None:
+                state.stop_event.set()
+        if state is not None and stream is not None:
+            self._close_stream(stream, state=state)
 
     def play_audio(self, audio: np.ndarray):
         """Play pre-generated audio data synchronously."""
@@ -402,7 +521,19 @@ class TTSService:
 
     def cleanup(self):
         """Clean up resources."""
-        self._close_stream()
+        self.stop_playing()
+        self._ensure_playback_state()
+        with self._active_playback_lock:
+            state = self._active_playback
+            playback_thread = state.playback_thread if state is not None else None
+            stream = state.stream if state is not None else getattr(self, "stream", None)
+        if playback_thread is not None and playback_thread is not threading.current_thread():
+            playback_thread.join(timeout=2.0)
+            if playback_thread.is_alive():
+                logger.warning("CosyVoice cleanup found a live playback worker")
+        self._close_stream(stream, state=state)
+        if state is not None:
+            self._clear_active_playback(state)
         if self.pyaudio:
             try:
                 self.pyaudio.terminate()
