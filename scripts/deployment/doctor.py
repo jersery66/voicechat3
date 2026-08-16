@@ -52,8 +52,11 @@ REQUIRED_FILES = (
     "scripts/windows/stop_blackwell_stack.ps1",
     "scripts/wsl/start_vllm_service.sh",
     "scripts/wsl/stop_vllm_service.sh",
+    "scripts/wsl/status_vllm_service.sh",
+    "scripts/wsl/vllm_service_identity.sh",
     "scripts/acceptance/blackwell_live_probe.py",
     "scripts/acceptance/qwen_dialogue_ab.py",
+    "scripts/deployment/manifest.py",
     "knowledge_base/knowledge.json",
 )
 DEPENDENCY_MODULES = {

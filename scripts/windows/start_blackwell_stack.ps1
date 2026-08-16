@@ -6,10 +6,12 @@ param(
     [string]$Distro = "",
     [string]$VllmVenv = "",
     [string]$VllmExecutable = "",
-    [Parameter(Mandatory = $true)]
-    [double]$DialogueGpuMemoryUtilization,
-    [Parameter(Mandatory = $true)]
-    [double]$AgentGpuMemoryUtilization,
+    [Parameter(Mandatory = $false)]
+    [double]$DialogueGpuMemoryUtilization = 0,
+    [Parameter(Mandatory = $false)]
+    [double]$AgentGpuMemoryUtilization = 0,
+    [Alias("Status")]
+    [switch]$VerifyOnly,
     [ValidateRange(1, 262144)]
     [int]$DialogueMaxModelLen = 8192,
     [ValidateRange(1, 262144)]
@@ -139,11 +141,15 @@ function Test-WslPrerequisites {
     }
     $script:WslStartScript = "$ProjectWslRoot/scripts/wsl/start_vllm_service.sh"
     $script:WslStopScript = "$ProjectWslRoot/scripts/wsl/stop_vllm_service.sh"
+    $script:WslStatusScript = "$ProjectWslRoot/scripts/wsl/status_vllm_service.sh"
+    $script:WslIdentityHelper = "$ProjectWslRoot/scripts/wsl/vllm_service_identity.sh"
     # These repository scripts are invoked explicitly through bash. A
     # Windows-mounted path may not present the executable bit, so only require
     # regular files here; the vLLM executable check remains strict below.
     [void](Invoke-WslChecked -Arguments @("test", "-f", $WslStartScript))
     [void](Invoke-WslChecked -Arguments @("test", "-f", $WslStopScript))
+    [void](Invoke-WslChecked -Arguments @("test", "-f", $WslStatusScript))
+    [void](Invoke-WslChecked -Arguments @("test", "-f", $WslIdentityHelper))
     $checkResult = Invoke-WslCapture -Arguments @(
         "bash", $WslStartScript, "--check-executable", "--vllm-executable", $VllmExecutable
     )
@@ -153,6 +159,9 @@ function Test-WslPrerequisites {
 }
 
 function Test-MemoryBudget {
+    if ($VerifyOnly) {
+        return
+    }
     if ($DialogueGpuMemoryUtilization -le 0 -or $DialogueGpuMemoryUtilization -ge 1) {
         throw "DialogueGpuMemoryUtilization must satisfy 0 < value < 1."
     }
@@ -164,24 +173,86 @@ function Test-MemoryBudget {
     }
 }
 
-function Get-EndpointProbe {
+function Test-TcpPort {
     param([Parameter(Mandatory = $true)][int]$Port)
+
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $task = $client.ConnectAsync("127.0.0.1", $Port)
+        if (-not $task.Wait(1000)) {
+            return $false
+        }
+        return $client.Connected
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Get-EndpointProbe {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$ExpectedModel = ""
+    )
 
     try {
         $payload = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 5
         $ids = @($payload.data | ForEach-Object { $_.id } | Where-Object { $_ })
-        return [pscustomobject]@{ Responding = $true; Models = $ids }
+        $status = if (-not [string]::IsNullOrWhiteSpace($ExpectedModel) -and $ids -notcontains $ExpectedModel) {
+            "ENDPOINT WRONG MODEL"
+        } else {
+            "ENDPOINT HEALTHY"
+        }
+        return [pscustomobject]@{
+            Status = $status
+            Responding = $true
+            Models = $ids
+            Detail = if ($status -eq "ENDPOINT WRONG MODEL") {
+                "Expected '$ExpectedModel'; server exposed '$($ids -join ', ')'"
+            } else {
+                "HTTP /v1/models responded"
+            }
+        }
     } catch {
-        return [pscustomobject]@{ Responding = $false; Models = @() }
+        if (Test-TcpPort -Port $Port) {
+            return [pscustomobject]@{
+                Status = "PORT LISTENING"
+                Responding = $false
+                Models = @()
+                Detail = "TCP listener present but /v1/models did not respond"
+            }
+        }
+        return [pscustomobject]@{
+            Status = "PORT FREE"
+            Responding = $false
+            Models = @()
+            Detail = "No loopback listener detected"
+        }
     }
+}
+
+function Get-WslServiceStatus {
+    param([Parameter(Mandatory = $true)][ValidatePattern("^[A-Za-z0-9_-]+$")][string]$ServiceName)
+
+    $result = Invoke-WslCapture -Arguments @("bash", $WslStatusScript, "--service-name", $ServiceName)
+    if ($result.ExitCode -ne 0) {
+        throw "Could not inspect WSL $ServiceName ownership: $($result.Output)"
+    }
+    $values = @{}
+    foreach ($line in ($result.Output -split "`r?`n")) {
+        if ($line -match "^(?<key>[^=]+)=(?<value>.*)$") {
+            $values[$Matches.key] = $Matches.value
+        }
+    }
+    return [pscustomobject]$values
 }
 
 function Test-WslServiceRunning {
     param([Parameter(Mandatory = $true)][ValidatePattern("^[A-Za-z0-9_-]+$")][string]$ServiceName)
 
-    $pidCheck = 'pid=$(cat ~/.voicechat/vllm/' + $ServiceName + '.pid 2>/dev/null || true); test -n "$pid" && kill -0 "$pid" 2>/dev/null'
-    $result = Invoke-WslCapture -Arguments @("bash", "-lc", $pidCheck)
-    return $result.ExitCode -eq 0
+    $status = Get-WslServiceStatus -ServiceName $ServiceName
+    return $status.state -eq "SERVICE_RUNNING"
 }
 
 function Start-WslService {
@@ -254,9 +325,15 @@ function Ensure-Service {
         }
         throw "Port $Port is occupied by a different model; refusing to kill or replace it."
     }
+    if ($probe.Status -eq "PORT LISTENING") {
+        throw "Port $Port is occupied by an unknown listener; refusing to kill or replace it."
+    }
 
-    $alreadyRunning = Test-WslServiceRunning -ServiceName $ServiceName
-    if (-not $alreadyRunning) {
+    $serviceStatus = Get-WslServiceStatus -ServiceName $ServiceName
+    if ($serviceStatus.state -eq "OWNERSHIP_MISMATCH") {
+        throw "Ownership mismatch for $ServiceName; refusing to replace its live PID."
+    }
+    if ($serviceStatus.state -ne "SERVICE_RUNNING") {
         Start-WslService -ServiceName $ServiceName -Model $ExpectedModel -Port $Port `
             -GpuMemoryUtilization $GpuMemoryUtilization -MaxModelLen $MaxModelLen
         [void]$startedServices.Add($ServiceName)
@@ -290,32 +367,71 @@ function Clear-MisleadingOverrides {
     }
 }
 
+function Invoke-Verify {
+    param([Parameter(Mandatory = $true)]$Contract)
+
+    $agentOwnership = Get-WslServiceStatus -ServiceName "agent"
+    $dialogueOwnership = Get-WslServiceStatus -ServiceName "dialogue"
+    $agentEndpoint = Get-EndpointProbe -Port $AgentPort -ExpectedModel $Contract.agent_model
+    $dialogueEndpoint = Get-EndpointProbe -Port $DialoguePort -ExpectedModel $Contract.dialogue_model
+    $report = [pscustomobject]@{
+        action = "VERIFY"
+        profile = $Contract.name
+        expected_agent_model = $Contract.agent_model
+        expected_dialogue_model = $Contract.dialogue_model
+        agent_port = $AgentPort
+        dialogue_port = $DialoguePort
+        agent_endpoint_status = $agentEndpoint.Status
+        dialogue_endpoint_status = $dialogueEndpoint.Status
+        agent_model_ids = $agentEndpoint.Models
+        dialogue_model_ids = $dialogueEndpoint.Models
+        agent_pid_state = $agentOwnership.state
+        dialogue_pid_state = $dialogueOwnership.state
+        agent_pid = $agentOwnership.pid
+        dialogue_pid = $dialogueOwnership.pid
+        agent_pid_detail = $agentOwnership.detail
+        dialogue_pid_detail = $dialogueOwnership.detail
+        gui = "NOT STARTED"
+        service_lifecycle_owner = "Windows launcher + WSL PID metadata"
+        manifest_source_of_truth = "DeploymentProfile"
+    }
+    $report | ConvertTo-Json -Depth 8
+    if ($agentEndpoint.Status -eq "ENDPOINT HEALTHY" -and $dialogueEndpoint.Status -eq "ENDPOINT HEALTHY") {
+        return 0
+    }
+    return 1
+}
+
 $exitCode = 0
 $applicationStarted = $false
 Push-Location $ProjectRoot
 try {
     $contract = Get-ProfileContract
     Test-ProfileContract -Contract $contract
-    Test-MemoryBudget
-    Clear-MisleadingOverrides
     Test-WslPrerequisites
+    if ($VerifyOnly) {
+        $exitCode = Invoke-Verify -Contract $contract
+    } else {
+        Test-MemoryBudget
+        Clear-MisleadingOverrides
 
-    Ensure-Service -ServiceName "agent" -ExpectedModel $contract.agent_model -Port $AgentPort `
-        -GpuMemoryUtilization $AgentGpuMemoryUtilization -MaxModelLen $AgentMaxModelLen
-    Ensure-Service -ServiceName "dialogue" -ExpectedModel $contract.dialogue_model -Port $DialoguePort `
-        -GpuMemoryUtilization $DialogueGpuMemoryUtilization -MaxModelLen $DialogueMaxModelLen
+        Ensure-Service -ServiceName "agent" -ExpectedModel $contract.agent_model -Port $AgentPort `
+            -GpuMemoryUtilization $AgentGpuMemoryUtilization -MaxModelLen $AgentMaxModelLen
+        Ensure-Service -ServiceName "dialogue" -ExpectedModel $contract.dialogue_model -Port $DialoguePort `
+            -GpuMemoryUtilization $DialogueGpuMemoryUtilization -MaxModelLen $DialogueMaxModelLen
 
-    $checkScript = Join-Path $ProjectRoot "scripts\check_config.py"
-    & $Python $checkScript
-    $checkExit = $LASTEXITCODE
-    if ($checkExit -ne 0) {
-        throw "Strict configuration preflight failed with exit code $checkExit."
+        $checkScript = Join-Path $ProjectRoot "scripts\check_config.py"
+        & $Python $checkScript
+        $checkExit = $LASTEXITCODE
+        if ($checkExit -ne 0) {
+            throw "Strict configuration preflight failed with exit code $checkExit."
+        }
+
+        Write-Host "Preflight passed; launching Windows PySide6 application."
+        $applicationStarted = $true
+        & $Python (Join-Path $ProjectRoot "main.py")
+        $exitCode = $LASTEXITCODE
     }
-
-    Write-Host "Preflight passed; launching Windows PySide6 application."
-    $applicationStarted = $true
-    & $Python (Join-Path $ProjectRoot "main.py")
-    $exitCode = $LASTEXITCODE
 } catch {
     Write-Error $_
     for ($index = $startedServices.Count - 1; $index -ge 0; $index--) {

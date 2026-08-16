@@ -99,6 +99,49 @@ awk -v value="$gpu_memory_utilization" 'BEGIN { exit !(value > 0 && value < 1) }
     exit 2
 }
 
+# shellcheck source=/dev/null
+source "$(dirname "$0")/vllm_service_identity.sh"
+set_service_context "$service_name"
+inspect_service_slot
+case "$service_state" in
+    SERVICE_RUNNING)
+        read_service_metadata || {
+            echo "Cannot prove ownership of existing $service_name process; refusing to reuse it." >&2
+            exit 1
+        }
+        if [[ "$metadata_model" != "$model" || "$metadata_port" != "$port" ]]; then
+            echo "Owned $service_name process does not match requested model/port; refusing to replace it." >&2
+            exit 1
+        fi
+        echo "$service_name service is already running with pid $service_pid"
+        exit 0
+        ;;
+    OWNERSHIP_MISMATCH)
+        echo "Ownership mismatch for $service_name; refusing to kill or replace the live process." >&2
+        exit 1
+        ;;
+    STALE_PID)
+        echo "Removing stale $service_name pid metadata before start." >&2
+        remove_service_metadata
+        ;;
+    NO_PID_FILE)
+        if service_port_is_listening "$port"; then
+            echo "Port $port is occupied without owned metadata; refusing to start an unknown owner." >&2
+            exit 1
+        else
+            port_check_status=$?
+            if (( port_check_status == 2 )); then
+                echo "Cannot inspect port $port because ss is unavailable; refusing to start without ownership evidence." >&2
+                exit 1
+            fi
+        fi
+        ;;
+    *)
+        echo "Unknown service state: $service_state" >&2
+        exit 1
+        ;;
+esac
+
 runtime_dir="${VOICECHAT_VLLM_RUNTIME_DIR:-$HOME/.voicechat/vllm}"
 mkdir -p "$runtime_dir"
 pid_file="$runtime_dir/$service_name.pid"
@@ -124,5 +167,14 @@ nohup bash -c 'exec "$@"' _ \
     --enable-prefix-caching \
     >"$log_file" 2>&1 < /dev/null &
 pid=$!
-echo "$pid" > "$pid_file"
+metadata_tmp="$(mktemp "$runtime_dir/$service_name.meta.tmp.XXXXXX")"
+cat > "$metadata_tmp" <<EOF
+service_name=$service_name
+pid=$pid
+model=$model
+port=$port
+vllm_executable=$vllm_executable
+EOF
+mv -f -- "$metadata_tmp" "$runtime_dir/$service_name.meta"
+printf '%s\n' "$pid" > "$pid_file"
 echo "Started $service_name service with pid $pid; log=$log_file"

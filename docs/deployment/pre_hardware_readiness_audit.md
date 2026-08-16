@@ -1,6 +1,6 @@
 # Pre-Hardware Deployment Readiness Audit
 
-Status: Batch 1 working-tree audit
+Status: Batch 2 implemented; pre-hardware audit remains open for later batches
 
 This audit records what can be completed without the target Windows 11
 workstation and what must remain a real-hardware acceptance task.  It does not
@@ -72,7 +72,7 @@ These capabilities existed only as separate pieces or had an operational gap:
 - Performance, memory, structured logging, error taxonomy, and end-to-end
   timing contracts are not yet unified into one operator artifact.
 
-## MISSING (implemented in Batch 1 working tree)
+## Batch 1 additions
 
 Batch 1 adds the narrowly scoped, read-only foundation:
 
@@ -89,12 +89,31 @@ Batch 1 adds the narrowly scoped, read-only foundation:
   `NOT RUN`, `SKIPPED`) and keeps `hardware_evidence` at `NOT RUN`; missing
   hardware is never converted into a false PASS.
 
-The following remain outside Batch 1 and are intentionally still missing:
+## Batch 2 additions
 
-- A consolidated operator service-lifecycle/verify-only mode beyond the
-  existing launcher.
-- Deployment and acceptance manifests, memory-budget snapshots, and a unified
-  performance/E2E timing collector.
+The existing Windows/WSL launcher was reviewed and retained as the sole
+operator lifecycle owner. Batch 2 added only the missing contract seams:
+
+- A read-only `-VerifyOnly`/`-Status` path in the existing Windows launcher.
+  It reports profile, endpoint, PID metadata, and exact model identity without
+  starting/stopping services or launching the GUI.
+- Shared WSL PID/metadata identity checks using service slot, model, port,
+  and `/proc/<pid>/cmdline` evidence. Stale PID metadata is removable only in
+  its own slot; ownership mismatches fail closed.
+- Unknown listeners and wrong endpoint models are reported without killing or
+  replacing an unknown process. Agent-before-dialogue startup and partial
+  cleanup of only newly started services remain unchanged.
+- Derived `deployment_manifest.json` and `acceptance_manifest.json` generation
+  through `scripts/deployment/manifest.py`. DeploymentProfile remains the
+  source of truth; manifests are configuration/acceptance artifacts only.
+- Deterministic lifecycle and manifest contract tests.
+
+The doctor, Phase 5 probe, and A/B harness remain observe/validate/compare
+tools. None owns service lifecycle.
+
+The following remain outside Batches 1–2 and are intentionally still missing:
+
+- Memory-budget snapshots and a unified performance/E2E timing collector.
 - Structured application logging and the cross-component error taxonomy.
 - Offline STT fixture, TTS fixture, production-chain dry-run, session-torture,
   scale, RAG, and report contract harnesses as one documented readiness gate.
@@ -129,5 +148,5 @@ started or stopped by the doctor.  No Blackwell performance, compatibility,
 Qwen3.8 promotion, or real deployment result is claimed.
 
 The next safe work, after reviewing this batch, is the separately scoped
-deployment-lifecycle/identity and manifest work.  It must remain observation
-and orchestration infrastructure and must not reopen the frozen architecture.
+performance/observability work.  It must remain measurement infrastructure and
+must not reopen the frozen architecture.
