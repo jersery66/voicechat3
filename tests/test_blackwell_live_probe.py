@@ -439,3 +439,89 @@ def test_probe_wsl_nvidia_smi_fallback_failure_is_probe_error(monkeypatch):
     with pytest.raises(support.ProbeError, match="GPU_QUERY_FAILED"):
         support.query_wsl_gpu(timeout_seconds=3)
     assert len(calls) == 2
+
+
+def _summary_raw_stream_evidence(leakage):
+    return {
+        "raw_stream_ttft_ms": 100.0,
+        "raw_stream_total_latency_ms": 500.0,
+        "raw_stream_completion_tokens": 4,
+        "raw_stream_output_tokens_per_second": 8.0,
+        "prompt_tokens": 5,
+        "completion_tokens": 4,
+        "leakage": leakage,
+        "content": "可见回复",
+        "raw_chunks": [{"visible": "raw chunk"}],
+    }
+
+
+def test_probe_summary_records_clean_raw_stream_as_pass():
+    summary = probe._summary_template("rtxpro6000_96g")
+    raw_stream = _summary_raw_stream_evidence(
+        {"thinking_markup": [], "reasoning_fields": {}, "control_tags": []}
+    )
+
+    probe._record_raw_stream_evidence(summary, raw_stream)
+
+    assert summary["raw_stream_acceptance_status"] == "PASS"
+    assert summary["raw_stream_ttft_ms"] == 100.0
+    assert summary["raw_stream_completion_tokens"] == 4
+    assert summary["reasoning_field_leak"] is False
+    assert summary["thinking_leak"] is False
+    assert summary["control_tag_leak"] is False
+
+
+@pytest.mark.parametrize(
+    ("leakage", "error_code", "flag"),
+    [
+        ({"thinking_markup": ["<think>"], "reasoning_fields": {}, "control_tags": []}, "THINKING_LEAK", "thinking_leak"),
+        ({"thinking_markup": [], "reasoning_fields": {"reasoning_content": 15}, "control_tags": []}, "REASONING_FIELD_LEAK", "reasoning_field_leak"),
+        ({"thinking_markup": [], "reasoning_fields": {}, "control_tags": ["[END_"]}, "CONTROL_TAG_LEAK", "control_tag_leak"),
+    ],
+)
+def test_probe_summary_preserves_failed_raw_stream_evidence(leakage, error_code, flag):
+    summary = probe._summary_template("rtxpro6000_96g")
+    raw_stream = _summary_raw_stream_evidence(leakage)
+    if error_code == "REASONING_FIELD_LEAK":
+        raw_stream["raw_chunks"] = [{"reasoning_content": "hidden reasoning"}]
+    elif error_code == "THINKING_LEAK":
+        raw_stream["content"] = "可见回复 <think>secret</think>"
+    else:
+        raw_stream["content"] = "可见回复 [END_SESSION]"
+
+    with pytest.raises(support.ProbeError, match=error_code):
+        probe._record_raw_stream_evidence(summary, raw_stream)
+
+    assert summary["overall_status"] == "FAIL"
+    assert summary["raw_stream_acceptance_status"] == "FAIL"
+    assert summary[flag] is True
+    assert "hidden reasoning" not in json.dumps(summary, ensure_ascii=False)
+
+
+def test_probe_summary_and_detail_use_same_raw_stream_failure_state():
+    summary = probe._summary_template("rtxpro6000_96g")
+    raw_stream = _summary_raw_stream_evidence(
+        {"thinking_markup": [], "reasoning_fields": {"reasoning_content": 15}, "control_tags": []}
+    )
+    raw_stream["raw_chunks"] = [{"reasoning_content": "hidden reasoning"}]
+
+    with pytest.raises(support.ProbeError):
+        probe._record_raw_stream_evidence(summary, raw_stream)
+
+    detail = {"raw_acceptance": {"status": summary["raw_stream_acceptance_status"]}}
+    assert detail["raw_acceptance"]["status"] == "FAIL"
+
+
+def test_probe_summary_marks_raw_nonstream_leak_as_ran_and_failed():
+    summary = probe._summary_template("rtxpro6000_96g")
+
+    with pytest.raises(support.ProbeError, match="REASONING_FIELD_LEAK"):
+        probe._record_raw_nonstream_evidence(
+            summary,
+            "可见回复",
+            {"reasoning_content": "hidden reasoning"},
+        )
+
+    assert summary["raw_nonstream_acceptance_status"] == "FAIL"
+    assert summary["raw_nonstream_reasoning_field_leak"] is True
+    assert "hidden reasoning" not in json.dumps(summary, ensure_ascii=False)

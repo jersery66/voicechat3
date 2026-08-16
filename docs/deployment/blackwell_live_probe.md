@@ -57,6 +57,11 @@ remain request-consistent. A WSL `nvidia-smi` command-not-found result is
 retried through `/usr/lib/wsl/lib/nvidia-smi`; no driver or WSL configuration
 is changed.
 
+Acceptance summaries copy raw-stream measurements and leakage flags before the
+hard-fail gate. If reasoning, thinking markup, or a control tag is detected,
+both `acceptance_summary.json` and `dialogue_stream.json` report the raw step
+as `FAIL`; the summary never falls back to `NOT RUN` or stores hidden text.
+
 The current acceptance contract rejects multiple visible NVIDIA GPUs rather
 than guessing GPU 0. It compares Windows and WSL GPU family and memory, but
 does not approve VRAM budgets or impose TTFT/throughput thresholds.
