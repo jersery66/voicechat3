@@ -17,7 +17,12 @@ class VLLMOpenAIClient:
 
     def __init__(self, *, model: str, base_url: str, api_key: str = "EMPTY",
                  timeout: float = 120.0, request_mode: str = "chat",
-                 system_role_mode: str = "native", max_tokens: int = 1024) -> None:
+                 system_role_mode: str = "native", max_tokens: int = 1024,
+                 dialogue_temperature: float = 0.35,
+                 dialogue_top_p: float = 0.8,
+                 dialogue_top_k: int | None = None,
+                 dialogue_presence_penalty: float | None = None,
+                 dialogue_enable_thinking: bool | None = None) -> None:
         if request_mode not in {"chat", "completion"}:
             raise ValueError(
                 "request_mode must be either 'chat' or 'completion', "
@@ -30,11 +35,22 @@ class VLLMOpenAIClient:
             )
         if max_tokens < 1:
             raise ValueError("max_tokens must be positive")
+        if dialogue_temperature < 0:
+            raise ValueError("dialogue_temperature must be non-negative")
+        if not 0 < dialogue_top_p <= 1:
+            raise ValueError("dialogue_top_p must be in (0, 1]")
+        if dialogue_top_k is not None and dialogue_top_k < 1:
+            raise ValueError("dialogue_top_k must be positive when provided")
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.request_mode = request_mode
         self.system_role_mode = system_role_mode
         self.max_tokens = max_tokens
+        self.dialogue_temperature = dialogue_temperature
+        self.dialogue_top_p = dialogue_top_p
+        self.dialogue_top_k = dialogue_top_k
+        self.dialogue_presence_penalty = dialogue_presence_penalty
+        self.dialogue_enable_thinking = dialogue_enable_thinking
         self._client = OpenAI(
             base_url=self.base_url,
             api_key=api_key,
@@ -108,6 +124,31 @@ class VLLMOpenAIClient:
             return configured
         return min(max(1, int(requested)), configured)
 
+    def _generation_options(self, requested_max_tokens: int | None = None) -> dict[str, Any]:
+        """Build one profile-scoped generation contract for both endpoints."""
+        options: dict[str, Any] = {
+            "temperature": getattr(self, "dialogue_temperature", 0.35),
+            "top_p": getattr(self, "dialogue_top_p", 0.8),
+            "max_tokens": self._max_tokens(requested_max_tokens),
+            "stop": ["User:", "Visitor:", "用户:", "来访者:", "Human:"],
+        }
+        presence_penalty = getattr(self, "dialogue_presence_penalty", None)
+        if presence_penalty is not None:
+            options["presence_penalty"] = presence_penalty
+
+        extra_body: dict[str, Any] = {}
+        top_k = getattr(self, "dialogue_top_k", None)
+        if top_k is not None:
+            extra_body["top_k"] = top_k
+        enable_thinking = getattr(self, "dialogue_enable_thinking", None)
+        if enable_thinking is not None:
+            extra_body["chat_template_kwargs"] = {
+                "enable_thinking": enable_thinking,
+            }
+        if extra_body:
+            options["extra_body"] = extra_body
+        return options
+
     def stream_reply(self, *, user_text: str, system_context: str = "") -> Iterator[str]:
         messages = []
         if system_context:
@@ -123,14 +164,14 @@ class VLLMOpenAIClient:
         reduce every request to only the most recent utterance.
         """
         if self._uses_completion_endpoint():
+            request = {
+                "model": self.model,
+                "prompt": self._completion_prompt(messages),
+                "stream": True,
+                **self._generation_options(),
+            }
             stream = self._client.completions.create(
-                model=self.model,
-                prompt=self._completion_prompt(messages),
-                stream=True,
-                temperature=0.35,
-                top_p=0.8,
-                max_tokens=self._max_tokens(),
-                stop=["User:", "Visitor:", "用户:", "来访者:", "Human:"],
+                **request,
             )
             for chunk in stream:
                 choices = self._field(chunk, "choices", []) or []
@@ -141,15 +182,13 @@ class VLLMOpenAIClient:
                     yield content
             return
 
-        stream = self._client.chat.completions.create(
-            model=self.model,
-            messages=self._prepare_chat_messages(messages),
-            stream=True,
-            temperature=0.35,
-            top_p=0.8,
-            max_tokens=self._max_tokens(),
-            stop=["User:", "Visitor:", "用户:", "来访者:", "Human:"],
-        )
+        request = {
+            "model": self.model,
+            "messages": self._prepare_chat_messages(messages),
+            "stream": True,
+            **self._generation_options(),
+        }
+        stream = self._client.chat.completions.create(**request)
         for chunk in stream:
             choices = self._field(chunk, "choices", []) or []
             if not choices:
@@ -163,29 +202,27 @@ class VLLMOpenAIClient:
                           max_tokens: int) -> str:
         """Return a short non-streaming completion without mutating dialogue state."""
         if self._uses_completion_endpoint():
+            request = {
+                "model": self.model,
+                "prompt": self._completion_prompt(messages),
+                "stream": False,
+                **self._generation_options(max_tokens),
+            }
             completion = self._client.completions.create(
-                model=self.model,
-                prompt=self._completion_prompt(messages),
-                stream=False,
-                temperature=0.35,
-                top_p=0.8,
-                max_tokens=self._max_tokens(max_tokens),
-                stop=["User:", "Visitor:", "用户:", "来访者:", "Human:"],
+                **request,
             )
             choices = self._field(completion, "choices", []) or []
             if not choices:
                 return ""
             return str(self._field(choices[0], "text", "") or "")
 
-        completion = self._client.chat.completions.create(
-            model=self.model,
-            messages=self._prepare_chat_messages(messages),
-            stream=False,
-            temperature=0.35,
-            top_p=0.8,
-            max_tokens=self._max_tokens(max_tokens),
-            stop=["User:", "Visitor:", "用户:", "来访者:", "Human:"],
-        )
+        request = {
+            "model": self.model,
+            "messages": self._prepare_chat_messages(messages),
+            "stream": False,
+            **self._generation_options(max_tokens),
+        }
+        completion = self._client.chat.completions.create(**request)
         choices = self._field(completion, "choices", []) or []
         if not choices:
             return ""

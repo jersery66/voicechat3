@@ -152,12 +152,17 @@ def build_llm_service(*, profile_name: str | None = None):
             model=models.dialogue,
             base_url=(
                 profile.dialogue_base_url
-                if profile.name == "a100_80g"
+                if profile.name in {"a100_80g", "a100_80g_qwen38_candidate"}
                 else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
             ),
             request_mode=profile.vllm_request_mode,
             system_role_mode=profile.vllm_system_role_mode,
             max_tokens=profile.dialogue_max_tokens,
+            dialogue_temperature=profile.dialogue_temperature,
+            dialogue_top_p=profile.dialogue_top_p,
+            dialogue_top_k=profile.dialogue_top_k,
+            dialogue_presence_penalty=profile.dialogue_presence_penalty,
+            dialogue_enable_thinking=profile.dialogue_enable_thinking,
         )
         return VLLMCompatibleLLMService(
             backend,

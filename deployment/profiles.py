@@ -29,6 +29,11 @@ class DeploymentProfile:
     vllm_system_role_mode: str = "native"
     dialogue_max_tokens: int = 1024
     system_prompt_override: Optional[str] = None
+    dialogue_temperature: float = 0.35
+    dialogue_top_p: float = 0.8
+    dialogue_top_k: Optional[int] = None
+    dialogue_presence_penalty: Optional[float] = None
+    dialogue_enable_thinking: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +91,27 @@ _PROFILES = {
             "production and retained under safety/ for later redesign."
         ),
     ),
+    "a100_80g_qwen38_candidate": DeploymentProfile(
+        name="a100_80g_qwen38_candidate",
+        expected_gpu_memory_gb=80,
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen3.8-27B-FP8",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        dialogue_temperature=0.7,
+        dialogue_top_p=0.8,
+        dialogue_top_k=20,
+        dialogue_presence_penalty=1.5,
+        dialogue_enable_thinking=False,
+        notes=(
+            "Explicit opt-in A100 dialogue candidate for Qwen/Qwen3.8-27B-FP8. "
+            "Uses vLLM non-thinking chat requests; real memory, latency, and "
+            "dialogue quality remain unvalidated."
+        ),
+    ),
 }
 
 
@@ -105,7 +131,7 @@ def resolve_runtime_models(profile: DeploymentProfile,
                             environment: Mapping[str, str] | None = None) -> RuntimeModels:
     """Resolve only explicit overrides; live server inventory never selects a model."""
     environment = os.environ if environment is None else environment
-    if profile.name == "a100_80g":
+    if profile.name in {"a100_80g", "a100_80g_qwen38_candidate"}:
         # Production uses the profile as an immutable deployment contract.
         # Dev-shell overrides must not silently point the desktop client at a
         # different model or re-enable an unbudgeted third vLLM service.
