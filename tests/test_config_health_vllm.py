@@ -40,6 +40,13 @@ def test_unavailable_a100_vllm_agent_blocks_production_readiness(monkeypatch):
     monkeypatch.setattr("config.AGENT_BACKEND", "vllm")
     monkeypatch.setattr("config.AGENT_MODEL", "agent-model")
     monkeypatch.setattr("config.AGENT_MODEL_SERVER", "http://agent:8001/v1")
-    monkeypatch.setattr(check_config, "get_deployment_profile", lambda: type("Profile", (), {"name": "a100_80g"})())
+    monkeypatch.setattr(
+        check_config,
+        "get_deployment_profile",
+        lambda: type("Profile", (), {
+            "name": "a100_80g",
+            "strict_preflight": True,
+        })(),
+    )
 
     assert check_config.check_agent_backend() is False

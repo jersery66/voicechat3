@@ -7,8 +7,8 @@ relaxation media before the main UI starts.
 IMPORTANT: this is a *diagnostic*. Development profiles return False only when
 a critical dependency fails (dialogue backend unreachable, data root not
 writable); their launcher may still continue for troubleshooting. The
-``a100_80g`` production profile additionally requires its 3B Agent endpoint,
-because the production startup script treats a failed check as a hard stop.
+Profiles with ``strict_preflight`` additionally require their configured 3B
+Agent endpoint, because their startup path treats a failed check as a hard stop.
 Offline-only converted knowledge corpora and relaxation videos remain warnings.
 
 Usage:
@@ -116,8 +116,9 @@ def _check_openai_compatible_model(label: str, base_url: str,
 
 
 def check_agent_backend() -> bool:
-    """Check the Agent endpoint, enforcing it for the production A100 profile."""
+    """Check the Agent endpoint, enforcing strict profiles."""
     from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER
+    profile = get_deployment_profile()
 
     if AGENT_BACKEND == "ollama":
         available = _check_openai_compatible_model("Agent Ollama", AGENT_MODEL_SERVER, AGENT_MODEL)
@@ -126,8 +127,8 @@ def check_agent_backend() -> bool:
     else:
         available = _fail("Agent Backend", f"unsupported backend: {AGENT_BACKEND}")
     if not available:
-        if get_deployment_profile().name == "a100_80g":
-            return _fail("Agent", "required by the a100_80g production profile")
+        if profile.strict_preflight:
+            return _fail("Agent", f"required by the {profile.name} strict preflight profile")
         _warn("Agent", "unavailable; deterministic keyword routing remains active")
     return True
 

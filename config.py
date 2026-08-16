@@ -334,7 +334,7 @@ RUNTIME_MODELS = _RUNTIME_MODELS
 DIALOGUE_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
 DIALOGUE_BASE_URL = (
     _DEPLOYMENT_PROFILE.dialogue_base_url
-    if _DEPLOYMENT_PROFILE.name in {"a100_80g", "a100_80g_qwen38_candidate"}
+    if _DEPLOYMENT_PROFILE.immutable_runtime_contract
     else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", _DEPLOYMENT_PROFILE.dialogue_base_url)
 )
 OLLAMA_MODEL = _RUNTIME_MODELS.dialogue
@@ -570,7 +570,7 @@ AGENT_MODEL = _RUNTIME_MODELS.router
 AGENT_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
 AGENT_MODEL_SERVER = (
     _DEPLOYMENT_PROFILE.agent_base_url
-    if _DEPLOYMENT_PROFILE.name in {"a100_80g", "a100_80g_qwen38_candidate"}
+    if _DEPLOYMENT_PROFILE.immutable_runtime_contract
     else os.environ.get("VOICECHAT_AGENT_BASE_URL", _DEPLOYMENT_PROFILE.agent_base_url)
 )
 AGENT_API_KEY = 'EMPTY'

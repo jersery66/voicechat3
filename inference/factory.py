@@ -21,7 +21,7 @@ def build_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
         return None
     base_url = (
         profile.dialogue_base_url
-        if profile.name in {"a100_80g", "a100_80g_qwen38_candidate"}
+        if profile.immutable_runtime_contract
         else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
     )
     return VLLMOpenAIClient(

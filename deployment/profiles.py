@@ -34,6 +34,8 @@ class DeploymentProfile:
     dialogue_top_k: Optional[int] = None
     dialogue_presence_penalty: Optional[float] = None
     dialogue_enable_thinking: Optional[bool] = None
+    immutable_runtime_contract: bool = False
+    strict_preflight: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,8 @@ _PROFILES = {
         agent_model="qwen2.5:3b",
         agent_base_url="http://localhost:11434/v1",
         enable_streaming_tts=False,
+        immutable_runtime_contract=False,
+        strict_preflight=False,
         notes="Local UI and smoke-test profile; it is not a production capacity target.",
     ),
     "dev_vllm_6g": DeploymentProfile(
@@ -67,6 +71,8 @@ _PROFILES = {
         agent_model="qwen2.5:3b",
         agent_base_url="http://127.0.0.1:18001/v1",
         enable_streaming_tts=False,
+        immutable_runtime_contract=False,
+        strict_preflight=False,
         vllm_request_mode="completion",
         dialogue_max_tokens=96,
         system_prompt_override="Reply briefly and directly to the user.",
@@ -85,6 +91,8 @@ _PROFILES = {
         agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
         agent_base_url="http://127.0.0.1:8001/v1",
         enable_streaming_tts=True,
+        immutable_runtime_contract=True,
+        strict_preflight=True,
         notes=(
             "Single A100 80GB profile. Qwen2.5 72B AWQ dialogue and a 3B "
             "Agent run behind vLLM. The crisis/Guard path is detached from "
@@ -101,6 +109,8 @@ _PROFILES = {
         agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
         agent_base_url="http://127.0.0.1:8001/v1",
         enable_streaming_tts=True,
+        immutable_runtime_contract=True,
+        strict_preflight=True,
         dialogue_temperature=0.7,
         dialogue_top_p=0.8,
         dialogue_top_k=20,
@@ -131,7 +141,7 @@ def resolve_runtime_models(profile: DeploymentProfile,
                             environment: Mapping[str, str] | None = None) -> RuntimeModels:
     """Resolve only explicit overrides; live server inventory never selects a model."""
     environment = os.environ if environment is None else environment
-    if profile.name in {"a100_80g", "a100_80g_qwen38_candidate"}:
+    if profile.immutable_runtime_contract:
         # Production uses the profile as an immutable deployment contract.
         # Dev-shell overrides must not silently point the desktop client at a
         # different model or re-enable an unbudgeted third vLLM service.

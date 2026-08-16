@@ -152,7 +152,7 @@ def build_llm_service(*, profile_name: str | None = None):
             model=models.dialogue,
             base_url=(
                 profile.dialogue_base_url
-                if profile.name in {"a100_80g", "a100_80g_qwen38_candidate"}
+                if profile.immutable_runtime_contract
                 else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
             ),
             request_mode=profile.vllm_request_mode,
