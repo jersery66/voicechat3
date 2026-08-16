@@ -122,6 +122,55 @@ _PROFILES = {
             "dialogue quality remain unvalidated."
         ),
     ),
+    "rtxpro6000_96g": DeploymentProfile(
+        name="rtxpro6000_96g",
+        expected_gpu_memory_gb=96,
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen2.5-72B-Instruct-AWQ",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        vllm_request_mode="chat",
+        vllm_system_role_mode="native",
+        dialogue_max_tokens=1024,
+        notes=(
+            "Target Windows workstation profile for an assumed RTX PRO 6000 "
+            "Blackwell 96GB GPU. Qwen2.5-72B AWQ dialogue and Qwen2.5-3B "
+            "Agent are exposed through local vLLM endpoints. Hardware, WSL2 "
+            "runtime, memory budget, and latency remain unvalidated."
+        ),
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+    ),
+    "rtxpro6000_96g_qwen38_candidate": DeploymentProfile(
+        name="rtxpro6000_96g_qwen38_candidate",
+        expected_gpu_memory_gb=96,
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen3.8-27B-FP8",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        vllm_request_mode="chat",
+        vllm_system_role_mode="native",
+        dialogue_max_tokens=1024,
+        dialogue_temperature=0.7,
+        dialogue_top_p=0.8,
+        dialogue_top_k=20,
+        dialogue_presence_penalty=1.5,
+        dialogue_enable_thinking=False,
+        notes=(
+            "Explicit opt-in RTX PRO 6000 Blackwell 96GB dialogue candidate "
+            "using Qwen/Qwen3.8-27B-FP8 in non-thinking mode. Production "
+            "promotion, real VRAM, latency, and dialogue quality remain "
+            "unvalidated."
+        ),
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+    ),
 }
 
 
