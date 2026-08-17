@@ -194,51 +194,414 @@ TTS 播放；专业判断和危机处置仍由机构流程与合格专业人员�
 
 ### 🏗️ 3. 系统架构
 
-#### 3.1 总体架构
+本系统采用“**观察与决策分离、业务状态单一写入、语言生成无控制权、输出按 generation 隔离**”的架构。
 
-```mermaid
-flowchart TD
-    A[🎤 用户语音 / 文本输入] --> B[📝 STT 转写 FunASR]
-    B --> B2[🔤 ASR 纠错]
-    B2 --> C[⚙️ ConversationPipeline]
-    C --> D[🔎 AgentObservation]
-    D --> D2[🧭 RouterProposal<br/>仅提供建议]
-    C --> S[🧩 deterministic TurnSignals]
-    D2 --> E[⚖️ TurnPolicy]
-    S --> E
-    E --> F[✅ 唯一 TurnDecision]
-    F --> G[📊 ScaleRuntime / SessionEngine 执行]
-    F --> R{needs_rag?}
-    R -->|是| H[📚 curated production RAG]
-    R -->|否| I[🧩 对话上下文]
-    G --> I
-    H --> I
-    I --> J[💬 Dialogue LLM 语言实现<br/>(vLLM)]
-    J --> K[🛡️ PreDeliveryGuard]
-    K --> K2[📝 句子交付与标准化]
-    K2 --> L[🔊 TTS / UI / 历史记录]
-    G --> M[📋 量表结果 / 会话事件]
-    M --> N[📄 报告生成]
-    N --> O[💾 JSON + PDF 报告]
-```
+系统中的大语言模型不直接启动量表、不直接修改量表进度、不直接结束会话，也不直接决定是否执行具体放松训练。每轮输入首先被转换为只读观察信息，再由确定性的 `TurnPolicy` 生成唯一的 `TurnDecision`。随后，各状态拥有者只执行该决定中属于自身职责的部分。
 
 ---
 
-#### 3.2 会话状态机
+#### 3.1 架构分层
+
+系统运行链可以分为七个相互隔离的层次：
+
+```mermaid
+flowchart TB
+
+    subgraph INPUT["① 输入层 Input"]
+        U["🎤 用户语音 / ⌨️ 文本"]
+        VAD["FSMN-VAD<br/>语音端点检测"]
+        ASR["Fun-ASR-Nano-2512<br/>语音识别"]
+        SEM["输入语义完整性检查<br/>否定 / 频率 / 时长 / 数量等"]
+        CLEAN["受限 ASR 后处理<br/>不改写症状语义"]
+
+        U --> VAD
+        VAD --> ASR
+        ASR --> SEM
+        SEM --> CLEAN
+    end
+
+    subgraph OBS["② 观察层 Observation"]
+        AO["AgentObservation"]
+        RP["RouterProposal<br/>模型建议，不可执行"]
+        TS["TurnSignals<br/>确定性本地信号"]
+        SNAP["TurnStateSnapshot<br/>当前只读状态"]
+
+        AO --> RP
+    end
+
+    subgraph AUTH["③ 决策层 Authority"]
+        TP["⚖️ TurnPolicy<br/>单轮唯一业务裁决"]
+        TD["✅ TurnDecision<br/>唯一可执行决定"]
+
+        RP --> TP
+        TS --> TP
+        SNAP --> TP
+        TP --> TD
+    end
+
+    subgraph STATE["④ 状态执行层 State Owners"]
+        SAI["ScaleAnswerInterpreter<br/>解释当前量表回答"]
+        SR["📋 ScaleRuntime<br/>量表状态唯一写入者"]
+        SE["🔄 SessionEngine<br/>会话生命周期唯一写入者"]
+
+        TD --> SAI
+        SAI --> SR
+        TD --> SR
+        TD --> SE
+    end
+
+    subgraph CONTEXT["⑤ 上下文构建层 Context"]
+        RAG{"TurnDecision.needs_rag?"}
+        KB["📚 Curated RAG"]
+        DC["Decision / Scale Context"]
+        ET["EmotionTracker<br/>仅提供语言风格建议"]
+        CTX["最终语言上下文"]
+
+        TD --> RAG
+        RAG -->|true| KB
+        KB --> CTX
+        TD --> DC
+        DC --> CTX
+        ET --> CTX
+    end
+
+    subgraph LANGUAGE["⑥ 语言生成层 Language"]
+        LLM["💬 Dialogue LLM<br/>只负责语言实现"]
+        CTX --> LLM
+    end
+
+    subgraph DELIVERY["⑦ 交付层 Delivery"]
+        GC["GenerationController<br/>generation 身份 / 取消"]
+        SS["SentenceSegmenter<br/>流式句子切分"]
+        PG["🛡️ PreDeliveryGuard"]
+        DQ["SentenceDeliveryQueue"]
+        UI["🖥️ UI"]
+        TTS["🔊 VoxCPM2"]
+        HIST["💾 Delivered History"]
+
+        LLM --> GC
+        GC --> SS
+        SS --> PG
+        PG --> DQ
+        DQ --> UI
+        DQ --> TTS
+        DQ --> HIST
+    end
+
+    CLEAN --> AO
+    CLEAN --> TS
+    SR -.只读快照.-> SNAP
+    SE -.只读快照.-> SNAP
+    SR --> DC
+```
+
+这一结构中的关键原则是：
+
+* Agent 只能提供观察与建议，不能执行行为；
+* 本地规则产生的 `TurnSignals` 同样只是观察，不直接改变状态；
+* `TurnPolicy` 每轮只生成一个不可变的 `TurnDecision`；
+* `ScaleRuntime` 是量表题目、答案、评分、暂停、恢复和完成状态的唯一写入者；
+* `SessionEngine` 是会话生命周期的唯一写入者；
+* `TurnDecision.needs_rag` 是生产环境唯一的 RAG 检索门；
+* Dialogue LLM 只负责把已经确定的业务意图表达成自然语言；
+* EmotionTracker 只能调整回应节奏、反映性倾听等语言风格，不能授权具体干预；
+* UI、TTS、历史记录和报告层不能反向改变业务决策。
+
+---
+
+#### 3.2 单轮对话执行流程
+
+一次普通用户输入并不是直接交给大模型，而是经过“**观察 → 决策 → 状态提交 → 语言生成 → 安全交付**”五个阶段。
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant STT as STT / Input
+    participant A as Agent
+    participant P as TurnPolicy
+    participant S as ScaleRuntime
+    participant E as SessionEngine
+    participant R as RAG
+    participant L as Dialogue LLM
+    participant G as PreDeliveryGuard
+    participant D as Delivery / TTS / UI
+
+    U->>STT: 语音或文本输入
+    STT->>STT: 语义完整性检查
+
+    STT->>A: 当前输入 + 最近上下文
+    A-->>P: AgentObservation / RouterProposal
+
+    STT-->>P: deterministic TurnSignals
+    S-->>P: ScaleRuntimeSnapshot
+    E-->>P: SessionLifecycleSnapshot
+
+    P->>P: 单次确定性裁决
+    P-->>S: TurnDecision
+    P-->>E: TurnDecision
+
+    alt 当前为量表回答
+        S->>S: ScaleAnswerInterpreter
+        S->>S: accept / clarify / pause
+        Note over S: 业务状态先提交
+    end
+
+    alt TurnDecision.needs_rag = true
+        P->>R: 允许检索
+        R-->>L: curated context
+    end
+
+    P-->>L: 决策语言上下文
+    S-->>L: 当前量表语义上下文
+
+    L->>D: streaming generation
+    D->>G: stable sentence
+
+    alt Guard ALLOW
+        G-->>D: 允许交付
+        D-->>U: UI + TTS
+    else Guard BLOCK
+        G-->>D: 阻止 / deterministic fallback
+        D-->>U: 安全替代文本
+    end
+```
+
+这里有一个重要的顺序约束：
+
+```text
+TurnDecision
+    ↓
+ScaleAnswerInterpreter
+    ↓
+ScaleRuntime business commit
+    ↓
+构建语言上下文
+    ↓
+Dialogue LLM
+    ↓
+PreDeliveryGuard
+    ↓
+UI / TTS
+```
+
+已经被确认的量表回答不会依赖后续 LLM 是否成功生成，也不会因为用户打断 TTS 或新的 generation 开始而被回滚。
+
+---
+
+#### 3.3 单轮业务决策边界
+
+`TurnPolicy` 接收三类只读输入：
+
+```text
+RouterProposal
++
+TurnSignals
++
+TurnStateSnapshot
+        ↓
+    TurnPolicy
+        ↓
+ ONE TurnDecision
+```
+
+**RouterProposal** 由 Agent 产生，可建议 `CHAT`、`START_SCALE`、
+`RECOMMEND_RELAXATION`、`RECOMMEND_GAME` 或 `END_SESSION`，但没有直接执行权。
+例如 Agent 建议 `START_SCALE → PHQ-9`，仍必须经过轮次限制、置信度、完成状态和确定性候选冲突等 `TurnPolicy` 规则。
+
+**TurnSignals** 由本地确定性逻辑产生，包括明确结束/放松/小游戏请求、active scale 暂停或拒答、deterministic scale candidate、proactive relaxation candidate 和 ASR 关键语义歧义。这些信号同样没有执行权。
+
+**TurnDecision** 是每轮唯一可以进入执行层的业务决定：
+
+```text
+CHAT
+CLARIFY_INPUT
+START_SCALE
+CONTINUE_SCALE
+PAUSE_SCALE
+RECOMMEND_RELAXATION
+RECOMMEND_GAME
+END_SESSION
+```
+
+任何 Router、Agent、EmotionTracker 或 LLM 输出都不能绕过这一边界直接产生业务状态变化。
+
+---
+
+#### 3.4 量表状态架构
+
+量表管理和会话生命周期是两个独立状态域。`ScaleRuntime` 是 PHQ-9、GAD-7、PCL-5 等结构化评估状态的唯一所有者。
+
+```mermaid
+stateDiagram-v2
+    [*] --> INACTIVE
+    INACTIVE --> WAITING: TurnDecision.START_SCALE
+    WAITING --> WAITING: ambiguous / clarification
+    WAITING --> NEXT_ITEM: accepted answer
+    NEXT_ITEM --> WAITING: first unanswered item
+    WAITING --> PAUSED: TurnDecision.PAUSE_SCALE
+    PAUSED --> WAITING: resume
+    NEXT_ITEM --> COMPLETED: no unanswered items
+    COMPLETED --> INACTIVE
+```
+
+Runtime 自己决定实际的下一道未回答题目。外部模块不能指定“下一题必须是 Q5”，只能要求 `START_SCALE`、`CONTINUE_SCALE` 或 `PAUSE_SCALE`。具体题号由 `ScaleRuntime` 根据已经提交的答案计算，避免暂停、放松、中断或旧异步任务造成跳题和重复评分。
+
+---
+
+#### 3.5 会话生命周期架构
+
+`SessionEngine` 与 `ScaleRuntime` 相互独立。`SessionEngine` 只负责会话开始、正常聊天、放松训练生命周期、媒体播放、会话结束、时间限制和下一位参与者准备，不负责量表题号和评分。
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> CHATTING: ✅ 确认参与者信息
-    CHATTING --> RELAXATION_RECOMMENDED: 🧘 TurnDecision 授权放松
-    RELAXATION_RECOMMENDED --> VIDEO_PLAYING: ▶️ 用户点击训练
-    VIDEO_PLAYING --> POST_RELAXATION: ⏹️ 视频结束
-    POST_RELAXATION --> CHATTING: 💬 继续聊天
-    POST_RELAXATION --> SESSION_ENDING: 🏁 结束会话
-    CHATTING --> SESSION_ENDING: 🛑 主动结束 / 时间到
-    SESSION_ENDING --> SESSION_ENDED: 📄 报告生成完成
-    SESSION_ENDED --> IDLE: 🔄 准备下一位参与者
+    IDLE --> CHATTING: StartSession
+    CHATTING --> RELAXATION_RECOMMENDED: authorized recommendation
+    RELAXATION_RECOMMENDED --> CHATTING: continue without training
+    CHATTING --> VIDEO_PLAYING: authorized / explicit training
+    RELAXATION_RECOMMENDED --> VIDEO_PLAYING: PlayRelaxation
+    VIDEO_PLAYING --> POST_RELAXATION: media finished
+    POST_RELAXATION --> CHATTING: ContinueChat
+    CHATTING --> SESSION_ENDING: approved EndSession
+    RELAXATION_RECOMMENDED --> SESSION_ENDING: approved EndSession
+    POST_RELAXATION --> SESSION_ENDING: approved EndSession
+    VIDEO_PLAYING --> VIDEO_PLAYING: end request deferred
+    SESSION_ENDING --> SESSION_ENDED: reports finalized
+    SESSION_ENDED --> IDLE: PrepareNextSubject
 ```
+
+如果用户在放松媒体播放期间要求结束，会话结束请求被延迟到媒体生命周期安全结束，而不是由 UI 或 LLM 自行修改状态。
+
+---
+
+#### 3.6 输出交付与中断架构
+
+语言生成完成并不等于内容已经交付给用户。系统对每一次 assistant response 分配独立的 `generation_id`：
+
+```text
+Dialogue LLM stream
+        ↓
+GenerationController
+        ↓
+SentenceSegmenter
+        ↓
+PreDeliveryGuard
+        ↓
+SentenceDeliveryQueue
+        ↓
+┌──────────┬──────────┬────────────┐
+│    UI    │ VoxCPM2  │   History  │
+└──────────┴──────────┴────────────┘
+```
+
+当用户在 AI 说话期间开始新一轮输入时，旧 generation 被取消，新的 generation 成为 current。旧 generation 的未交付文本和未播放语音不能继续进入新的对话。
+
+`PreDeliveryGuard` 位于真正的 UI/TTS 交付之前，用于阻止内部控制标签、thinking/legacy protocol、内部策略泄漏、量表名称或评分措辞泄漏以及超过单轮主要问题预算。Guard 不重新进行业务决策，也不修改 `TurnDecision` 或任何 Runtime 状态。
+
+---
+
+#### 3.7 RAG 与语言模型边界
+
+RAG 不是 Agent 或 Dialogue LLM 可以自行调用的能力。唯一入口为：
+
+```text
+TurnDecision.needs_rag == true
+```
+
+只有满足该条件时，Pipeline 才会读取 curated production knowledge base，并将结果作为只读语言上下文提供给 Dialogue LLM。`START_SCALE`、`CONTINUE_SCALE`、`PAUSE_SCALE` 和 `RECOMMEND_RELAXATION` 等结构化流程不会因为模型自行判断“需要知识”而额外触发检索。
+
+Dialogue LLM 最终只负责支持性回应、自然化量表问法、澄清措辞、经过授权的放松建议措辞和结束语等语言实现，不拥有业务状态。
+
+---
+
+#### 3.8 组件权限边界
+
+| 组件 | 主要职责 | 是否可修改业务状态 |
+|---|---|---|
+| FSMN-VAD | 判断语音端点 | ❌ |
+| FunASR | 语音转文字 | ❌ |
+| Input semantics | 检查关键语义歧义 | ❌ |
+| AgentObservation | 一次结构化模型观察 | ❌ |
+| RouterProposal | 提供业务建议 | ❌ |
+| TurnSignals | 本地确定性观察 | ❌ |
+| TurnPolicy | 生成唯一 TurnDecision | **✅ 决策权，但自身不写状态** |
+| ScaleAnswerInterpreter | 将自然回答解释为结构化候选分数 | ❌ |
+| ScaleRuntime | 量表状态、答案和进度 | **✅ 仅量表域** |
+| SessionEngine | 会话生命周期 | **✅ 仅会话域** |
+| RAG | 提供知识上下文 | ❌ |
+| EmotionTracker | 调整语言风格 | ❌ |
+| Dialogue LLM | 自然语言实现 | ❌ |
+| PreDeliveryGuard | 输出准入检查 | ❌ |
+| GenerationController | generation / cancellation | **✅ 仅交付域** |
+| UI | 显示与提交用户操作 | ❌ |
+| Data / Report | 数据持久化、结果输出 | ❌ |
+
+---
+
+#### 3.9 目标部署拓扑
+
+目标生产验证环境为 Windows 11 + WSL2 + RTX PRO 6000 Blackwell 96GB：
+
+```mermaid
+flowchart LR
+    subgraph WIN["Windows 11"]
+        UI["PySide6 UI"]
+        PIPE["ConversationPipeline"]
+        POLICY["TurnPolicy"]
+        SCALE["ScaleRuntime"]
+        SESSION["SessionEngine"]
+        STT["FunASR + FSMN-VAD"]
+        RAG["Local RAG"]
+        TTS["VoxCPM2"]
+        DATA["Data / Report"]
+        DELIVERY["Delivery Runtime"]
+    end
+    subgraph WSL["WSL2"]
+        AGENT["Qwen2.5-3B-Instruct-AWQ<br/>vLLM :8001"]
+        DIALOG["Dialogue Model<br/>vLLM :8000"]
+    end
+    subgraph GPU["RTX PRO 6000 Blackwell 96GB"]
+        VRAM["Shared GPU resources"]
+    end
+    STT --> PIPE
+    PIPE --> AGENT
+    PIPE --> POLICY
+    POLICY --> SCALE
+    POLICY --> SESSION
+    POLICY --> RAG
+    PIPE --> DIALOG
+    DIALOG --> DELIVERY
+    DELIVERY --> TTS
+    DELIVERY --> UI
+    SCALE --> DATA
+    SESSION --> DATA
+    AGENT --- VRAM
+    DIALOG --- VRAM
+    STT --- VRAM
+    TTS --- VRAM
+```
+
+Windows 侧负责 UI、业务规则、TurnPolicy、ScaleRuntime、SessionEngine、RAG、STT/VAD、TTS、Delivery、数据与报告；WSL2 侧仅承担 vLLM 模型服务。Baseline 与 candidate 在真实 A/B 验证中分别启动，不把尚未验证的 candidate 视为生产模型。
+
+---
+
+#### 3.10 数据与报告边界
+
+数据层不是业务决策层。系统保存的信息主要来自已经发生的事件和已经提交的状态：
+
+```text
+用户原始输入 / 音频 → 转写文本
+实际已交付 assistant 文本 → 对话记录
+ScaleRuntime → 逐题答案 / 总分 / 完成状态
+SessionEngine → 会话生命周期事件
+Relaxation Runtime → 训练完成记录
+                    ↓
+             DataManager / ReportService
+                    ↓
+             JSON / PDF / research artifacts
+```
+
+报告模块只读取已经提交的结构化事实，不允许重新解释量表答案或改变 Runtime 状态。软件测试通过只说明离线架构契约成立；RTX PRO 6000、WSL CUDA、真实 vLLM、VRAM 共存、STT/TTS 和完整 E2E 性能仍需目标工作站产生 `MEASURED` 证据后才能确认。
 
 ---
 
@@ -745,50 +1108,393 @@ All participant data saved locally by date and ID:
 
 ### 🏗️ 3. Architecture
 
-#### 3.1 System Architecture
-
-```mermaid
-flowchart TD
-    A[🎤 User voice / text input] --> B[📝 STT - FunASR]
-    B --> C[⚙️ ConversationPipeline]
-    C --> D[🔎 AgentObservation]
-    D --> D2[🧭 RouterProposal<br/>advisory only]
-    C --> S[🧩 deterministic TurnSignals]
-    D2 --> E[⚖️ TurnPolicy]
-    S --> E
-    E --> F[✅ Exactly one TurnDecision]
-    F --> G[📊 ScaleRuntime / SessionEngine execution]
-    F --> R{needs_rag?}
-    R -->|yes| H[📚 Curated production RAG]
-    R -->|no| I[🧩 Conversation context]
-    G --> I
-    H --> I
-    I --> J[💬 Dialogue LLM language realization<br/>(vLLM)]
-    J --> K[🛡️ PreDeliveryGuard]
-    K --> K2[📝 Sentence delivery + normalization]
-    K2 --> L[🔊 TTS / UI / history]
-    G --> M[📋 Scale results / session events]
-    M --> N[📄 Report generation]
-    N --> O[💾 JSON + PDF reports]
-```
+The system separates **observation from decisions, business-state writers,
+language realization, and generation-scoped delivery**. No model directly
+starts a scale, changes scale progress, ends a session, or authorizes a
+concrete relaxation exercise. Each turn becomes read-only observations first;
+deterministic `TurnPolicy` then creates the one executable `TurnDecision`.
 
 ---
 
-#### 3.2 Session State Machine
+#### 3.1 Architectural layers
+
+```mermaid
+flowchart TB
+    subgraph INPUT["① Input"]
+        U["🎤 Voice / ⌨️ text"]
+        VAD["FSMN-VAD<br/>endpoint detection"]
+        ASR["Fun-ASR-Nano-2512<br/>speech recognition"]
+        SEM["Input semantic integrity<br/>negation / frequency / duration / quantity"]
+        CLEAN["Restricted ASR post-processing<br/>does not rewrite symptom meaning"]
+        U --> VAD
+        VAD --> ASR
+        ASR --> SEM
+        SEM --> CLEAN
+    end
+    subgraph OBS["② Observation"]
+        AO["AgentObservation"]
+        RP["RouterProposal<br/>model suggestion, not executable"]
+        TS["TurnSignals<br/>deterministic local signals"]
+        SNAP["TurnStateSnapshot<br/>read-only state"]
+        AO --> RP
+    end
+    subgraph AUTH["③ Authority"]
+        TP["⚖️ TurnPolicy<br/>sole per-turn arbiter"]
+        TD["✅ TurnDecision<br/>one executable decision"]
+        RP --> TP
+        TS --> TP
+        SNAP --> TP
+        TP --> TD
+    end
+    subgraph STATE["④ State owners"]
+        SAI["ScaleAnswerInterpreter<br/>interpret current answer"]
+        SR["📋 ScaleRuntime<br/>sole scale-state writer"]
+        SE["🔄 SessionEngine<br/>sole session-lifecycle writer"]
+        TD --> SAI
+        SAI --> SR
+        TD --> SR
+        TD --> SE
+    end
+    subgraph CONTEXT["⑤ Context construction"]
+        RAG{"TurnDecision.needs_rag?"}
+        KB["📚 Curated RAG"]
+        DC["Decision / scale context"]
+        ET["EmotionTracker<br/>style guidance only"]
+        CTX["Final language context"]
+        TD --> RAG
+        RAG -->|true| KB
+        KB --> CTX
+        TD --> DC
+        DC --> CTX
+        ET --> CTX
+    end
+    subgraph LANGUAGE["⑥ Language"]
+        LLM["💬 Dialogue LLM<br/>language realization only"]
+        CTX --> LLM
+    end
+    subgraph DELIVERY["⑦ Delivery"]
+        GC["GenerationController<br/>generation identity / cancellation"]
+        SS["SentenceSegmenter<br/>streaming sentence boundaries"]
+        PG["🛡️ PreDeliveryGuard"]
+        DQ["SentenceDeliveryQueue"]
+        UI["🖥️ UI"]
+        TTS["🔊 VoxCPM2"]
+        HIST["💾 Delivered history"]
+        LLM --> GC
+        GC --> SS
+        SS --> PG
+        PG --> DQ
+        DQ --> UI
+        DQ --> TTS
+        DQ --> HIST
+    end
+    CLEAN --> AO
+    CLEAN --> TS
+    SR -.read-only snapshot.-> SNAP
+    SE -.read-only snapshot.-> SNAP
+    SR --> DC
+```
+
+The architectural invariants are:
+
+* Agent output and local `TurnSignals` are observations, never actions;
+* `TurnPolicy` produces one immutable `TurnDecision` per turn;
+* `ScaleRuntime` alone writes scale questions, answers, scores, pause, resume,
+  and completion state;
+* `SessionEngine` alone writes session lifecycle state;
+* `TurnDecision.needs_rag` is the only production RAG gate;
+* Dialogue LLM only expresses already-authorized intent in natural language;
+* EmotionTracker can adjust style, but cannot authorize an exercise;
+* UI, TTS, history, and reports cannot change business decisions.
+
+---
+
+#### 3.2 One-turn execution sequence
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant STT as STT / Input
+    participant A as Agent
+    participant P as TurnPolicy
+    participant S as ScaleRuntime
+    participant E as SessionEngine
+    participant R as RAG
+    participant L as Dialogue LLM
+    participant G as PreDeliveryGuard
+    participant D as Delivery / TTS / UI
+    U->>STT: voice or text input
+    STT->>STT: semantic integrity check
+    STT->>A: input + recent context
+    A-->>P: AgentObservation / RouterProposal
+    STT-->>P: deterministic TurnSignals
+    S-->>P: ScaleRuntimeSnapshot
+    E-->>P: SessionLifecycleSnapshot
+    P->>P: deterministic decision once
+    P-->>S: TurnDecision
+    P-->>E: TurnDecision
+    alt current turn is a scale answer
+        S->>S: ScaleAnswerInterpreter
+        S->>S: accept / clarify / pause
+        Note over S: commit business state first
+    end
+    alt TurnDecision.needs_rag = true
+        P->>R: authorized retrieval
+        R-->>L: curated context
+    end
+    P-->>L: decision language context
+    S-->>L: current scale semantic context
+    L->>D: streaming generation
+    D->>G: stable sentence
+    alt Guard ALLOW
+        G-->>D: admit delivery
+        D-->>U: UI + TTS
+    else Guard BLOCK
+        G-->>D: block / deterministic fallback
+        D-->>U: safe replacement text
+    end
+```
+
+The ordering contract is:
+
+```text
+TurnDecision
+    ↓
+ScaleAnswerInterpreter
+    ↓
+ScaleRuntime business commit
+    ↓
+Build language context
+    ↓
+Dialogue LLM
+    ↓
+PreDeliveryGuard
+    ↓
+UI / TTS
+```
+
+An accepted scale answer therefore does not depend on later LLM completion and
+is not rolled back by TTS interruption or a newer generation.
+
+---
+
+#### 3.3 Per-turn decision boundary
+
+```text
+RouterProposal + TurnSignals + TurnStateSnapshot
+                         ↓
+                    TurnPolicy
+                         ↓
+                  ONE TurnDecision
+```
+
+`RouterProposal` may suggest `CHAT`, `START_SCALE`,
+`RECOMMEND_RELAXATION`, `RECOMMEND_GAME`, or `END_SESSION`, but it has no
+execution authority. A `START_SCALE → PHQ-9` suggestion still passes turn,
+confidence, completion, and deterministic-conflict rules.
+
+`TurnSignals` are deterministic facts such as explicit end/relaxation/game
+requests, active-scale pause/refusal, deterministic scale candidates,
+proactive relaxation candidates, and critical ASR ambiguity. They also have no
+execution authority.
+
+The only executable per-turn vocabulary is:
+
+```text
+CHAT / CLARIFY_INPUT / START_SCALE / CONTINUE_SCALE
+PAUSE_SCALE / RECOMMEND_RELAXATION / RECOMMEND_GAME / END_SESSION
+```
+
+No Router, Agent, EmotionTracker, or LLM output may bypass this boundary to
+change business state.
+
+---
+
+#### 3.4 Scale state architecture
+
+Scale administration and session lifecycle are separate state domains.
+`ScaleRuntime` is the sole owner of PHQ-9, GAD-7, PCL-5, and other structured
+assessment state.
+
+```mermaid
+stateDiagram-v2
+    [*] --> INACTIVE
+    INACTIVE --> WAITING: TurnDecision.START_SCALE
+    WAITING --> WAITING: ambiguous / clarification
+    WAITING --> NEXT_ITEM: accepted answer
+    NEXT_ITEM --> WAITING: first unanswered item
+    WAITING --> PAUSED: TurnDecision.PAUSE_SCALE
+    PAUSED --> WAITING: resume
+    NEXT_ITEM --> COMPLETED: no unanswered items
+    COMPLETED --> INACTIVE
+```
+
+Runtime derives the first unanswered item itself. External modules can request
+`START_SCALE`, `CONTINUE_SCALE`, or `PAUSE_SCALE`, but cannot dictate “the next
+item must be Q5.” This prevents skips and duplicate scoring after interruption,
+relaxation, or stale asynchronous work.
+
+---
+
+#### 3.5 Session lifecycle architecture
+
+`SessionEngine` and `ScaleRuntime` are independent. SessionEngine owns session
+start, ordinary chat, relaxation/media lifecycle, end, time limits, and
+preparing the next participant; it does not own scale item numbers or scores.
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> CHATTING: ✅ Confirm participant info
-    CHATTING --> RELAXATION_RECOMMENDED: 🧘 TurnDecision approves relaxation
-    RELAXATION_RECOMMENDED --> VIDEO_PLAYING: ▶️ User starts training
-    VIDEO_PLAYING --> POST_RELAXATION: ⏹️ Video ends
-    POST_RELAXATION --> CHATTING: 💬 Continue chatting
-    POST_RELAXATION --> SESSION_ENDING: 🏁 End session
-    CHATTING --> SESSION_ENDING: 🛑 Manual end / time limit
-    SESSION_ENDING --> SESSION_ENDED: 📄 Reports generated
-    SESSION_ENDED --> IDLE: 🔄 Prepare for next participant
+    IDLE --> CHATTING: StartSession
+    CHATTING --> RELAXATION_RECOMMENDED: authorized recommendation
+    RELAXATION_RECOMMENDED --> CHATTING: continue without training
+    CHATTING --> VIDEO_PLAYING: authorized / explicit training
+    RELAXATION_RECOMMENDED --> VIDEO_PLAYING: PlayRelaxation
+    VIDEO_PLAYING --> POST_RELAXATION: media finished
+    POST_RELAXATION --> CHATTING: ContinueChat
+    CHATTING --> SESSION_ENDING: approved EndSession
+    RELAXATION_RECOMMENDED --> SESSION_ENDING: approved EndSession
+    POST_RELAXATION --> SESSION_ENDING: approved EndSession
+    VIDEO_PLAYING --> VIDEO_PLAYING: end request deferred
+    SESSION_ENDING --> SESSION_ENDED: reports finalized
+    SESSION_ENDED --> IDLE: PrepareNextSubject
 ```
+
+An end request during media playback is deferred until the media lifecycle is
+safe; UI and LLM do not mutate session state directly.
+
+---
+
+#### 3.6 Output delivery and interruption
+
+LLM completion is not the same as user delivery. Every assistant response gets
+an independent `generation_id`:
+
+```text
+Dialogue LLM stream → GenerationController → SentenceSegmenter
+                   → PreDeliveryGuard → SentenceDeliveryQueue
+                   → UI / VoxCPM2 / Delivered History
+```
+
+When a new user turn starts during playback, the old generation is cancelled
+and the new generation becomes current. Undelivered old text and stale audio
+cannot re-enter the new conversation. `PreDeliveryGuard` blocks internal
+control tags, thinking/legacy protocol, strategy leakage, scale/score wording,
+and excessive question budgets without changing any business owner.
+
+---
+
+#### 3.7 RAG and language-model boundary
+
+RAG is not an ability that Agent or Dialogue LLM may invoke themselves. The
+only entry is:
+
+```text
+TurnDecision.needs_rag == true
+```
+
+Only then does Pipeline read the curated knowledge base and provide read-only
+context to Dialogue LLM. Structured flows such as scale administration or
+authorized relaxation do not trigger retrieval merely because a model thinks
+knowledge would be useful. Dialogue LLM only produces supportive language,
+natural scale wording, clarification, authorized exercise wording, and
+farewell language; it owns no business state.
+
+---
+
+#### 3.8 Component permission matrix
+
+| Component | Primary responsibility | May modify business state |
+|---|---|---|
+| FSMN-VAD | speech endpoint detection | ❌ |
+| FunASR | speech-to-text | ❌ |
+| Input semantics | critical ambiguity checks | ❌ |
+| AgentObservation | one structured model observation | ❌ |
+| RouterProposal | business suggestion | ❌ |
+| TurnSignals | deterministic local observation | ❌ |
+| TurnPolicy | produce the one decision | **✅ decision authority, no state writes** |
+| ScaleAnswerInterpreter | interpret a natural scale answer | ❌ |
+| ScaleRuntime | scale state, answers, progress | **✅ scale domain only** |
+| SessionEngine | session lifecycle | **✅ session domain only** |
+| RAG | read-only knowledge context | ❌ |
+| EmotionTracker | response style | ❌ |
+| Dialogue LLM | language realization | ❌ |
+| PreDeliveryGuard | output admission | ❌ |
+| GenerationController | generation / cancellation | **✅ delivery domain only** |
+| UI | display and user commands | ❌ |
+| Data / Report | persistence and output | ❌ |
+
+---
+
+#### 3.9 Target deployment topology
+
+```mermaid
+flowchart LR
+    subgraph WIN["Windows 11"]
+        UI["PySide6 UI"]
+        PIPE["ConversationPipeline"]
+        POLICY["TurnPolicy"]
+        SCALE["ScaleRuntime"]
+        SESSION["SessionEngine"]
+        STT["FunASR + FSMN-VAD"]
+        RAG["Local RAG"]
+        TTS["VoxCPM2"]
+        DATA["Data / Report"]
+        DELIVERY["Delivery Runtime"]
+    end
+    subgraph WSL["WSL2"]
+        AGENT["Qwen2.5-3B-Instruct-AWQ<br/>vLLM :8001"]
+        DIALOG["Dialogue Model<br/>vLLM :8000"]
+    end
+    subgraph GPU["RTX PRO 6000 Blackwell 96GB"]
+        VRAM["Shared GPU resources"]
+    end
+    STT --> PIPE
+    PIPE --> AGENT
+    PIPE --> POLICY
+    POLICY --> SCALE
+    POLICY --> SESSION
+    POLICY --> RAG
+    PIPE --> DIALOG
+    DIALOG --> DELIVERY
+    DELIVERY --> TTS
+    DELIVERY --> UI
+    SCALE --> DATA
+    SESSION --> DATA
+    AGENT --- VRAM
+    DIALOG --- VRAM
+    STT --- VRAM
+    TTS --- VRAM
+```
+
+Windows owns UI, business rules, TurnPolicy, ScaleRuntime, SessionEngine, RAG,
+STT/VAD, TTS, delivery, data, and reports. WSL2 only hosts vLLM services.
+Baseline and candidate are started separately during real A/B validation; an
+unvalidated candidate is never treated as production.
+
+---
+
+#### 3.10 Data and report boundary
+
+The data layer is not a decision layer. It records committed facts:
+
+```text
+User input / audio → transcript
+Actually delivered assistant text → conversation history
+ScaleRuntime → item answers / totals / completion
+SessionEngine → lifecycle events
+Relaxation Runtime → completion record
+                         ↓
+                  DataManager / ReportService
+                         ↓
+                  JSON / PDF / research artifacts
+```
+
+Reports read committed structured facts; they do not reinterpret scale answers
+or mutate Runtime state. Passing offline software contracts only establishes
+the architecture contract. RTX PRO 6000, WSL CUDA, real vLLM, VRAM
+coexistence, STT/TTS, and full E2E performance still require `MEASURED`
+evidence from the target workstation.
 
 ---
 
