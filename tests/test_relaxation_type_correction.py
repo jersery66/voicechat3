@@ -23,6 +23,31 @@ def test_historical_relaxation_mentions_are_not_requests():
         assert detect_explicit_relaxation_request(text) == (False, None)
 
 
+def test_historical_and_evaluative_typed_mentions_are_not_requests():
+    for text in (
+        "我以前做过呼吸练习",
+        "呼吸练习对我没什么用",
+        "我之前试过肌肉放松",
+        "肌肉放松我做过",
+        "这个冥想练习以前试过",
+        "老师以前让我做过呼吸训练",
+    ):
+        assert detect_explicit_relaxation_request(text) == (False, None)
+
+
+def test_request_like_typed_phrases_remain_requests():
+    assert detect_explicit_relaxation_request("我想做呼吸练习") == (True, "breathing")
+    assert detect_explicit_relaxation_request("我想试试肌肉放松") == (True, "muscle")
+    assert detect_explicit_relaxation_request("做个冥想吧") == (True, "meditation")
+    assert detect_explicit_relaxation_request("我想放松一下") == (True, None)
+
+
+def test_legacy_standalone_commands_remain_explicit_requests():
+    assert detect_explicit_relaxation_request("想放松") == (True, None)
+    assert detect_explicit_relaxation_request("做冥想") == (True, "meditation")
+    assert detect_explicit_relaxation_request("做放松训练") == (True, None)
+
+
 def test_user_explicit_type_overrides_agent_proposal():
     signals = collect_turn_signals("我想做冥想", TurnStateSnapshot(round_count=1))
     decision = TurnPolicy().decide(

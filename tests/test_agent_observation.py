@@ -145,3 +145,103 @@ def test_production_agent_observe_turn_projects_one_route_response():
     assert observation.intent == "counseling"
     assert observation.proposal.emotion == "sad"
     assert observation.proposal.needs_rag is False
+
+
+def test_internal_route_failure_projects_keyword_emotion_in_fallback():
+    from services.agent_service import AgentService
+
+    service = AgentService.__new__(AgentService)
+    calls = {"route": 0, "intent": 0, "emotion": 0}
+
+    def route(**_kwargs):
+        calls["route"] += 1
+        return {"fallback_used": True, "reason": "route failed"}
+
+    def keyword_intent(_text):
+        calls["intent"] += 1
+        return {"intent": "counseling", "confidence": 1.0}
+
+    def keyword_emotion(_text):
+        calls["emotion"] += 1
+        return {"emotion": "anxious", "intensity": 0.8, "keywords": ["焦虑"]}
+
+    service.route_conversation_actions = route
+    service._keyword_classify = keyword_intent
+    service._keyword_detect_emotion = keyword_emotion
+
+    observation = service.observe_turn(user_text="我现在特别焦虑，心里很慌")
+
+    assert calls == {"route": 1, "intent": 1, "emotion": 1}
+    assert observation.fallback_used is True
+    assert observation.source == "deterministic_fallback"
+    assert observation.intent == "counseling"
+    assert observation.proposal.action is RouterAction.CHAT
+    assert observation.proposal.emotion == "anxious"
+    assert observation.proposal.intensity == 0.8
+    assert observation.proposal.needs_rag is False
+
+
+def test_internal_route_failure_does_not_retry_secondary_agent_calls():
+    from services.agent_service import AgentService
+
+    service = AgentService.__new__(AgentService)
+    service.route_conversation_actions = lambda **_kwargs: {"fallback_used": True}
+    service._keyword_classify = lambda _text: {"intent": "counseling"}
+    service._keyword_detect_emotion = lambda _text: {
+        "emotion": "anxious",
+        "intensity": 0.8,
+    }
+    service._call_json = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("fallback must not issue a secondary model call")
+    )
+
+    observation = service.observe_turn(user_text="我现在特别焦虑")
+
+    assert observation.proposal.emotion == "anxious"
+    assert observation.proposal.intensity == 0.8
+
+
+def test_actual_route_exception_uses_one_model_attempt_then_local_observation():
+    from services.agent_service import AgentService
+
+    class BrokenCompletions:
+        calls = 0
+
+        def create(self, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("synthetic route outage")
+
+    class Client:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": BrokenCompletions()})()
+
+    service = AgentService.__new__(AgentService)
+    service.client = Client()
+    service.model = "synthetic-agent"
+
+    observation = service.observe_turn(user_text="我现在特别焦虑")
+
+    assert service.client.chat.completions.calls == 1
+    assert observation.fallback_used is True
+    assert observation.proposal.emotion == "anxious"
+    assert observation.proposal.intensity == 0.75
+
+
+def test_agent_unavailable_path_projects_the_same_keyword_emotion():
+    from services.agent_service import AgentService
+
+    agent = AgentService.__new__(AgentService)
+    agent.is_available = lambda: False
+    pipeline = _pipeline(agent)
+    try:
+        result = pipeline.execute(
+            PipelineConfig(user_text="我现在特别焦虑，心里很慌"),
+            lambda *_: None,
+        )
+        assert result.agent_observation.fallback_used is True
+        assert result.agent_observation.source == "deterministic_fallback"
+        assert result.agent_observation.proposal.action is RouterAction.CHAT
+        assert result.emotion_result == {"emotion": "anxious", "intensity": 0.75}
+        assert result.turn_decision.action is TurnAction.CHAT
+    finally:
+        pipeline.shutdown()

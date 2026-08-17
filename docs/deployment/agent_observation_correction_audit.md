@@ -39,3 +39,22 @@ Correction B will add only an immutable observation contract, explicit
 relaxation type facts, and deterministic candidate conflict resolution. It
 will not modify SessionEngine, ScaleRuntime, PreDeliveryGuard, providers,
 profiles, prompts, or Correction A semantics.
+
+## B.1 closure audit
+
+Correction B.1 keeps the same authority boundaries while closing two fallback
+edges.  An internal `route_conversation_actions()` failure now projects both
+keyword intent and keyword emotion/intensity into the same deterministic,
+non-executable `CHAT` observation used when the Agent is unavailable.  No
+secondary model request is issued.
+
+Relaxation detection now requires a short request marker immediately before a
+typed or generic technique phrase, with a small explicit set of standalone
+commands.  Historical, evaluative, and completed-practice mentions remain
+passive observations and cannot become `RECOMMEND_RELAXATION` signals.
+
+The deterministic scale candidate remains bounded by construction: pipeline
+symptom candidates are selected from the registered scale manager keys, and
+the optional hard trigger delegates to the same internal registered-scale
+detector.  No external/untrusted candidate source is used by production
+pipeline wiring; no additional validation layer was added in B.1.

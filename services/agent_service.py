@@ -32,7 +32,7 @@ from config import (
     INTENT_SCENE_MAP,
 )
 from conversation.agent_observation import AgentObservation
-from conversation.contracts import RouterProposal
+from conversation.contracts import RouterAction, RouterProposal
 
 logger = get_logger(__name__)
 
@@ -668,18 +668,47 @@ class AgentService:
         legacy = self.route_conversation_actions(**kwargs)
         return RouterProposal.from_legacy_route(legacy)
 
+    def _deterministic_observation_fallback(
+        self,
+        user_text: str,
+        *,
+        reason: str = "agent_observation_fallback",
+    ) -> AgentObservation:
+        """Project the same local observations for every route failure path.
+
+        This helper is deliberately limited to the existing keyword
+        observers.  It never retries the model and the resulting proposal is
+        still a non-executable CHAT observation for TurnPolicy.
+        """
+        keyword_intent = self._keyword_classify(user_text)
+        keyword_emotion = self._keyword_detect_emotion(user_text)
+        intent = str(keyword_intent.get("intent", "counseling") or "counseling")
+        emotion = str(keyword_emotion.get("emotion", "neutral") or "neutral")
+        try:
+            intensity = float(keyword_emotion.get("intensity", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            intensity = 0.0
+        intensity = max(0.0, min(1.0, intensity))
+        return AgentObservation(
+            proposal=RouterProposal(
+                action=RouterAction.CHAT,
+                emotion=emotion,
+                intensity=intensity,
+                confidence=0.0,
+                reason=reason,
+                needs_rag=False,
+            ),
+            intent=intent,
+            fallback_used=True,
+            source="deterministic_fallback",
+        )
+
     def observe_turn(self, **kwargs) -> AgentObservation:
         """Perform one structured ordinary-turn request and project observations."""
         legacy = self.route_conversation_actions(**kwargs)
         if bool(legacy.get("fallback_used")):
             user_text = str(kwargs.get("user_text", ""))
-            keyword_intent = self._keyword_classify(user_text).get("intent", "counseling")
-            return AgentObservation(
-                proposal=RouterProposal.fallback("agent_observation_fallback"),
-                intent=str(keyword_intent),
-                fallback_used=True,
-                source="deterministic_fallback",
-            )
+            return self._deterministic_observation_fallback(user_text)
         proposal = RouterProposal.from_legacy_route(legacy)
         intent = str(legacy.get("intent", "counseling") or "counseling")
         if intent not in {"counseling", "entertainment", "chitchat", "relaxation"}:
