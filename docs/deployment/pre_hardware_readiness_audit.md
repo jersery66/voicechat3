@@ -212,3 +212,34 @@ REAL PERFORMANCE:           NOT RUN
 REAL VRAM:                  NOT RUN
 REAL E2E:                   NOT RUN
 ```
+
+## Batch 4 offline integration
+
+Batch 4 adds the first full offline integration layer using real production
+authority components with synthetic/fake external providers:
+
+- The performance summary correction now reports `MEASURED` when measured
+  samples exist; it never calls data availability `PASS` because no threshold
+  is defined.
+- STT fixture tests exercise final-text handoff only.  They do not claim
+  Fun-ASR accuracy or run a microphone.
+- TTS fixture tests drive the existing generation-scoped
+  `SentenceDeliveryQueue`, cancellation, stale rejection, and playback result
+  boundary.  They do not claim VoxCPM2 audio quality or GPU behavior.
+- Dry-run scenarios use the real `ConversationPipeline`, `TurnPolicy`,
+  `ScaleRuntime`, `DeliveryLedger`, and generation controller with fake Agent,
+  dialogue, RAG, TTS, data, and report seams.
+- Session, scale, RAG, and delivered-report/data-source contracts are covered
+  without introducing a second business runtime or authority writer.
+- `scripts/acceptance/offline_integration.py` writes a synthetic evidence gate
+  artifact and keeps hardware/real-provider fields `NOT RUN`.
+
+Batch 4 status:
+
+```text
+OFFLINE INTEGRATION IMPLEMENTED: pending final gate run
+REAL STT:                        NOT RUN
+REAL TTS:                        NOT RUN
+REAL E2E:                        NOT RUN
+REAL HARDWARE:                   NOT RUN
+```

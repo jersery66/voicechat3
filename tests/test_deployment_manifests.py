@@ -51,6 +51,7 @@ def test_manifests_contain_no_measured_hardware_result():
     assert deployment["measured_vram"] == "NOT DECLARED"
     assert deployment["measured_latency"] == "NOT DECLARED"
     assert acceptance["offline_readiness"]["status"] == "NOT RUN"
+    assert acceptance["offline_integration_readiness"] == {"status": "NOT RUN", "evidence_reference": None}
     assert all(value["status"] == "NOT RUN" for value in acceptance["checks"].values())
     assert acceptance["promotion"]["status"] == "NOT APPROVED"
     assert acceptance["promotion_status"] == "NOT APPROVED"

@@ -76,4 +76,5 @@ the target workstation supplies measured evidence.
 
 `build_performance_summary()` includes only `SUCCESS` + `MEASURED` samples in
 the real-performance aggregate.  It never compares baseline/candidate or
-emits a winner/promotion decision.
+emits a winner/promotion decision.  When samples exist its status is
+`MEASURED`, not `PASS`; this layer defines no performance thresholds.

@@ -174,6 +174,7 @@ def build_acceptance_manifest(
         "dialogue_model": profile.dialogue_model,
         "agent_model": profile.agent_model,
         "offline_readiness": {"status": "NOT RUN"},
+        "offline_integration_readiness": {"status": "NOT RUN", "evidence_reference": None},
         **{name: {"status": status} for name, status in ACCEPTANCE_STATES.items()},
         "checks": {name: {"status": status} for name, status in ACCEPTANCE_STATES.items()},
         "measurement_evidence_slots": dict(MEASUREMENT_EVIDENCE_SLOTS),
