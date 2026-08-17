@@ -242,12 +242,14 @@ flowchart TB
     subgraph STATE["④ 状态执行层 State Owners"]
         SAI["ScaleAnswerInterpreter<br/>解释当前量表回答"]
         SR["📋 ScaleRuntime<br/>量表状态唯一写入者"]
+        CMD["Session command / coordinator"]
         SE["🔄 SessionEngine<br/>会话生命周期唯一写入者"]
 
         TD --> SAI
         SAI --> SR
         TD --> SR
-        TD --> SE
+        TD --> CMD
+        CMD --> SE
     end
 
     subgraph CONTEXT["⑤ 上下文构建层 Context"]
@@ -319,6 +321,7 @@ sequenceDiagram
     participant STT as STT / Input
     participant A as Agent
     participant P as TurnPolicy
+    participant I as ScaleAnswerInterpreter
     participant S as ScaleRuntime
     participant E as SessionEngine
     participant R as RAG
@@ -338,11 +341,12 @@ sequenceDiagram
 
     P->>P: 单次确定性裁决
     P-->>S: TurnDecision
-    P-->>E: TurnDecision
+    P-->>E: 生命周期命令
 
-    alt 当前为量表回答
-        S->>S: ScaleAnswerInterpreter
-        S->>S: accept / clarify / pause
+    alt 当前为 active scale 回答
+        STT->>I: user_text + scale/item
+        I-->>S: accepted score / ambiguous / refusal
+        S->>S: accept_answer / request_clarification / pause
         Note over S: 业务状态先提交
     end
 
@@ -389,6 +393,10 @@ UI / TTS
 ---
 
 #### 3.3 单轮业务决策边界
+
+`ConversationPipeline` 负责组织上述阶段的调用顺序和数据传递，但不拥有独立业务决策权；它必须执行已经形成的 `TurnDecision`，不能在执行阶段重新选择另一业务动作。
+
+对 `SessionEngine` 而言，`TurnDecision` 会先转换为生命周期命令，再提交给 single-writer engine；图中的箭头表示授权来源，不表示 `TurnPolicy` 直接写入 SessionEngine 内部状态。
 
 `TurnPolicy` 接收三类只读输入：
 
@@ -1149,11 +1157,13 @@ flowchart TB
     subgraph STATE["④ State owners"]
         SAI["ScaleAnswerInterpreter<br/>interpret current answer"]
         SR["📋 ScaleRuntime<br/>sole scale-state writer"]
+        CMD["Session command / coordinator"]
         SE["🔄 SessionEngine<br/>sole session-lifecycle writer"]
         TD --> SAI
         SAI --> SR
         TD --> SR
-        TD --> SE
+        TD --> CMD
+        CMD --> SE
     end
     subgraph CONTEXT["⑤ Context construction"]
         RAG{"TurnDecision.needs_rag?"}
@@ -1217,6 +1227,7 @@ sequenceDiagram
     participant STT as STT / Input
     participant A as Agent
     participant P as TurnPolicy
+    participant I as ScaleAnswerInterpreter
     participant S as ScaleRuntime
     participant E as SessionEngine
     participant R as RAG
@@ -1232,10 +1243,11 @@ sequenceDiagram
     E-->>P: SessionLifecycleSnapshot
     P->>P: deterministic decision once
     P-->>S: TurnDecision
-    P-->>E: TurnDecision
-    alt current turn is a scale answer
-        S->>S: ScaleAnswerInterpreter
-        S->>S: accept / clarify / pause
+    P-->>E: lifecycle command
+    alt current turn is an active-scale answer
+        STT->>I: user_text + scale/item
+        I-->>S: accepted score / ambiguous / refusal
+        S->>S: accept_answer / request_clarification / pause
         Note over S: commit business state first
     end
     alt TurnDecision.needs_rag = true
@@ -1279,6 +1291,15 @@ is not rolled back by TTS interruption or a newer generation.
 ---
 
 #### 3.3 Per-turn decision boundary
+
+`ConversationPipeline` orchestrates the call order and data transfer across
+these stages, but it is not an independent business authority. It must execute
+the formed `TurnDecision`; it cannot select a different business action during
+the execution phase.
+
+For `SessionEngine`, a `TurnDecision` is converted into a lifecycle command and
+submitted to the single-writer engine. The diagram shows the authority source,
+not a direct write from `TurnPolicy` into SessionEngine internals.
 
 ```text
 RouterProposal + TurnSignals + TurnStateSnapshot
