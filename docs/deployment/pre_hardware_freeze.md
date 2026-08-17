@@ -1,8 +1,9 @@
 # Pre-Hardware final freeze
 
 This document is the final software-readiness boundary for the current
-repository. The exact commit is the commit containing this document; verify it
-with `git rev-parse HEAD` before deployment.
+repository. The final documentation/tooling commit is
+`83e48184e304150a380c7fcac44b21064a565779`. Verify it with
+`git rev-parse HEAD` before deployment.
 
 ```text
 PRE-HARDWARE DEVELOPMENT: COMPLETE
@@ -18,7 +19,7 @@ QWEN3.8 PROMOTION:        NOT APPROVED
 
 The approved baseline before Batch 5 finalization was
 `6b626aec9813906b7a844cead058743f0aea56cc`. The final freeze commit is
-recorded in the release inventory and in the final readiness artifact.
+recorded here and in the release inventory/final readiness artifact.
 
 No further deterministic Batch or Phase 8 is created by this freeze. The next
 authorized activity is target-workstation installation and evidence-backed
