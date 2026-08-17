@@ -10,14 +10,17 @@ or capacity statement not backed by a target-machine artifact is
 
 ```powershell
 git fetch origin
-git checkout codex/a100-vllm-safety
+git checkout --detach pre-hardware-corrected-20260817
 git status --short
 git rev-parse HEAD
-git rev-parse pre-hardware-freeze-20260817
+git rev-parse "pre-hardware-corrected-20260817^{commit}"
 ```
 
-The working tree must be clean and the tag commit must equal `HEAD`. Do not
-reset or merge an unknown checkout automatically.
+The working tree must be clean and `HEAD` must equal the corrected candidate
+tag (`e4de593321a6334099971ac5a0d26c9141c419b4`). The original
+`pre-hardware-freeze-20260817` tag is historical and must not be moved or used
+for the workstation run. Do not reset or merge an unknown checkout
+automatically.
 
 ## 2. Windows and NVIDIA preparation
 

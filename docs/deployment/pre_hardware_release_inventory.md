@@ -7,7 +7,9 @@ acceptance. It is not a hardware result.
 
 - Branch: `codex/a100-vllm-safety`
 - Pre-hardware starting baseline: `6b626aec9813906b7a844cead058743f0aea56cc`
-- Final freeze identity: Git tag `pre-hardware-freeze-20260817`
+- Original freeze identity: Git tag `pre-hardware-freeze-20260817` (historical)
+- Corrected workstation candidate: Git tag `pre-hardware-corrected-20260817`
+  pointing to `e4de593321a6334099971ac5a0d26c9141c419b4`
 - Functional Batch 5 content commit: `83e48184e304150a380c7fcac44b21064a565779`
 - Baseline profile: `rtxpro6000_96g`
 - Candidate profile: `rtxpro6000_96g_qwen38_candidate`
@@ -34,6 +36,9 @@ acceptance. It is not a hardware result.
 - Final gate: `scripts/deployment/final_readiness.py`
 - Phase 5 probe: `scripts/acceptance/blackwell_live_probe.py`
 - A/B harness: `scripts/acceptance/qwen_dialogue_ab.py`
+- Real-machine preflight: `scripts/real_hardware_preflight.py`
+- Real-machine smoke wrapper: `scripts/real_hardware_smoke.py`
+- Validation package: `deployment/real_hardware_validation/README.md`
 - Operator runbook: `rtxpro6000_operator_runbook.md`
 - First-machine checklist: `first_machine_checklist.md`
 - Switch/recovery/troubleshooting/map documents in this directory
