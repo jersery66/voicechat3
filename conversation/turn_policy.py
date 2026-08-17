@@ -74,6 +74,19 @@ class TurnPolicy:
                 reason="user_relaxation_request",
             )
 
+        # Critical transcript ambiguity is an observation, not an action. The
+        # policy owns the decision to ask for clarification. Active-scale
+        # turns remain CONTINUE_SCALE so ScaleAnswerInterpreter can clarify
+        # the current Runtime-owned item without bypassing the scale flow.
+        if signals.semantic_ambiguity and not snapshot.active_scale:
+            return TurnDecision(
+                action=TurnAction.CLARIFY_INPUT,
+                semantic_target=signals.semantic_target,
+                confidence=1.0,
+                reason=signals.semantic_reason or "critical_input_ambiguity",
+                needs_rag=False,
+            )
+
         # Priority 2: an active scale owns an answer/refusal turn.  This also
         # prevents a Router proposal from switching to another scale.
         if snapshot.active_scale:
@@ -90,7 +103,7 @@ class TurnPolicy:
                 scale_name=snapshot.active_scale,
                 confidence=1.0,
                 reason="active_scale_waiting" if snapshot.waiting_for_answer else "active_scale",
-                needs_rag=True,
+                needs_rag=False,
             )
 
         # Priority 3: no new work can be started once the lifecycle is ending.
@@ -124,7 +137,7 @@ class TurnPolicy:
                 scale_name=candidate_scale,
                 confidence=proposal.confidence if requested_scale else 1.0,
                 reason=("router_start_scale_accepted" if requested_scale else "deterministic_scale_signal"),
-                needs_rag=True,
+                needs_rag=False,
             )
         if proposal.action is RouterAction.START_SCALE:
             return self._chat("router_invalid_scale")

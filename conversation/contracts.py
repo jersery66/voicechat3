@@ -167,12 +167,16 @@ class TurnSignals(_FrozenContract):
     proactive_relaxation_candidate: Optional[str] = None
     legacy_relaxation_candidate: Optional[str] = None
     legacy_game_candidate: bool = False
+    semantic_ambiguity: bool = False
+    semantic_target: Optional[str] = None
+    semantic_reason: str = ""
 
 
 class TurnAction(str, Enum):
     """The only actions that the execution layer may receive."""
 
     CHAT = "chat"
+    CLARIFY_INPUT = "clarify_input"
     START_SCALE = "start_scale"
     CONTINUE_SCALE = "continue_scale"
     PAUSE_SCALE = "pause_scale"
@@ -190,6 +194,7 @@ class TurnDecision(_FrozenContract):
     accepted_score: Optional[int] = Field(default=None, ge=0, le=4)
     next_item: Optional[int] = Field(default=None, ge=1)
     intervention_type: Optional[str] = None
+    semantic_target: Optional[str] = None
     end_reason: Optional[str] = None
     needs_rag: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -211,9 +216,9 @@ class TurnDecision(_FrozenContract):
                 raise ValueError("END_SESSION requires end_reason")
             if any(value is not None for value in scale_fields):
                 raise ValueError("END_SESSION cannot carry scale fields")
-        elif self.action is TurnAction.CHAT:
+        elif self.action in (TurnAction.CHAT, TurnAction.CLARIFY_INPUT):
             if any(value is not None for value in scale_fields) or self.end_reason is not None:
-                raise ValueError("CHAT cannot carry control fields")
+                raise ValueError(f"{self.action.value} cannot carry control fields")
         elif self.action is TurnAction.RECOMMEND_GAME:
             if any(value is not None for value in scale_fields):
                 raise ValueError("RECOMMEND_GAME cannot carry scale fields")

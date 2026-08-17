@@ -82,12 +82,18 @@ from conversation.contracts import (
 )
 from conversation.turn_policy import TurnPolicy
 from conversation.turn_signals import collect_turn_signals
+from conversation.input_semantics import inspect_input_semantics
 from conversation.delivery import (
     DeliveryLedger,
     GenerationController,
     SentenceDeliveryQueue,
     SentenceReady,
     SentenceSegmenter,
+)
+from conversation.pre_delivery_guard import (
+    GenerationGuardState,
+    GuardContext,
+    PreDeliveryGuard,
 )
 
 
@@ -215,27 +221,10 @@ SCALE_ITEM_CORES = {
     "GAD-7": GAD7_ITEM_CORE,
 }
 
-# Common ASR errors in psychological counseling context
-# Maps (wrong_text, context_hint) → corrected_text
-_ASR_CORRECTIONS = {
-    # Frequency errors
-    "进场": "经常",
-    "进场很": "经常很",
-    "金蝉": "经常",
-    "井场": "经常",
-    # Duration errors
-    "带三个星期": "大概三个星期",
-    "带两周": "大概两周",
-    "代两周": "大概两周",
-    # Sleep errors
-    "中途不醒": "中途会醒",
-    "中途部醒": "中途会醒",
-    "不睡不着": "睡不着",
-    # General
-    "叫我了": "焦虑了",
-    "久了": "久了",  # keep as-is, context dependent
-    "心慌": "心慌",  # keep as-is
-}
+# Critical semantic ASR rewrites are intentionally disabled.  Frequency,
+# duration, negation, quantity, and symptom polarity require observation and
+# policy clarification rather than a guessed replacement.
+_ASR_CORRECTIONS = {}
 
 
 def correct_asr_text(raw_text: str, recent_context: str = "") -> tuple:
@@ -246,22 +235,10 @@ def correct_asr_text(raw_text: str, recent_context: str = "") -> tuple:
     if not raw_text:
         return raw_text, []
 
-    corrected = raw_text
+    corrected = re.sub(r"\s+", " ", str(raw_text or "")).strip()
     corrections = []
-
-    # Apply known corrections
-    for wrong, right in _ASR_CORRECTIONS.items():
-        if wrong == right:
-            continue
-        if wrong in corrected:
-            corrected = corrected.replace(wrong, right)
-            corrections.append(f"{wrong}→{right}")
-
-    # Context-aware corrections
-    # Single "又" in short response → likely "有" (yes/have)
-    if corrected.strip() == "又":
-        corrected = "有"
-        corrections.append("又→有")
+    if corrected != raw_text:
+        corrections.append("whitespace_normalized")
 
     if corrections:
         logger.warning(f"[ASRCorrect] raw={raw_text!r} corrected={corrected!r} fixes={corrections}")
@@ -425,6 +402,12 @@ class ConversationPipeline:
         self._active_flush_registration: Optional[_SentenceFlushRegistration] = None
         self._flush_watchdog_thread: Optional[threading.Thread] = None
         self._flush_watchdog_shutdown = threading.Event()
+        # Guard state is transient delivery bookkeeping only. It is removed
+        # on cancellation/finalization and never becomes business state.
+        self._pre_delivery_guard = PreDeliveryGuard()
+        self._guard_contexts: dict[int, GuardContext] = {}
+        self._guard_states: dict[int, GenerationGuardState] = {}
+        self.delivery_controller.add_cancel_listener(self._on_guard_generation_cancelled)
         # Scale administration has one mutable owner.  Pipeline keeps only
         # symptom observations used to build TurnSignals; it never mirrors
         # active item, waiting, answers, pause, or completion state.
@@ -465,6 +448,8 @@ class ConversationPipeline:
             self.delivery_queue.shutdown()
         except Exception as e:
             logger.debug(f"delivery queue shutdown error: {e}")
+        self._guard_contexts.clear()
+        self._guard_states.clear()
 
     def reset_session(self):
         """Reset per-session state without touching unrelated services."""
@@ -476,6 +461,34 @@ class ConversationPipeline:
         self._agent_route_cooldown = 0
         self._proactive_relaxation_offered = False
         self._proactive_relaxation_candidate = None
+        self._guard_contexts.clear()
+        self._guard_states.clear()
+
+    def _on_guard_generation_cancelled(self, event: Any) -> None:
+        generation_id = getattr(event, "generation_id", None)
+        if generation_id is not None:
+            self._guard_contexts.pop(generation_id, None)
+            self._guard_states.pop(generation_id, None)
+
+    def _set_guard_context(self, generation_id: Optional[int], decision: TurnDecision, runtime: Any) -> None:
+        if generation_id is None:
+            return
+        self._guard_contexts[generation_id] = GuardContext(
+            generation_id=generation_id,
+            turn_action=decision.action,
+            active_scale=getattr(runtime, "active_scale", None),
+            current_scale_item=getattr(runtime, "current_item", None),
+        )
+        self._guard_states.setdefault(generation_id, GenerationGuardState())
+
+    def _ensure_guard_state(self) -> None:
+        """Lazily support lightweight pipeline doubles used by old adapters."""
+        if not hasattr(self, "_pre_delivery_guard"):
+            self._pre_delivery_guard = PreDeliveryGuard()
+        if not hasattr(self, "_guard_contexts"):
+            self._guard_contexts = {}
+        if not hasattr(self, "_guard_states"):
+            self._guard_states = {}
 
     def _session_state_name(self, configured: str = "CHATTING") -> str:
         """Return the current lifecycle state without owning that state."""
@@ -592,6 +605,54 @@ class ConversationPipeline:
                 "user_explicit": "quit",
                 "router_proposal": "quit",
             }.get(decision.end_reason or "", "quit")
+
+    def _apply_scale_answer_transition(self, user_text: str, decision: TurnDecision, result: PipelineResult) -> None:
+        """Commit an interpreted scale answer before building language context.
+
+        The Runtime transition is a business commit owned by ScaleRuntime. It
+        is intentionally independent from the later LLM/TTS generation, so a
+        cancelled response cannot roll back an already-confirmed answer.
+        """
+        result.scale_tags = {}
+        if decision.action is not TurnAction.CONTINUE_SCALE:
+            return
+        runtime = self.scale_runtime.snapshot()
+        if not runtime.active_scale or not runtime.current_item:
+            return
+        scale_name = runtime.active_scale
+        current_item = runtime.current_item
+        interpretation = self.answer_interpreter.interpret(
+            user_text,
+            scale_name=scale_name,
+            item=current_item,
+        )
+        if interpretation.status == "accepted" and interpretation.score is not None:
+            update = self.scale_runtime.accept_answer(
+                scale_name=scale_name,
+                item=current_item,
+                score=interpretation.score,
+            )
+            if update.accepted:
+                result.scale_tags = {scale_name: {current_item: interpretation.score}}
+                if update.completed:
+                    result.scale_completed = True
+                    result.completed_scale_name = scale_name
+                    result.all_scales_completed = bool(
+                        set(update.snapshot.completed_scales)
+                        >= set(update.snapshot.administered_scales)
+                    )
+                    rec_type = (
+                        self._proactive_relaxation_candidate
+                        or self._choose_post_scale_relaxation(scale_name)
+                    )
+                    if rec_type:
+                        self._proactive_relaxation_candidate = rec_type
+                return
+        if interpretation.status == "ambiguous":
+            self.scale_runtime.request_clarification()
+        elif interpretation.status in {"pause", "refusal", "unmatched"}:
+            if not self.scale_runtime.snapshot().paused:
+                self.scale_runtime.request_clarification()
 
     def _decision_end_type(self, decision: TurnDecision | None) -> Optional[str]:
         if decision is None or decision.action is not TurnAction.END_SESSION:
@@ -918,6 +979,7 @@ class ConversationPipeline:
 
         # ASR post-processing: correct common speech recognition errors
         raw_text = result.user_text
+        semantic_flags = inspect_input_semantics(raw_text)
         result.user_text, _asr_corrections = correct_asr_text(raw_text)
         if _asr_corrections:
             logger.warning(f"[ASRCorrect] raw={raw_text!r} corrected={result.user_text!r}")
@@ -965,7 +1027,13 @@ class ConversationPipeline:
                 user_text=result.user_text,
                 proposal=proposal,
                 snapshot=snapshot,
-                signals=collect_turn_signals(result.user_text, snapshot),
+                signals=collect_turn_signals(
+                    result.user_text,
+                    snapshot,
+                    semantic_ambiguity=semantic_flags.any_ambiguous,
+                    semantic_target=semantic_flags.semantic_target,
+                    semantic_reason=semantic_flags.reason,
+                ),
             )
             result.router_proposal = proposal
             result.turn_state_snapshot = snapshot
@@ -1072,6 +1140,9 @@ class ConversationPipeline:
             snapshot,
             deterministic_scale_candidate=deterministic_candidate,
             proactive_relaxation_candidate=self._proactive_relaxation_candidate,
+            semantic_ambiguity=semantic_flags.any_ambiguous,
+            semantic_target=semantic_flags.semantic_target,
+            semantic_reason=semantic_flags.reason,
         )
         decision = config.turn_decision
         if decision is None:
@@ -1085,6 +1156,9 @@ class ConversationPipeline:
         self._apply_turn_decision(decision, result)
         self._commit_user_turn(config, result, emit)
         runtime = self.scale_runtime.snapshot()
+        self._apply_scale_answer_transition(result.user_text, decision, result)
+        runtime = self.scale_runtime.snapshot()
+        self._set_guard_context(config.generation_id, decision, runtime)
 
         # Apply the one turn's symptom observations only after the decision.
         if not before_runtime.active_scale and pre_deltas:
@@ -1243,6 +1317,8 @@ class ConversationPipeline:
             emit("finish_streaming", None)
         else:
             emit("finish_streaming", config.generation_id)
+            self._guard_contexts.pop(config.generation_id, None)
+            self._guard_states.pop(config.generation_id, None)
 
         # --- Prepare TTS text immediately ---
         # Limit to one question per reply to prevent rapid-fire questioning
@@ -1277,109 +1353,7 @@ class ConversationPipeline:
             result.turn_decision
             and result.turn_decision.action is TurnAction.RECOMMEND_GAME
         )
-        runtime = self.scale_runtime.snapshot()
-        allowed_scale = (
-            runtime.active_scale
-            if result.turn_decision and result.turn_decision.action in (
-                TurnAction.START_SCALE,
-                TurnAction.CONTINUE_SCALE,
-            )
-            else None
-        )
-        result.scale_tags = {}
-        accepted_update = None
-        accepted_item = None
-        accepted_score = None
-        if allowed_scale and runtime.current_item:
-            current_item = runtime.current_item
-            interpretation = self.answer_interpreter.interpret(
-                result.user_text,
-                scale_name=allowed_scale,
-                item=current_item,
-            )
-            if interpretation.status == "accepted" and interpretation.score is not None:
-                accepted_update = self.scale_runtime.accept_answer(
-                    scale_name=allowed_scale,
-                    item=current_item,
-                    score=interpretation.score,
-                )
-                if accepted_update.accepted:
-                    accepted_item, accepted_score = current_item, interpretation.score
-                    # ``scale_tags`` is retained as a compatibility-shaped
-                    # reporting projection.  The value came from the pure
-                    # interpreter and Runtime, never from model output.
-                    result.scale_tags = {
-                        allowed_scale: {current_item: interpretation.score}
-                    }
-            elif interpretation.status == "ambiguous":
-                self.scale_runtime.request_clarification()
-            elif interpretation.status in {"pause", "refusal", "unmatched"}:
-                if not self.scale_runtime.snapshot().paused:
-                    self.scale_runtime.request_clarification()
-
-        # Runtime is the only transition owner for answer acceptance and
-        # progression.  Clarification text is derived from the unchanged
-        # snapshot; it never creates a pending score in Pipeline.
         runtime_after = self.scale_runtime.snapshot()
-        if accepted_update is not None and accepted_update.accepted:
-            completed_name = allowed_scale
-            if accepted_update.completed and completed_name:
-                result.scale_completed = True
-                result.completed_scale_name = completed_name
-                result.all_scales_completed = bool(
-                    set(runtime_after.completed_scales)
-                    >= set(runtime_after.administered_scales)
-                )
-                logger.warning(
-                    f"[ScaleDebug] completed {completed_name}; "
-                    f"completed={runtime_after.completed_scales}"
-                )
-                rec_type = (
-                    self._proactive_relaxation_candidate
-                    or self._choose_post_scale_relaxation(completed_name)
-                )
-                if rec_type:
-                    self._proactive_relaxation_candidate = rec_type
-            elif runtime_after.active_scale:
-                logger.warning(
-                    f"[ScaleDebug] accepted {completed_name} Q{accepted_item}="
-                    f"{accepted_score}; next Q{runtime_after.current_item}"
-                )
-        elif runtime_after.active_scale and runtime_after.current_item:
-            current_q = runtime_after.current_item
-            _strong = any(x in result.user_text for x in [
-                "非常", "很", "特别", "极其", "沮丧", "绝望", "难受", "低落", "焦虑"
-            ])
-            _positive_pending = self._is_positive_pending_frequency(
-                runtime_after.active_scale, current_q, result.user_text
-            )
-            if _strong or _positive_pending:
-                _item_hint = NATURAL_SCALE_QUESTIONS.get(
-                    (runtime_after.active_scale, current_q), ""
-                )
-                system_suffix += f"""
-【必须追问频率】用户已明确表达存在症状，但缺少频率信息。
-当前量表：{runtime_after.active_scale}
-当前题：Q{current_q}
-当前维度：{_item_hint}
-不要再问"有没有这个症状"。
-请自然追问最近两周频率。
-示例："这种感觉最近是偶尔几天，还是大多数时间都会有？"
-只能问这一件事。不能结束，不能推荐放松，不能泛泛咨询。
-"""
-            else:
-                hint = self._build_scale_context_hint(
-                    runtime_after.active_scale, current_q, {}
-                )
-                if hint:
-                    system_suffix += hint
-            logger.warning(
-                f"[ScaleDebug] item Q{current_q} remains pending; "
-                f"strong={_strong}, positive_pending={_positive_pending}"
-            )
-
-        # Refresh final_suffix after all scale hints are added
-        final_suffix = system_suffix if system_suffix and system_suffix.strip() else None
 
         # Log pipeline output for debugging
         logger.warning(
@@ -1755,6 +1729,7 @@ class ConversationPipeline:
         """Describe an approved action for language realization only."""
         action_text = {
             TurnAction.CHAT: "自然回应来访者",
+            TurnAction.CLARIFY_INPUT: "先确认来访者刚才表达中的关键信息",
             TurnAction.START_SCALE: "自然提出系统选定的当前了解问题",
             TurnAction.CONTINUE_SCALE: "自然承接并继续系统选定的当前了解问题",
             TurnAction.PAUSE_SCALE: "温和确认暂停，不继续追问",
@@ -1769,10 +1744,19 @@ class ConversationPipeline:
         if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
             scale_name = runtime.active_scale or decision.scale_name or "当前了解内容"
             item = runtime.current_item
+            if decision.action is TurnAction.CONTINUE_SCALE and not runtime.active_scale:
+                lines.append("当前量表项目已经完成；只需简短承接完成，不要继续提出下一题。")
+                return "\n".join(lines)
             question = NATURAL_SCALE_QUESTIONS.get((scale_name, item or 1), "")
             if question:
                 lines.append(f"当前需要自然表达的问题是：{question}")
             lines.append("只围绕这个问题说话；回答的解释和进度由系统处理。")
+        elif decision.action is TurnAction.CLARIFY_INPUT:
+            target_text = {
+                "night_waking": "晚上中途是否会醒",
+                "frequency": "发生频率",
+            }.get(decision.semantic_target or "", "刚才表达中的关键信息")
+            lines.append(f"只确认：{target_text}。不要猜测、打分或推进其他业务任务。")
         elif decision.action is TurnAction.RECOMMEND_RELAXATION:
             lines.append("只说明已经批准的放松方式，邀请来访者自愿尝试，不要追加其他建议。")
         elif decision.action is TurnAction.RECOMMEND_GAME:
@@ -2090,9 +2074,28 @@ class ConversationPipeline:
         event: SentenceReady,
         emit: Callable[[str, Any], None],
     ) -> None:
-        """Normalize one stable sentence, emit it to UI, and queue TTS."""
-        normalized_tts = clean_for_tts(event.text)
-        normalized_display = clean_for_display(event.text)
+        """Guard one stable sentence, then use it for both UI and TTS."""
+        self._ensure_guard_state()
+        context = self._guard_contexts.get(
+            event.generation_id,
+            GuardContext(generation_id=event.generation_id),
+        )
+        state = self._guard_states.setdefault(event.generation_id, GenerationGuardState())
+        guard_result = self._pre_delivery_guard.evaluate(
+            event.text,
+            context=context,
+            state=state,
+        )
+        if guard_result.status != "ALLOW":
+            logger.warning(
+                "[PreDeliveryGuard] blocked generation=%s seq=%s reason=%s",
+                event.generation_id,
+                event.seq,
+                guard_result.reason,
+            )
+            return
+        normalized_tts = clean_for_tts(guard_result.text)
+        normalized_display = clean_for_display(guard_result.text)
         if not normalized_display and not normalized_tts:
             return
         normalized = SentenceReady(

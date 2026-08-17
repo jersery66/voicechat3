@@ -53,10 +53,15 @@ def ctx():
         p.shutdown()
 
 
-def run_turn(p, user_text, emit=None):
+def run_turn(p, user_text, emit=None, proposal=None):
     emit = emit or EmitCollector()
     result = p.execute(
-        PipelineConfig(use_stt=False, use_tts=False, user_text=user_text),
+        PipelineConfig(
+            use_stt=False,
+            use_tts=False,
+            user_text=user_text,
+            router_proposal=proposal,
+        ),
         emit,
     )
     return result, emit
@@ -93,8 +98,13 @@ class TestNormalChat:
 class TestRagInjection:
     def test_rag_suffix_reaches_llm(self, ctx):
         rag = FakeRAG(suffix="【知识库】失眠干预：引导规律作息与放松训练。")
-        p = ctx(rag=rag)
-        result, _ = run_turn(p, "最近一直失眠，睡不着")
+        p = ctx(rag=rag, report=FakeReport(start_round=0))
+        from conversation.contracts import RouterAction, RouterProposal
+        result, _ = run_turn(
+            p,
+            "最近一直失眠，睡不着",
+            proposal=RouterProposal(action=RouterAction.CHAT, needs_rag=True),
+        )
         sent_suffix = p.llm.calls[-1]["system_suffix"]
         assert "知识库" in sent_suffix
         assert len(rag.queries) >= 1

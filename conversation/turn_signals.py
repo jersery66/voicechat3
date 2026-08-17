@@ -45,6 +45,9 @@ def collect_turn_signals(
     proactive_relaxation_candidate: str | None = None,
     legacy_relaxation_candidate: str | None = None,
     legacy_game_candidate: bool = False,
+    semantic_ambiguity: bool = False,
+    semantic_target: str | None = None,
+    semantic_reason: str = "",
 ) -> TurnSignals:
     """Inspect one turn without mutating state or calling a model.
 
@@ -63,4 +66,7 @@ def collect_turn_signals(
         proactive_relaxation_candidate=proactive_relaxation_candidate,
         legacy_relaxation_candidate=legacy_relaxation_candidate,
         legacy_game_candidate=bool(legacy_game_candidate),
+        semantic_ambiguity=bool(semantic_ambiguity),
+        semantic_target=semantic_target,
+        semantic_reason=semantic_reason,
     )
