@@ -12,6 +12,12 @@ def test_final_gate_pass_is_offline_only_and_hardware_not_run():
     summary = final_readiness.build_final_summary(
         test_returncode=0,
         documentation_ok=True,
+        offline_summary={
+            "offline_integration_readiness": "PASS",
+            "evidence_type": "SIMULATED",
+            "git_commit": "test-commit",
+        },
+        freeze_tag_ok=True,
         git_commit="test-commit",
     )
     assert summary["pre_hardware_development"] == "COMPLETE"
@@ -26,12 +32,19 @@ def test_final_gate_pass_is_offline_only_and_hardware_not_run():
     assert summary["real_tts"] == "NOT RUN"
     assert summary["real_e2e"] == "NOT RUN"
     assert summary["candidate_promotion"] == "NOT APPROVED"
+    assert summary["offline_integration_git_commit"] == "test-commit"
 
 
 def test_missing_required_document_blocks_final_gate():
     summary = final_readiness.build_final_summary(
         test_returncode=0,
         documentation_ok=False,
+        offline_summary={
+            "offline_integration_readiness": "PASS",
+            "evidence_type": "SIMULATED",
+            "git_commit": "test-commit",
+        },
+        freeze_tag_ok=True,
         git_commit="test-commit",
     )
     assert summary["pre_hardware_final_readiness"] == "FAIL"
@@ -43,6 +56,12 @@ def test_test_failure_blocks_gate_without_claiming_hardware_failure():
     summary = final_readiness.build_final_summary(
         test_returncode=1,
         documentation_ok=True,
+        offline_summary={
+            "offline_integration_readiness": "PASS",
+            "evidence_type": "SIMULATED",
+            "git_commit": "test-commit",
+        },
+        freeze_tag_ok=True,
         git_commit="test-commit",
     )
     assert summary["pre_hardware_final_readiness"] == "FAIL"
@@ -53,11 +72,32 @@ def test_required_docs_and_tools_are_declared():
     assert "docs/deployment/rtxpro6000_operator_runbook.md" in final_readiness.REQUIRED_DOCUMENTS
     assert "scripts/deployment/doctor.py" in final_readiness.REQUIRED_TOOLS
     assert "scripts/acceptance/blackwell_live_probe.py" in final_readiness.REQUIRED_TOOLS
+    assert ".env.example" in final_readiness.REQUIRED_ENVIRONMENT_TEMPLATES
+
+
+def test_env_template_exists_without_obvious_secret_or_personal_path():
+    path = final_readiness.PROJECT_ROOT / ".env.example"
+    text = path.read_text(encoding="utf-8")
+    assert "VOICECHAT_DEPLOYMENT_PROFILE=" in text
+    assert "password=" not in text.lower()
+    assert "api_key=" not in text.lower()
+    assert "sk-" not in text
+    assert "C:\\Users\\" not in text
 
 
 def test_run_final_gate_writes_provenance_artifact_without_hardware_commands(tmp_path, monkeypatch):
     monkeypatch.setattr(final_readiness, "run_full_regression", lambda: 0)
     monkeypatch.setattr(final_readiness, "documentation_status", lambda: (True, []))
+    monkeypatch.setattr(
+        final_readiness,
+        "run_offline_gate",
+        lambda **_kwargs: {
+            "offline_integration_readiness": "PASS",
+            "evidence_type": "SIMULATED",
+            "git_commit": "test-commit",
+        },
+    )
+    monkeypatch.setattr(final_readiness, "freeze_tag_status", lambda _commit: (True, "test-commit"))
     summary = final_readiness.run_final_gate(output_root=tmp_path, git_commit="test-commit")
     artifact = json.loads((tmp_path / "pre_hardware_final_readiness.json").read_text(encoding="utf-8"))
     assert summary["pre_hardware_final_readiness"] == "PASS"

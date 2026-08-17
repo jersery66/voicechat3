@@ -13,10 +13,11 @@ git fetch origin
 git checkout codex/a100-vllm-safety
 git status --short
 git rev-parse HEAD
+git rev-parse pre-hardware-freeze-20260817
 ```
 
-The working tree must be clean and the commit must match the approved release
-inventory. Do not reset or merge an unknown checkout automatically.
+The working tree must be clean and the tag commit must equal `HEAD`. Do not
+reset or merge an unknown checkout automatically.
 
 ## 2. Windows and NVIDIA preparation
 
@@ -64,8 +65,19 @@ Do not auto-install or upgrade vLLM from the launcher. Exact Python, PyTorch,
 CUDA, vLLM, FunASR, and VoxCPM2 compatibility is `TO BE VERIFIED ON TARGET
 HARDWARE`.
 
-Configure paths using `.env.example` or operator environment variables. Keep
-models outside Git and record only their existence/readability.
+`.env.example` is a variable template only; this repository does not
+automatically load a local `.env` file. Explicitly export/set the variables
+before launch, for example:
+
+```powershell
+$env:VOICECHAT_MODELS_DIR = "<operator-model-root>"
+$env:FUNASR_MODEL_PATH = "<operator-funasr-path>"
+$env:VOXCPM_MODEL_PATH = "<operator-voxcpm-path>"
+$env:VOICE_PROMPT_PATH = "<operator-voice-prompt>"
+$env:VOICECHAT_DATA_DIR = "<operator-data-root>"
+```
+
+Keep models outside Git and record only their existence/readability.
 
 ## 5. Read-only checks and derived artifacts
 

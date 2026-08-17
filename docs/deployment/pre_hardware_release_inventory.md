@@ -7,7 +7,8 @@ acceptance. It is not a hardware result.
 
 - Branch: `codex/a100-vllm-safety`
 - Pre-hardware starting baseline: `6b626aec9813906b7a844cead058743f0aea56cc`
-- Final freeze commit: `83e48184e304150a380c7fcac44b21064a565779`
+- Final freeze identity: Git tag `pre-hardware-freeze-20260817`
+- Functional Batch 5 content commit: `83e48184e304150a380c7fcac44b21064a565779`
 - Baseline profile: `rtxpro6000_96g`
 - Candidate profile: `rtxpro6000_96g_qwen38_candidate`
 - Candidate promotion: `NOT APPROVED`
