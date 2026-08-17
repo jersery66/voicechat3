@@ -31,6 +31,7 @@ from config import (
     EMOTION_SCENE_MAP,
     INTENT_SCENE_MAP,
 )
+from conversation.agent_observation import AgentObservation
 from conversation.contracts import RouterProposal
 
 logger = get_logger(__name__)
@@ -533,6 +534,7 @@ class AgentService:
   "action": "chat|start_scale|recommend_relaxation|recommend_game|end_session",
   "scale_name": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
   "intervention_type": null 或 "breathing" 或 "muscle_relaxation" 或 "mindfulness" 或 "game" 或 "media",
+  "intent": "counseling|entertainment|chitchat|relaxation",
   "emotion": "neutral|calm|sad|anxious|angry|fearful",
   "intensity": 0.0-1.0,
   "needs_rag": true 或 false,
@@ -632,12 +634,14 @@ class AgentService:
                 "game_type": intervention if raw_action == "recommend_game" else None,
                 "recommend_media": raw_action == "recommend_media",
                 "media_type": intervention if raw_action == "recommend_media" else None,
+                "intent": result.get("intent", "counseling"),
                 "exit_intent": raw_action == "exit",
                 "confidence": result.get("confidence", 0.0),
                 "emotion": result.get("emotion", "neutral"),
                 "intensity": result.get("intensity", 0.0),
                 "needs_rag": result.get("needs_rag", raw_action == "chat"),
                 "reason": result.get("reason", ""),
+                "fallback_used": False,
             }
             return normalized
         except Exception as e:
@@ -651,6 +655,7 @@ class AgentService:
                 "relaxation_type": None,
                 "confidence": 0.0,
                 "reason": f"agent fallback: {e}",
+                "fallback_used": True,
             }
 
     def route_proposal(self, **kwargs) -> RouterProposal:
@@ -662,6 +667,29 @@ class AgentService:
         """
         legacy = self.route_conversation_actions(**kwargs)
         return RouterProposal.from_legacy_route(legacy)
+
+    def observe_turn(self, **kwargs) -> AgentObservation:
+        """Perform one structured ordinary-turn request and project observations."""
+        legacy = self.route_conversation_actions(**kwargs)
+        if bool(legacy.get("fallback_used")):
+            user_text = str(kwargs.get("user_text", ""))
+            keyword_intent = self._keyword_classify(user_text).get("intent", "counseling")
+            return AgentObservation(
+                proposal=RouterProposal.fallback("agent_observation_fallback"),
+                intent=str(keyword_intent),
+                fallback_used=True,
+                source="deterministic_fallback",
+            )
+        proposal = RouterProposal.from_legacy_route(legacy)
+        intent = str(legacy.get("intent", "counseling") or "counseling")
+        if intent not in {"counseling", "entertainment", "chitchat", "relaxation"}:
+            intent = "counseling"
+        return AgentObservation(
+            proposal=proposal,
+            intent=intent,
+            fallback_used=False,
+            source="agent",
+        )
 
     def validate_route_json(self) -> bool:
         """Test if agent can produce valid route JSON."""

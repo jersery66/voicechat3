@@ -75,11 +75,13 @@ from assessment import ScaleAnswerInterpreter, ScaleRuntime
 from conversation.response_builder import ResponseBuilder
 from services.scales import get_scale_manager
 from conversation.contracts import (
+    RouterAction,
     RouterProposal,
     TurnAction,
     TurnDecision,
     TurnStateSnapshot,
 )
+from conversation.agent_observation import AgentObservation
 from conversation.turn_policy import TurnPolicy
 from conversation.turn_signals import collect_turn_signals
 from conversation.input_semantics import inspect_input_semantics
@@ -329,6 +331,7 @@ class PipelineResult:
     router_proposal: Optional[RouterProposal] = None
     turn_state_snapshot: Optional[TurnStateSnapshot] = None
     turn_decision: Optional[TurnDecision] = None
+    agent_observation: Optional[AgentObservation] = None
 
 
 @dataclass
@@ -568,23 +571,66 @@ class ConversationPipeline:
             time_limit_reached=bool(time_limit_reached),
         )
 
-    def _request_router_proposal(
+    def _agent_deterministic_fallback(self, user_text: str) -> AgentObservation:
+        """Build local observations without invoking a secondary Agent call."""
+        intent = "counseling"
+        emotion = "neutral"
+        intensity = 0.0
+        if self.agent:
+            keyword_intent = getattr(self.agent, "_keyword_classify", None)
+            keyword_emotion = getattr(self.agent, "_keyword_detect_emotion", None)
+            if callable(keyword_intent):
+                try:
+                    intent = str(keyword_intent(user_text).get("intent", intent))
+                except Exception:
+                    pass
+            if callable(keyword_emotion):
+                try:
+                    observed = keyword_emotion(user_text)
+                    emotion = str(observed.get("emotion", emotion))
+                    intensity = float(observed.get("intensity", intensity) or intensity)
+                except Exception:
+                    pass
+        proposal = RouterProposal(
+            action=RouterAction.CHAT,
+            emotion=emotion,
+            intensity=max(0.0, min(1.0, intensity)),
+            confidence=0.0,
+            reason="agent_observation_fallback",
+            needs_rag=False,
+        )
+        return AgentObservation(
+            proposal=proposal,
+            intent=intent,
+            fallback_used=True,
+            source="deterministic_fallback",
+        )
+
+    def _apply_agent_observation(self, observation: AgentObservation, result: PipelineResult) -> None:
+        """Project one Agent observation to existing reporting consumers only."""
+        result.intent = observation.intent
+        result.emotion_result = {
+            "emotion": observation.proposal.emotion,
+            "intensity": observation.proposal.intensity,
+        }
+        self.session_emotions.append({"role": "user", **result.emotion_result})
+
+    def _request_agent_observation(
         self,
         *,
         user_text: str,
         current_rounds: int,
-    ) -> tuple[RouterProposal, dict]:
-        """Obtain one non-executable proposal from the configured Router."""
-        fallback = RouterProposal.fallback("router_fallback")
+    ) -> AgentObservation:
+        """Obtain one non-executable observation from the configured Agent."""
         if not AGENT_ROUTE_ENABLED:
             logger.warning("[AgentRoute] skipped: AGENT_ROUTE_ENABLED=False")
-            return fallback, fallback.model_dump(mode="json")
+            return self._agent_deterministic_fallback(user_text)
         if self._agent_route_cooldown > 0:
             self._agent_route_cooldown -= 1
             logger.warning(f"[AgentRoute] cooldown remaining={self._agent_route_cooldown}")
-            return fallback, fallback.model_dump(mode="json")
+            return self._agent_deterministic_fallback(user_text)
         if not self.agent or not self.agent.is_available():
-            return fallback, fallback.model_dump(mode="json")
+            return self._agent_deterministic_fallback(user_text)
 
         try:
             kwargs = {
@@ -598,22 +644,57 @@ class ConversationPipeline:
                 },
                 "relaxation_done": self._get_relaxation_done(),
             }
-            if hasattr(self.agent, "route_proposal"):
+            if hasattr(self.agent, "observe_turn"):
+                raw_observation = self.agent.observe_turn(**kwargs)
+                if isinstance(raw_observation, AgentObservation):
+                    observation = raw_observation
+                else:
+                    raw = dict(raw_observation or {})
+                    proposal = raw.get("proposal")
+                    if not isinstance(proposal, RouterProposal):
+                        proposal = RouterProposal.from_legacy_route(raw)
+                    observation = AgentObservation(
+                        proposal=proposal,
+                        intent=str(raw.get("intent", "counseling") or "counseling"),
+                        fallback_used=bool(raw.get("fallback_used", False)),
+                        source=str(raw.get("source", "agent") or "agent"),
+                    )
+            elif hasattr(self.agent, "route_proposal"):
                 raw = self.agent.route_proposal(**kwargs)
+                proposal = raw if isinstance(raw, RouterProposal) else RouterProposal.from_legacy_route(raw)
+                observation = AgentObservation(proposal=proposal)
             else:
                 raw = self.agent.route_conversation_actions(**kwargs)
-            proposal = raw if isinstance(raw, RouterProposal) else RouterProposal.from_legacy_route(raw)
+                proposal = raw if isinstance(raw, RouterProposal) else RouterProposal.from_legacy_route(raw)
+                observation = AgentObservation(
+                    proposal=proposal,
+                    intent=str(raw.get("intent", "counseling") or "counseling") if isinstance(raw, dict) else "counseling",
+                    fallback_used=bool(raw.get("fallback_used", False)) if isinstance(raw, dict) else False,
+                )
             self._agent_route_cooldown = 0
             logger.warning(
-                f"[AgentRoute] user={user_text!r} action={proposal.action.value} "
-                f"scale={proposal.scale_name} confidence={proposal.confidence} "
-                f"reason={proposal.reason[:60]!r}"
+                f"[AgentRoute] user={user_text!r} action={observation.proposal.action.value} "
+                f"scale={observation.proposal.scale_name} confidence={observation.proposal.confidence} "
+                f"intent={observation.intent!r} source={observation.source!r}"
             )
-            return proposal, proposal.model_dump(mode="json")
+            return observation
         except Exception as exc:
             logger.warning(f"[AgentRoute] failed: {exc}")
             self._agent_route_cooldown = AGENT_ROUTE_COOLDOWN_ROUNDS
-            return fallback, fallback.model_dump(mode="json")
+            return self._agent_deterministic_fallback(user_text)
+
+    def _request_router_proposal(
+        self,
+        *,
+        user_text: str,
+        current_rounds: int,
+    ) -> tuple[RouterProposal, dict]:
+        """Compatibility adapter for callers that only need the proposal."""
+        observation = self._request_agent_observation(
+            user_text=user_text,
+            current_rounds=current_rounds,
+        )
+        return observation.proposal, observation.proposal.model_dump(mode="json")
 
     def _apply_turn_decision(self, decision: TurnDecision, result: PipelineResult) -> None:
         """Apply an already-authoritative decision; never choose another action."""
@@ -1134,10 +1215,21 @@ class ConversationPipeline:
         # the authoritative decision exists.
         proposal = config.router_proposal
         agent_route = proposal.model_dump(mode="json") if proposal is not None else None
+        agent_observation: AgentObservation | None = None
         if proposal is None:
-            proposal, agent_route = self._request_router_proposal(
+            agent_observation = self._request_agent_observation(
                 user_text=result.user_text,
                 current_rounds=current_rounds,
+            )
+            proposal = agent_observation.proposal
+            agent_route = proposal.model_dump(mode="json")
+            result.agent_observation = agent_observation
+        else:
+            result.agent_observation = AgentObservation(
+                proposal=proposal,
+                intent="counseling",
+                fallback_used=False,
+                source="caller_provided_proposal",
             )
         result.router_proposal = proposal
         result.agent_route = dict(agent_route or proposal.model_dump(mode="json"))
@@ -1210,6 +1302,8 @@ class ConversationPipeline:
             user_text=result.user_text,
             semantic_target=semantic_flags.semantic_target,
         )
+        if result.agent_observation is not None:
+            self._apply_agent_observation(result.agent_observation, result)
 
         # Apply the one turn's symptom observations only after the decision.
         if not before_runtime.active_scale and pre_deltas:
@@ -1312,13 +1406,11 @@ class ConversationPipeline:
                         f"Q{runtime.current_item}, injecting frequency hint"
                     )
 
-        # --- LLM stream + Agent classification (concurrent) ---
-        # Start LLM immediately with RAG/scale context; agent runs in parallel.
-        # This saves 1-3s of agent wait time before first LLM token.
+        # --- LLM stream ---
+        # The single Agent observation was already collected before the
+        # authoritative decision and language context. No secondary intent or
+        # emotion model calls are started here.
         emit("start_ai_message", config.generation_id)
-        agent_future = self._executor.submit(
-            self._classify_intent_emotion, result.user_text
-        )
 
         try:
             with metrics.timer("llm.stream"):
@@ -1427,8 +1519,7 @@ class ConversationPipeline:
         if self.data and config.generation_id is None:
             self.data.save_assistant_message(None, result.clean_spoken, sample_rate=48000)
 
-        # --- TTS + Agent post-processing (concurrent) ---
-        # TTS doesn't need agent results. Run both in parallel to save 1-3s.
+        # --- TTS post-processing ---
         # Skip normal response TTS when the authoritative decision ends the
         # session; the session-end flow owns the farewell audio.
         tts_future = None
@@ -1446,15 +1537,6 @@ class ConversationPipeline:
             self._queue_complete_tts_compat(result.tts_text)
             latency_ms = (time.perf_counter() - pipeline_started) * 1000.0
             logger.warning(f"[Latency] input→TTS: {latency_ms:.0f}ms | spoken_len={len(result.spoken_text)}")
-
-        # Agent results + emotion tracking (parallel with TTS)
-        try:
-            agent_done = agent_future.result(timeout=10)
-            result.intent, result.emotion_result = agent_done
-        except Exception as e:
-            logger.warning(f"Agent classification failed: {e}")
-            result.intent = "counseling"
-            result.emotion_result = {"emotion": "neutral", "intensity": 0.0}
 
         if game_recommended:
             result.intent = "entertainment"

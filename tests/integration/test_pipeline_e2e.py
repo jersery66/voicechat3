@@ -215,8 +215,9 @@ class TestDetachedCrisisRuntime:
 
         run_turn(p, "最近很绝望，整个人都很累")
 
-        assert agent.intent_calls == 1
-        assert agent.emotion_calls == 1
+        assert len(agent.route_calls) == 1
+        assert agent.intent_calls == 0
+        assert agent.emotion_calls == 0
 
 
 class TestShadowIndependence:
