@@ -105,6 +105,10 @@ def test_i4_one_sentence_tts_failure_does_not_replay_or_reorder(harness):
         "第一句。",
         "第二句。",
     ]
+    import time
+    deadline = time.monotonic() + 1.0
+    while len(harness.trace.tts_calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
     assert harness.trace.tts_calls == ["第一句。", "第二句。"]
     assert harness.llm.conversation_history[-1]["content"] == "第一句。第二句。"
 
