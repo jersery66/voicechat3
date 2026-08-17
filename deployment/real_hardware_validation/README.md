@@ -19,6 +19,13 @@ The candidate is still unvalidated. RTX identity, WSL CUDA, vLLM model load,
 VRAM coexistence, Phase 5, A/B, STT, TTS, and end-to-end audio are all
 `NOT RUN` until the target Windows workstation produces measured artifacts.
 
+For the complete handoff (including this directory and the two helper
+scripts), check out the remote `codex/runtime-ordering-corrections` head. The
+corrected runtime tag is its ancestor and remains the identity to record in
+the acceptance artifacts. The commits after that tag are deployment
+documentation/observation tooling only; they do not change production
+behavior.
+
 ## Run order
 
 1. Protect the corrected tag and verify the clean checkout.

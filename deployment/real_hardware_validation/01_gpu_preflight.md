@@ -6,14 +6,19 @@ Do not start vLLM, FunASR, VoxCPM2, or the GUI before this checkpoint.
 
 ```powershell
 git fetch origin
-git checkout --detach pre-hardware-corrected-20260817
+git checkout --detach origin/codex/runtime-ordering-corrections
 git status --short
 git rev-parse HEAD
 git rev-parse "pre-hardware-corrected-20260817^{commit}"
+git merge-base --is-ancestor "pre-hardware-corrected-20260817^{commit}" HEAD
+git diff --name-only "pre-hardware-corrected-20260817^{commit}" HEAD
 ```
 
-`HEAD` must equal `e4de593321a6334099971ac5a0d26c9141c419b4` and the working
-tree must be clean. Do not reset or merge unknown changes.
+The checked-out package head must contain the corrected tag as an ancestor,
+the working tree must be clean, and the diff after the tag must contain only
+the documented validation package. The runtime candidate itself remains the
+immutable `e4de593321a6334099971ac5a0d26c9141c419b4` tag. Do not reset or
+merge unknown changes.
 
 ## Host evidence
 

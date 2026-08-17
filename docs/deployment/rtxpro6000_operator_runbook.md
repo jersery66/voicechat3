@@ -10,14 +10,18 @@ or capacity statement not backed by a target-machine artifact is
 
 ```powershell
 git fetch origin
-git checkout --detach pre-hardware-corrected-20260817
+git checkout --detach origin/codex/runtime-ordering-corrections
 git status --short
 git rev-parse HEAD
 git rev-parse "pre-hardware-corrected-20260817^{commit}"
+git merge-base --is-ancestor "pre-hardware-corrected-20260817^{commit}" HEAD
+git diff --name-only "pre-hardware-corrected-20260817^{commit}" HEAD
 ```
 
-The working tree must be clean and `HEAD` must equal the corrected candidate
-tag (`e4de593321a6334099971ac5a0d26c9141c419b4`). The original
+The working tree must be clean and the corrected candidate tag
+(`e4de593321a6334099971ac5a0d26c9141c419b4`) must be an ancestor of the
+checked-out validation-package head. The diff after that tag must contain only
+the documented runbook/helper package. The original
 `pre-hardware-freeze-20260817` tag is historical and must not be moved or used
 for the workstation run. Do not reset or merge an unknown checkout
 automatically.
