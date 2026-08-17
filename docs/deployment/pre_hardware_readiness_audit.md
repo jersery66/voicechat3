@@ -111,10 +111,8 @@ operator lifecycle owner. Batch 2 added only the missing contract seams:
 The doctor, Phase 5 probe, and A/B harness remain observe/validate/compare
 tools. None owns service lifecycle.
 
-The following remain outside Batches 1–2 and are intentionally still missing:
+The following remain outside Batches 1–3 and are intentionally still missing:
 
-- Memory-budget snapshots and a unified performance/E2E timing collector.
-- Structured application logging and the cross-component error taxonomy.
 - Offline STT fixture, TTS fixture, production-chain dry-run, session-torture,
   scale, RAG, and report contract harnesses as one documented readiness gate.
 - Operator, model-switch, shutdown/recovery, first-machine, and troubleshooting
@@ -145,8 +143,72 @@ No participant prompt, model profile, TurnPolicy, TurnDecision, ScaleRuntime,
 SessionEngine, RAG, STT business behavior, TTS behavior, GUI behavior, or
 acceptance-harness semantics were changed by this audit.  No service is
 started or stopped by the doctor.  No Blackwell performance, compatibility,
-Qwen3.8 promotion, or real deployment result is claimed.
+Qwen3.8 promotion, or real deployment result is claimed.  Batch 3 measurement
+helpers remain passive and do not alter these frozen runtime paths.
 
 The next safe work, after reviewing this batch, is the separately scoped
 performance/observability work.  It must remain measurement infrastructure and
 must not reopen the frozen architecture.
+
+## Batch 3 measurement audit
+
+The existing measurement paths were reviewed before adding new tooling:
+
+- Phase 5 already measures client-side non-stream latency, streaming TTFT,
+  total stream latency, optional usage-derived completion tokens/throughput,
+  and descriptive GPU snapshots.  Its acceptance and leakage semantics remain
+  frozen.
+- The Phase 7 A/B harness already records non-stream latency, stream TTFT and
+  total latency, repeatability, and descriptive performance summaries.  Token
+  usage is explicitly unavailable there when the client/server does not expose
+  it.  Its comparison and promotion semantics remain frozen.
+- `conversation/delivery.py` already owns generation IDs, sentence sequence,
+  cancellation, stale checks, and delivered-history finalization.  Batch 3
+  must observe this identity rather than create another telemetry generation.
+- `services/metrics.py` provides an in-process duration ring buffer, and
+  `services/logger.py`/`services/error_monitor.py` provide ordinary logging and
+  warning/error JSONL.  They do not provide the requested evidence-aware
+  measurement schema, privacy-filtered structured event contract, or stable
+  cross-component error taxonomy.
+- LLM timing currently records a first-content metric and the pipeline records
+  a total metric, but there is no unified first-sentence, STT/VAD, TTS/audio,
+  or speech-to-first-audio timing contract.
+
+Batch 3 therefore adds passive, standalone measurement/observability helpers
+and tests.  It does not rewrite Phase 5/A/B, inject timing into TurnPolicy,
+ScaleRuntime, SessionEngine, RAG, STT, TTS, or delivery, and it does not define
+performance thresholds.  Measurement infrastructure can be `READY` while
+real measurements remain `NOT RUN`.
+
+## Batch 3 additions
+
+- `scripts/deployment/measurement.py` defines monotonic timing events,
+  first-token/first-sentence/generation latency, speech-to-first-audio
+  derivations, token-usage handling, deterministic percentile aggregation, and
+  evidence-aware measurement records.
+- `scripts/deployment/memory_snapshot.py` provides a read-only `nvidia-smi`
+  parser/snapshot path.  Missing GPU tooling is `NOT AVAILABLE`; no VRAM
+  threshold or hardware approval is encoded.
+- `scripts/deployment/observability.py` provides privacy-filtered JSONL event
+  output and `test_output/observability/` artifact initialization.  Content
+  logging is `OFF` by default and write failures are best-effort only.
+- `scripts/deployment/error_taxonomy.py` provides stable category/code mapping
+  without recovery policy.
+- Acceptance manifests now expose `performance_measurement`,
+  `memory_measurement`, and `e2e_timing` evidence slots, all `NOT RUN` with
+  null references.
+- Batch 3 contract tests cover monotonic timing, cancelled/failed sample
+  exclusion, usage-unavailable behavior, memory parsing, privacy, error-code
+  stability, and no-business-side-effect boundaries.
+
+The real performance, VRAM, and end-to-end measurement state remains
+`NOT RUN`.  No Phase 5 or A/B acceptance semantics were changed.
+
+Batch 3 status:
+
+```text
+MEASUREMENT INFRASTRUCTURE: READY
+REAL PERFORMANCE:           NOT RUN
+REAL VRAM:                  NOT RUN
+REAL E2E:                   NOT RUN
+```

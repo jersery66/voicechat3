@@ -54,6 +54,8 @@ def test_manifests_contain_no_measured_hardware_result():
     assert all(value["status"] == "NOT RUN" for value in acceptance["checks"].values())
     assert acceptance["promotion"]["status"] == "NOT APPROVED"
     assert acceptance["promotion_status"] == "NOT APPROVED"
+    for slot in acceptance["measurement_evidence_slots"].values():
+        assert slot == {"status": "NOT RUN", "evidence_reference": None}
 
 
 def test_write_manifests_records_both_artifacts_and_provenance(tmp_path):

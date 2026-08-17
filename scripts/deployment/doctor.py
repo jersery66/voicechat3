@@ -57,6 +57,10 @@ REQUIRED_FILES = (
     "scripts/acceptance/blackwell_live_probe.py",
     "scripts/acceptance/qwen_dialogue_ab.py",
     "scripts/deployment/manifest.py",
+    "scripts/deployment/measurement.py",
+    "scripts/deployment/memory_snapshot.py",
+    "scripts/deployment/observability.py",
+    "scripts/deployment/error_taxonomy.py",
     "knowledge_base/knowledge.json",
 )
 DEPENDENCY_MODULES = {

@@ -145,6 +145,12 @@ ACCEPTANCE_STATES = {
     "continuous_stability": "NOT RUN",
 }
 
+MEASUREMENT_EVIDENCE_SLOTS = {
+    "performance_measurement": {"status": "NOT RUN", "evidence_reference": None},
+    "memory_measurement": {"status": "NOT RUN", "evidence_reference": None},
+    "e2e_timing": {"status": "NOT RUN", "evidence_reference": None},
+}
+
 
 def build_acceptance_manifest(
     profile_name: str,
@@ -170,6 +176,7 @@ def build_acceptance_manifest(
         "offline_readiness": {"status": "NOT RUN"},
         **{name: {"status": status} for name, status in ACCEPTANCE_STATES.items()},
         "checks": {name: {"status": status} for name, status in ACCEPTANCE_STATES.items()},
+        "measurement_evidence_slots": dict(MEASUREMENT_EVIDENCE_SLOTS),
         "promotion": {"status": "NOT APPROVED"},
         "promotion_status": "NOT APPROVED",
         "evidence_references": {},
