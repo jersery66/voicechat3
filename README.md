@@ -833,7 +833,12 @@ Default: listens on `http://localhost:11434`.
 
 ---
 
-#### 🖥️ A100 80GB production deployment: two vLLM services
+#### 🖥️ A100 80GB production deployment: two vLLM services (legacy)
+
+> Current RTX PRO 6000 Blackwell deployment work is documented in
+> `docs/deployment/rtxpro6000_operator_runbook.md`. The A100 launcher and the
+> provisional budget below are legacy compatibility material; do not use them
+> as the current Blackwell acceptance procedure.
 
 The current A100 production profile remains two vLLM services: the 72B dialogue model at 127.0.0.1:8000 and the 3B Router at 127.0.0.1:8001. Phase 1 does not change the models, ports, or launch budget; the crisis/Guard path is temporarily detached from the production runtime, with the related source retained only under `safety/` for future redesign.
 

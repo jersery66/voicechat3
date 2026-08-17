@@ -57,6 +57,7 @@ REQUIRED_FILES = (
     "scripts/acceptance/blackwell_live_probe.py",
     "scripts/acceptance/qwen_dialogue_ab.py",
     "scripts/deployment/manifest.py",
+    "scripts/deployment/final_readiness.py",
     "scripts/deployment/measurement.py",
     "scripts/deployment/memory_snapshot.py",
     "scripts/deployment/observability.py",

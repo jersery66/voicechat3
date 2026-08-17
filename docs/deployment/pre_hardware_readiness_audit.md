@@ -243,3 +243,28 @@ REAL TTS:                        NOT RUN
 REAL E2E:                        NOT RUN
 REAL HARDWARE:                   NOT RUN
 ```
+
+## Batch 5 final pre-hardware closure
+
+Batch 5 is documentation and final-gate closure only:
+
+- Operator installation/start/verify/acceptance flow is in
+  `rtxpro6000_operator_runbook.md`.
+- First-machine, model-switch, shutdown/recovery, troubleshooting, and
+  artifact-location procedures are explicit and contain no unverified driver,
+  CUDA, vLLM, or performance requirements.
+- `.env.example` contains only safe variable names/examples; no credentials,
+  personal paths, or participant data are committed.
+- `pre_hardware_release_inventory.md` and `pre_hardware_freeze.md` describe
+  the frozen baseline/candidate boundary and the remaining hardware gates.
+- `scripts/deployment/final_readiness.py` aggregates deterministic regression
+  and documentation completeness. Its PASS means pre-hardware software
+  readiness only; all real hardware/provider fields remain `NOT RUN`.
+
+Batch 5 target status:
+
+```text
+PRE-HARDWARE DEVELOPMENT: COMPLETE
+OFFLINE INTEGRATION:      PASS / SIMULATED
+REAL HARDWARE:            NOT RUN
+```
