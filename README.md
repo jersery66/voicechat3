@@ -1,7 +1,7 @@
 # 💚 心医生 Heart Doctor
 
-> 🏥 面向戒治与封闭式康复场景的本地化 AI 心理咨询语音系统
-> 🌐 Local-first AI voice counseling system for closed rehabilitation environments.
+> 🏥 面向戒治与封闭式康复场景的本地化 AI 心理支持与结构化评估语音系统
+> 🌐 Local-first AI psychological-support and structured-assessment voice system for closed rehabilitation environments.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![PySide6](https://img.shields.io/badge/UI-PySide6-green)
@@ -18,9 +18,29 @@
 
 ## 🇨🇳 中文
 
+### 当前验证状态
+
+```text
+Software regression: 1011 passed / 0 failed
+Pre-hardware validation tag: pre-hardware-validation-ready-v2-20260817
+RTX PRO 6000: NOT RUN
+WSL CUDA: NOT RUN
+Real vLLM: NOT RUN
+Real Phase 5: NOT RUN
+Real A/B: NOT RUN
+Real STT/TTS/E2E: NOT RUN
+Qwen3.8 promotion: NOT APPROVED
+```
+
+软件回归通过不等于真实硬件部署通过。真实硬件、模型加载、性能和音频
+链路必须在目标 Windows + WSL2 工作站上重新测量。
+
 ### 📖 1. 项目简介
 
-**心医生 Heart Doctor** 是一个面向强制隔离戒毒所、封闭式康复机构、心理健康研究场景的本地化 AI 心理咨询语音系统。系统通过语音识别、大语言模型、情绪识别、心理量表、RAG 专家知识库、放松训练与自动化报告生成，构建一套完整的 **"对话—评估—干预—报告"** 闭环。
+**心医生 Heart Doctor** 是一个面向戒治与封闭式康复场景的本地化 AI
+心理支持与结构化评估语音系统。系统提供支持性对话、结构化心理状态采集、
+辅助训练与研究记录，不替代心理咨询师、精神科医生或机构危机处置流程，
+也不承担诊断、治疗或专业咨询权威。
 
 🎯 本项目重点解决封闭环境中的几个实际问题：
 
@@ -38,14 +58,18 @@
 
 #### 🎙️ 2.1 语音心理咨询对话
 
-系统支持自然语音输入与文字输入。用户可以像和咨询师聊天一样表达烦躁、焦虑、失眠、情绪低落、人际冲突、戒断压力等问题，系统根据上下文生成口语化回应并通过 TTS 播放。
+系统支持自然语音输入与文字输入。用户可以用对话方式表达烦躁、焦虑、失眠、
+情绪低落、人际冲突、戒断压力等问题，系统根据上下文生成支持性回应并通过
+TTS 播放；专业判断和危机处置仍由机构流程与合格专业人员负责。
 
 ```text
 🎤 用户语音 / 文本
     ↓
 📝 STT 语音转写
     ↓
-🧭 RouterProposal（仅提供建议）
+🔎 AgentObservation
+   └─ RouterProposal（仅提供建议）
+＋ deterministic TurnSignals
     ↓
 ⚖️ TurnPolicy
     ↓
@@ -53,7 +77,7 @@
     ↓
 📊 ScaleRuntime / SessionEngine / TurnDecision.needs_rag
     ↓
-💬 72B 只负责生成自然语言
+💬 Dialogue LLM 只负责语言实现
     ↓
 🔊 句子交付 → TTS / UI / 历史记录
 ```
@@ -61,6 +85,9 @@
 `RouterProposal` 不能直接启动量表、放松、游戏或结束会话；`TurnPolicy`
 是每轮唯一的业务裁决者，系统只执行它产生的一个 `TurnDecision`。模型输出
 不再承担业务控制协议，`TurnDecision.needs_rag` 是生产 RAG 的唯一检索门。
+`AgentObservation` 的 intent/emotion 只用于观察和报告；`EmotionTracker` 只提供
+语言风格建议，不能直接推荐具体训练。具体呼吸、肌肉或冥想训练，以及量表
+暂停/恢复，必须由 `TurnPolicy → TurnDecision` 授权后执行。
 
 ---
 
@@ -110,14 +137,20 @@
 
 ---
 
-#### 🧘 2.4 放松训练推荐
+#### 🧘 2.4 放松训练与授权边界
 
-系统根据对话内容、情绪状态自动推荐放松训练。推荐规则：
+具体放松训练不是情绪模块或语言模型的隐式权力。`EmotionTracker` 只能影响
+回应节奏、反映性倾听和支持性语言；只有 `TurnPolicy` 生成
+`TurnDecision.RECOMMEND_RELAXATION` 时，Pipeline 才会加入具体训练引导。
 
-* ⏰ **一个对话最多推荐一次**放松训练；
-* 🚫 **量表答题期间不推荐**（`waiting_scale_answer=True` 时禁止）；
-* 🔄 放松训练可在量表间隙插入，但必须等当前题完成后；
-* 📋 放松结束后系统主动恢复量表，继续补问未完成的问题。
+用户明确要求某种方式时，明确类型优先于 Agent 建议；active scale 是否暂停、
+训练结束后是否恢复量表，也都由 `TurnDecision` 进入既有 Runtime 流程。系统仍
+遵守以下运行约束：
+
+* ⏰ **一个会话最多完成一次**放松训练；
+* 🚫 未经 `TurnDecision` 授权不得推荐具体训练；
+* 🔄 active scale 的暂停/恢复必须由 Runtime 执行；
+* 📋 放松结束后按现有状态恢复未完成的量表项目。
 
 支持的放松方式：
 
@@ -168,8 +201,11 @@ flowchart TD
     A[🎤 用户语音 / 文本输入] --> B[📝 STT 转写 FunASR]
     B --> B2[🔤 ASR 纠错]
     B2 --> C[⚙️ ConversationPipeline]
-    C --> D[🧭 RouterProposal<br/>仅提供建议]
-    D --> E[⚖️ TurnPolicy]
+    C --> D[🔎 AgentObservation]
+    D --> D2[🧭 RouterProposal<br/>仅提供建议]
+    C --> S[🧩 deterministic TurnSignals]
+    D2 --> E[⚖️ TurnPolicy]
+    S --> E
     E --> F[✅ 唯一 TurnDecision]
     F --> G[📊 ScaleRuntime / SessionEngine 执行]
     F --> R{needs_rag?}
@@ -177,9 +213,10 @@ flowchart TD
     R -->|否| I[🧩 对话上下文]
     G --> I
     H --> I
-    I --> J[💬 72B 语言实现<br/>(vLLM / Ollama)]
-    J --> K[📝 句子交付与标准化]
-    K --> L[🔊 TTS / UI / 历史记录]
+    I --> J[💬 Dialogue LLM 语言实现<br/>(vLLM)]
+    J --> K[🛡️ PreDeliveryGuard]
+    K --> K2[📝 句子交付与标准化]
+    K2 --> L[🔊 TTS / UI / 历史记录]
     G --> M[📋 量表结果 / 会话事件]
     M --> N[📄 报告生成]
     N --> O[💾 JSON + PDF 报告]
@@ -193,7 +230,7 @@ flowchart TD
 stateDiagram-v2
     [*] --> IDLE
     IDLE --> CHATTING: ✅ 确认参与者信息
-    CHATTING --> RELAXATION_RECOMMENDED: 🧘 推荐放松训练
+    CHATTING --> RELAXATION_RECOMMENDED: 🧘 TurnDecision 授权放松
     RELAXATION_RECOMMENDED --> VIDEO_PLAYING: ▶️ 用户点击训练
     VIDEO_PLAYING --> POST_RELAXATION: ⏹️ 视频结束
     POST_RELAXATION --> CHATTING: 💬 继续聊天
@@ -211,8 +248,10 @@ stateDiagram-v2
 |------|-------------|------|
 | 🖥️ 桌面 UI | PySide6 | 主窗口、控制面板、对话面板、弹窗 |
 | 🎤 语音识别 | FunASR | 本地语音转写 |
-| 🧠 大语言模型 | vLLM（A100）/ Ollama（6GB 开发） | 对话服务 |
-| 🤖 小模型 Agent | vLLM（A100）/ Ollama（6GB 开发） | 意图分类、情绪识别、报告辅助 |
+| 🧠 Dialogue LLM | WSL2 vLLM | RTX PRO 6000 96GB target validation |
+| 🤖 Agent | Qwen2.5-3B-Instruct-AWQ via vLLM | structured observation / routing proposal |
+| 🧪 Dialogue baseline | Qwen2.5-72B-Instruct-AWQ | real validation NOT RUN |
+| 🧪 Dialogue candidate | Qwen3.8-27B-FP8 | explicit opt-in; NOT APPROVED / NOT RUN |
 | 🔊 语音合成 | VoxCPM2 | 本地 TTS、音色克隆、流式播放 |
 | 🎬 视频/游戏 | pygame / moviepy | 放松视频、小游戏 |
 | 📄 报告生成 | ReportLab | PDF 报告 |
@@ -281,53 +320,34 @@ pip install -r requirements-dev.txt
 
 ---
 
-#### 🧠 5.5 第四步：安装并配置 Ollama（LLM 服务）
+#### 🧠 5.5 第四步：准备 Windows + WSL2 Blackwell 部署
 
-**5.5.1 安装 Ollama**
+当前目标部署是 Windows 11 + RTX PRO 6000 Blackwell 96GB。Windows 负责
+桌面 UI、STT、TTS 和业务运行时；WSL2 内运行两个 loopback-only vLLM 服务：
 
-访问 [ollama.com](https://ollama.com) 下载并安装 Ollama。
-
-**5.5.2 拉取对话模型**
-
-```bash
-# 推荐模型（根据显存选择）
-ollama pull qwen2.5:72b      # 推荐，约 40GB 显存
-ollama pull qwen2.5:14b      # 备选，约 10GB 显存
-ollama pull qwen2.5:8b       # 轻量，约 6GB 显存
+```text
+Agent    Qwen/Qwen2.5-3B-Instruct-AWQ   http://127.0.0.1:8001/v1
+Baseline Qwen/Qwen2.5-72B-Instruct-AWQ  http://127.0.0.1:8000/v1
+Candidate Qwen/Qwen3.8-27B-FP8          explicit opt-in / NOT APPROVED
 ```
 
-**5.5.3 启动 Ollama 服务**
-
-```bash
-ollama serve
-```
-
-默认监听 `http://localhost:11434`。
-
-> 💡 **提示**：系统会自动检测本机已安装的 Ollama 模型，并优先选择合适的模型。也可以通过环境变量 `OLLAMA_MODEL` 指定。
-
----
-
-#### 🖥️ A100 80GB 生产部署：vLLM 双服务
-
-当前 A100 生产 profile 仍是两个 vLLM 服务：72B 对话模型位于 127.0.0.1:8000，3B Router 位于 127.0.0.1:8001。Phase 1 未修改模型、端口或启动预算；危机/Guard 链路已暂时从生产运行时拆除，相关源代码仅保留在 safety/ 供后续重新设计。
-
-在 A100 主机安装 vLLM，并确保 `vllm` 命令可用后，运行：
+真实 GPU、CUDA、vLLM 和模型兼容性仍为 `NOT RUN`。上机时使用不可变
+`pre-hardware-validation-ready-v2-20260817`，先执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_a100_vllm_stack.ps1
+python scripts\real_hardware_preflight.py --profile rtxpro6000_96g
+.\scripts\windows\start_blackwell_stack.ps1 `
+  -Profile rtxpro6000_96g `
+  -DialogueGpuMemoryUtilization <measured-value> `
+  -AgentGpuMemoryUtilization <measured-value>
 ```
 
-该脚本会：
+必须先启动并验证 Agent，再启动一个 dialogue 模型；显存比例必须由操作员
+显式提供，不能复用旧 A100 的预算。完整顺序见
+`deployment/real_hardware_validation/README.md`。
 
-1. 设置 `VOICECHAT_DEPLOYMENT_PROFILE=a100_80g`；
-2. 仅在 `127.0.0.1` 启动 `8000` 的 `Qwen/Qwen2.5-72B-Instruct-AWQ`；
-3. 仅在 `127.0.0.1` 启动 `8001` 的 `Qwen/Qwen2.5-3B-Instruct-AWQ`；
-4. 使用 `0.82 + 0.08 = 0.90` 的显存上限，并在两个 `/v1/models` 端点就绪后启动桌面程序。
-
-不要把 vLLM 端口直接暴露到局域网；若需要远程桌面或远程服务，请在受控网络中通过具备认证和 TLS 的反向代理访问。
-
-`run_local.ps1` 和 `start_voicechat.ps1` 仍只服务于 6GB 开发机的 Ollama 调试，不是 A100 生产入口。
+Ollama 仍可作为 `dev_6g` / `dev_vllm_6g` 的开发兼容路径，但不是当前
+Blackwell 上机入口，也不是正式模型验收依据。
 
 ---
 
@@ -371,12 +391,12 @@ $env:VOICE_PROMPT_TEXT="这里填写参考音频对应的文本内容"
 
 ---
 
-#### ⚙️ 5.8 第七步：配置环境变量（汇总）
+#### ⚙️ 5.8 第七步：配置本地路径与开发兼容变量
 
 创建一个启动脚本或在终端中设置：
 
 ```powershell
-# Ollama 服务地址
+# 仅开发兼容路径使用；Blackwell 生产端点由 DeploymentProfile 管理
 $env:OLLAMA_HOST="http://localhost:11434"
 
 # VoxCPM2 TTS 模型路径
@@ -389,7 +409,7 @@ $env:VOICE_PROMPT_TEXT="参考音频对应的文本"
 # （可选）FunASR 模型路径
 $env:FUNASR_MODEL_PATH="D:\models\Fun-ASR-Nano-2512"
 
-# （可选）指定 Ollama 模型
+# （可选，仅开发兼容路径）指定 Ollama 模型
 $env:OLLAMA_MODEL="qwen2.5:72b"
 ```
 
@@ -443,7 +463,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 1. 👤 启动后填写参与者信息并确认；
 2. 🎤 通过语音或文字开始对话；
 3. 💬 前几轮建立关系，之后系统自然进入症状评估；
-4. 📋 量表完成后推荐放松训练；
+4. 📋 由 TurnPolicy 授权后执行量表间隙或用户明确要求的放松训练；
 5. 🧘 用户选择继续聊天或结束会话；
 6. 📄 结束时自动生成报告。
 
@@ -542,9 +562,33 @@ POST_RELAXATION_TIMEOUT = 60   # ⏳ 放松后等待选择的超时时间
 
 ## 🇬🇧 English
 
+### Current validation status
+
+```text
+Software regression: 1011 passed / 0 failed
+Pre-hardware validation tag: pre-hardware-validation-ready-v2-20260817
+RTX PRO 6000: NOT RUN
+WSL CUDA: NOT RUN
+Real vLLM: NOT RUN
+Real Phase 5: NOT RUN
+Real A/B: NOT RUN
+Real STT/TTS/E2E: NOT RUN
+Qwen3.8 promotion: NOT APPROVED
+```
+
+Passing software contracts does not imply real hardware deployment. GPU,
+model, performance, and audio evidence must be measured on the target
+Windows + WSL2 workstation.
+
 ### 📖 1. Overview
 
-**Heart Doctor (心医生)** 💚 is a local-first AI voice counseling system designed for mandatory rehabilitation facilities, closed recovery environments, and mental health research settings. It integrates speech recognition, large language models, emotion detection, psychological scales, RAG knowledge base, relaxation training, and automated report generation into a complete **"dialogue — assessment — intervention — report"** pipeline.
+**Heart Doctor (心医生)** 💚 is a local-first AI psychological-support and
+structured-assessment voice system for rehabilitation facilities, closed
+recovery environments, and mental-health research. It provides supportive
+dialogue, structured state collection, assisted exercises, and research
+records; it does not replace a counselor, psychiatrist, or institutional
+crisis process and does not claim diagnostic, therapeutic, or professional
+counseling authority.
 
 🎯 Key problems addressed:
 
@@ -560,7 +604,7 @@ The system runs as a desktop application. All core models and data can be deploy
 
 ### ✨ 2. Core Capabilities
 
-#### 🎙️ 2.1 Voice Counseling Dialogue
+#### 🎙️ 2.1 Voice Support Dialogue
 
 Supports natural voice and text input. Users express their concerns conversationally; the system generates spoken responses via LLM and plays them back through TTS.
 
@@ -569,7 +613,9 @@ Supports natural voice and text input. Users express their concerns conversation
     ↓
 📝 STT transcription
     ↓
-🧭 RouterProposal (advisory only)
+🔎 AgentObservation
+   └─ RouterProposal (advisory only)
+＋ deterministic TurnSignals
     ↓
 ⚖️ TurnPolicy
     ↓
@@ -577,7 +623,7 @@ Supports natural voice and text input. Users express their concerns conversation
     ↓
 📊 ScaleRuntime / SessionEngine / TurnDecision.needs_rag
     ↓
-💬 72B language realization only
+💬 Dialogue LLM language realization only
     ↓
 🔊 Sentence delivery → TTS / UI / history
 ```
@@ -586,7 +632,10 @@ Supports natural voice and text input. Users express their concerns conversation
 or session end. `TurnPolicy` is the sole per-turn business authority and the
 runtime executes only its one `TurnDecision`. Model output no longer carries a
 business-control protocol; `TurnDecision.needs_rag` is the sole production RAG
-gate.
+gate. `AgentObservation` intent/emotion are observation/reporting data only.
+`EmotionTracker` can change response style but cannot recommend a concrete
+exercise; breathing, muscle relaxation, meditation, and scale pause/resume
+require an authorized `TurnPolicy → TurnDecision`.
 
 ---
 
@@ -636,14 +685,23 @@ Backend handles:
 
 ---
 
-#### 🧘 2.4 Relaxation Training Recommendation
+#### 🧘 2.4 Relaxation and authority boundary
 
-The system automatically recommends relaxation training based on conversation content and emotional state. Rules:
+Concrete relaxation is not an implicit power of the emotion module or the
+language model. `EmotionTracker` provides style guidance only. A concrete
+exercise is added to language context only after `TurnPolicy` emits
+`TurnDecision.RECOMMEND_RELAXATION`.
 
-* ⏰ **At most one relaxation** per conversation session;
-* 🚫 **Not recommended during active scale** (when `waiting_scale_answer=True`);
-* 🔄 Can be inserted between scale items, but must wait for current item to complete;
-* 📋 After relaxation ends, system resumes scale and continues asking remaining items.
+An explicit user-requested type takes precedence over an Agent suggestion.
+Whether an active scale pauses and how it resumes are Runtime effects of that
+decision.
+
+Rules:
+
+* ⏰ At most one relaxation is completed per session;
+* 🚫 No concrete exercise without an authorized decision;
+* 🔄 Active-scale pause/resume is executed by the Runtime;
+* 📋 Remaining scale items resume through the existing state contract.
 
 Supported relaxation types:
 
@@ -693,8 +751,11 @@ All participant data saved locally by date and ID:
 flowchart TD
     A[🎤 User voice / text input] --> B[📝 STT - FunASR]
     B --> C[⚙️ ConversationPipeline]
-    C --> D[🧭 RouterProposal<br/>advisory only]
-    D --> E[⚖️ TurnPolicy]
+    C --> D[🔎 AgentObservation]
+    D --> D2[🧭 RouterProposal<br/>advisory only]
+    C --> S[🧩 deterministic TurnSignals]
+    D2 --> E[⚖️ TurnPolicy]
+    S --> E
     E --> F[✅ Exactly one TurnDecision]
     F --> G[📊 ScaleRuntime / SessionEngine execution]
     F --> R{needs_rag?}
@@ -702,9 +763,10 @@ flowchart TD
     R -->|no| I[🧩 Conversation context]
     G --> I
     H --> I
-    I --> J[💬 72B language realization<br/>(vLLM / Ollama)]
-    J --> K[📝 Sentence delivery + normalization]
-    K --> L[🔊 TTS / UI / history]
+    I --> J[💬 Dialogue LLM language realization<br/>(vLLM)]
+    J --> K[🛡️ PreDeliveryGuard]
+    K --> K2[📝 Sentence delivery + normalization]
+    K2 --> L[🔊 TTS / UI / history]
     G --> M[📋 Scale results / session events]
     M --> N[📄 Report generation]
     N --> O[💾 JSON + PDF reports]
@@ -718,7 +780,7 @@ flowchart TD
 stateDiagram-v2
     [*] --> IDLE
     IDLE --> CHATTING: ✅ Confirm participant info
-    CHATTING --> RELAXATION_RECOMMENDED: 🧘 Recommend relaxation
+    CHATTING --> RELAXATION_RECOMMENDED: 🧘 TurnDecision approves relaxation
     RELAXATION_RECOMMENDED --> VIDEO_PLAYING: ▶️ User starts training
     VIDEO_PLAYING --> POST_RELAXATION: ⏹️ Video ends
     POST_RELAXATION --> CHATTING: 💬 Continue chatting
@@ -736,8 +798,10 @@ stateDiagram-v2
 |-------|-----------|-------------|
 | 🖥️ Desktop UI | PySide6 | Main window, panels, dialogs |
 | 🎤 Speech recognition | FunASR | Local STT |
-| 🧠 LLM | vLLM (A100) / Ollama (6GB development) | Dialogue service |
-| 🤖 Agent models | vLLM (A100) / Ollama (6GB development) | Intent, emotion, report assist |
+| 🧠 Dialogue LLM | WSL2 vLLM | RTX PRO 6000 Blackwell 96GB target |
+| 🤖 Agent | Qwen2.5-3B-Instruct-AWQ via vLLM | Structured observation / routing proposal |
+| 🧪 Dialogue baseline | Qwen2.5-72B-Instruct-AWQ | Real validation NOT RUN |
+| 🧪 Dialogue candidate | Qwen3.8-27B-FP8 | Explicit opt-in; NOT APPROVED / NOT RUN |
 | 🔊 TTS | VoxCPM2 | Local synthesis, voice cloning, streaming |
 | 🎬 Video / Games | pygame / moviepy | Relaxation media |
 | 📄 Reports | ReportLab | PDF generation |
@@ -806,51 +870,37 @@ pip install -r requirements-dev.txt
 
 ---
 
-#### 🧠 5.5 Step 4: Install and Configure Ollama (LLM Service)
+#### 🧠 5.5 Step 4: Prepare the Windows + WSL2 Blackwell deployment
 
-**5.5.1 Install Ollama**
+The current target is Windows 11 + NVIDIA RTX PRO 6000 Blackwell 96GB. Windows
+hosts the UI, STT, TTS, and business runtime; WSL2 hosts two loopback-only vLLM
+services:
 
-Visit [ollama.com](https://ollama.com) to download and install Ollama.
-
-**5.5.2 Pull a Chat Model**
-
-```bash
-# Recommended models (choose based on GPU memory)
-ollama pull qwen2.5:72b      # Recommended, ~40GB VRAM
-ollama pull qwen2.5:14b      # Alternative, ~10GB VRAM
-ollama pull qwen2.5:8b       # Lightweight, ~6GB VRAM
+```text
+Agent     Qwen/Qwen2.5-3B-Instruct-AWQ   http://127.0.0.1:8001/v1
+Baseline  Qwen/Qwen2.5-72B-Instruct-AWQ  http://127.0.0.1:8000/v1
+Candidate Qwen/Qwen3.8-27B-FP8          explicit opt-in / NOT APPROVED
 ```
 
-**5.5.3 Start Ollama Service**
-
-```bash
-ollama serve
-```
-
-Default: listens on `http://localhost:11434`.
-
-> 💡 **Tip**: The system auto-detects installed Ollama models and picks the best one. Override with `OLLAMA_MODEL` env var.
-
----
-
-#### 🖥️ A100 80GB production deployment: two vLLM services (legacy)
-
-> Current RTX PRO 6000 Blackwell deployment work is documented in
-> `docs/deployment/rtxpro6000_operator_runbook.md`. The A100 launcher and the
-> provisional budget below are legacy compatibility material; do not use them
-> as the current Blackwell acceptance procedure.
-
-The current A100 production profile remains two vLLM services: the 72B dialogue model at 127.0.0.1:8000 and the 3B Router at 127.0.0.1:8001. Phase 1 does not change the models, ports, or launch budget; the crisis/Guard path is temporarily detached from the production runtime, with the related source retained only under `safety/` for future redesign.
-
-After installing vLLM on the A100 host and making the `vllm` command available, run:
+GPU identity, WSL CUDA, vLLM, and model compatibility are still `NOT RUN`.
+Use the immutable `pre-hardware-validation-ready-v2-20260817` tag and begin
+with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_a100_vllm_stack.ps1
+python scripts\real_hardware_preflight.py --profile rtxpro6000_96g
+.\scripts\windows\start_blackwell_stack.ps1 `
+  -Profile rtxpro6000_96g `
+  -DialogueGpuMemoryUtilization <measured-value> `
+  -AgentGpuMemoryUtilization <measured-value>
 ```
 
-The launcher sets `VOICECHAT_DEPLOYMENT_PROFILE=a100_80g`, starts loopback-only endpoints for the 72B dialogue model on `8000` and the 3B Agent on `8001`, budgets GPU memory at `0.82 + 0.08 = 0.90`, verifies both `/v1/models` endpoints, then opens the desktop application.
+Start and verify Agent first, then one dialogue model. Memory utilization must
+be supplied by the operator; the old A100 budget is not a Blackwell default.
+See `deployment/real_hardware_validation/README.md` for the complete order.
 
-Do not expose vLLM ports directly to a LAN. Remote access requires a controlled network with an authenticated TLS reverse proxy. `run_local.ps1` and `start_voicechat.ps1` remain Ollama-only development entry points for the 6GB machine.
+Ollama remains a development compatibility path for `dev_6g` and
+`dev_vllm_6g`; it is not the Blackwell production entrypoint or a real-model
+acceptance source.
 
 ---
 
@@ -894,12 +944,12 @@ $env:VOICE_PROMPT_TEXT="Text content of the reference audio"
 
 ---
 
-#### ⚙️ 5.8 Step 7: Configure Environment Variables (Summary)
+#### ⚙️ 5.8 Step 7: Configure Paths and Development Compatibility Variables
 
 Create a startup script or set in terminal:
 
 ```powershell
-# Ollama service address
+# Development compatibility path only; Blackwell endpoints are profile-owned
 $env:OLLAMA_HOST="http://localhost:11434"
 
 # VoxCPM2 TTS model path
@@ -912,7 +962,7 @@ $env:VOICE_PROMPT_TEXT="Reference audio text"
 # (Optional) FunASR model path
 $env:FUNASR_MODEL_PATH="D:\models\Fun-ASR-Nano-2512"
 
-# (Optional) Specify Ollama model
+# (Optional, development compatibility path) Specify Ollama model
 $env:OLLAMA_MODEL="qwen2.5:72b"
 ```
 
@@ -966,7 +1016,7 @@ Check that the system's default audio output device is working. `sounddevice` de
 1. 👤 Launch and confirm participant information;
 2. 🎤 Start conversation via voice or text;
 3. 💬 Early rounds build rapport; system naturally transitions to symptom assessment;
-4. 📋 After scales complete, relaxation training is recommended;
+4. 📋 Relaxation is delivered only after an authorized TurnDecision or an explicit user request;
 5. 🧘 User chooses to continue chatting or end the session;
 6. 📄 Reports are generated automatically at session end.
 

@@ -16,7 +16,7 @@ corrected workstation candidate:
 
 validation-ready handoff:
   pre-hardware-validation-ready-v2-20260817
-  -> created after this closure commit
+  -> f33acb57d2c1d5ece35aa946bc40206113a14d24
 ```
 
 The candidate is still unvalidated. RTX identity, WSL CUDA, vLLM model load,
