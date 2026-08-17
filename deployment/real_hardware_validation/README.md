@@ -13,16 +13,20 @@ original freeze:
 corrected workstation candidate:
   pre-hardware-corrected-20260817
   -> e4de593321a6334099971ac5a0d26c9141c419b4
+
+validation-ready handoff:
+  pre-hardware-validation-ready-v2-20260817
+  -> created after this closure commit
 ```
 
 The candidate is still unvalidated. RTX identity, WSL CUDA, vLLM model load,
 VRAM coexistence, Phase 5, A/B, STT, TTS, and end-to-end audio are all
 `NOT RUN` until the target Windows workstation produces measured artifacts.
 
-For the complete handoff (including this directory and the two helper
-scripts), check out the remote `codex/runtime-ordering-corrections` head. The
-corrected runtime tag is its ancestor and remains the identity to record in
-the acceptance artifacts. The commits after that tag are deployment
+For the complete immutable handoff (including this directory and the two
+helper scripts), check out `pre-hardware-validation-ready-v2-20260817`. The
+corrected runtime tag remains an ancestor and remains the runtime identity to
+record in acceptance artifacts. The commits after that tag are deployment
 documentation/observation tooling only; they do not change production
 behavior.
 
@@ -59,6 +63,11 @@ This package does not replace the frozen tools:
 
 No script in this package selects a GPU, changes `.wslconfig`, installs a
 driver, downloads a model, tunes memory utilization, or promotes Qwen3.8.
+
+`preflight.json` keeps execution and verdict separate: `execution` is
+`RAN`/`NOT RUN`, `evidence_type` is `MEASURED`/`NOT AVAILABLE`, and `status`
+is `PASS`/`FAIL`/`NOT RUN`. A real PyTorch or vLLM failure therefore remains
+`MEASURED` + `FAIL`; it is never relabeled as `NOT RUN`.
 
 ## Evidence boundary
 

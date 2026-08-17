@@ -133,6 +133,40 @@ def _parse_json_stdout(result: dict[str, Any]) -> dict[str, Any]:
         return {**result, "status": "FAIL", "error": "command did not return JSON"}
 
 
+_HARDWARE_EVIDENCE_CHECKS = (
+    "windows_gpu",
+    "wsl_gpu",
+    "windows_wsl_gpu_consistency",
+    "torch_cuda",
+    "vllm_version",
+)
+
+
+def _evidence_metadata(checks: dict[str, Any], *, overall_status: str) -> dict[str, str]:
+    """Separate execution, evidence availability, and acceptance status."""
+    statuses = [checks.get(name, {}).get("status") for name in _HARDWARE_EVIDENCE_CHECKS]
+    measured = any(status in {"PASS", "FAIL"} for status in statuses)
+    hardware_failed = any(status == "FAIL" for status in statuses)
+    if overall_status == "PASS":
+        evidence_type = "MEASURED"
+    elif measured:
+        evidence_type = "MEASURED"
+    else:
+        evidence_type = "NOT AVAILABLE"
+    if overall_status == "PASS":
+        hardware_validation = "PASS"
+    elif hardware_failed:
+        hardware_validation = "FAIL"
+    else:
+        hardware_validation = "NOT RUN"
+    return {
+        "execution": "RAN",
+        "evidence_type": evidence_type,
+        "status": overall_status,
+        "hardware_validation": hardware_validation,
+    }
+
+
 def _validate_wsl2_listing(result: dict[str, Any], distro: str | None) -> dict[str, Any]:
     """Require at least one WSL2 distribution before CUDA probing."""
     if result["status"] != "PASS":
@@ -240,16 +274,15 @@ def run_preflight(
         "vllm_version",
     )
     overall = "PASS" if all(checks[name].get("status") == "PASS" for name in required) else "FAIL"
-    evidence_type = "MEASURED" if overall == "PASS" else "NOT RUN"
+    evidence = _evidence_metadata(checks, overall_status=overall)
     artifact = {
         "schema_version": 1,
         "artifact_type": "REAL_HARDWARE_PREFLIGHT",
-        "evidence_type": evidence_type,
+        **evidence,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
         "profile": profile_name,
         "distro": distro,
-        "hardware_validation": "PASS" if windows_gpu and wsl_gpu and overall == "PASS" else "NOT RUN",
         "overall_status": overall,
         "checks": checks,
         "windows_gpu": windows_gpu.to_dict() if windows_gpu else None,

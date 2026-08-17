@@ -10,6 +10,8 @@ acceptance. It is not a hardware result.
 - Original freeze identity: Git tag `pre-hardware-freeze-20260817` (historical)
 - Corrected workstation candidate: Git tag `pre-hardware-corrected-20260817`
   pointing to `e4de593321a6334099971ac5a0d26c9141c419b4`
+- Immutable validation handoff: Git tag `pre-hardware-validation-ready-v2-20260817`
+  (created on the final closure commit)
 - Functional Batch 5 content commit: `83e48184e304150a380c7fcac44b21064a565779`
 - Baseline profile: `rtxpro6000_96g`
 - Candidate profile: `rtxpro6000_96g_qwen38_candidate`
