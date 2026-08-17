@@ -407,6 +407,7 @@ class ConversationPipeline:
         self._pre_delivery_guard = PreDeliveryGuard()
         self._guard_contexts: dict[int, GuardContext] = {}
         self._guard_states: dict[int, GenerationGuardState] = {}
+        self._guard_fallbacks: dict[int, str] = {}
         self.delivery_controller.add_cancel_listener(self._on_guard_generation_cancelled)
         # Scale administration has one mutable owner.  Pipeline keeps only
         # symptom observations used to build TurnSignals; it never mirrors
@@ -450,6 +451,7 @@ class ConversationPipeline:
             logger.debug(f"delivery queue shutdown error: {e}")
         self._guard_contexts.clear()
         self._guard_states.clear()
+        self._guard_fallbacks.clear()
 
     def reset_session(self):
         """Reset per-session state without touching unrelated services."""
@@ -463,14 +465,48 @@ class ConversationPipeline:
         self._proactive_relaxation_candidate = None
         self._guard_contexts.clear()
         self._guard_states.clear()
+        self._guard_fallbacks.clear()
 
     def _on_guard_generation_cancelled(self, event: Any) -> None:
         generation_id = getattr(event, "generation_id", None)
         if generation_id is not None:
             self._guard_contexts.pop(generation_id, None)
             self._guard_states.pop(generation_id, None)
+            self._guard_fallbacks.pop(generation_id, None)
 
-    def _set_guard_context(self, generation_id: Optional[int], decision: TurnDecision, runtime: Any) -> None:
+    def _build_pre_delivery_fallback(
+        self,
+        decision: TurnDecision,
+        runtime: Any,
+        user_text: str,
+        semantic_target: str | None,
+    ) -> str:
+        """Build one deterministic, model-free fallback for first-sentence blocks."""
+        if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE) and getattr(runtime, "active_scale", None):
+            return self._make_scale_clarify_reply(
+                runtime.active_scale,
+                getattr(runtime, "current_item", None) or 1,
+                user_text,
+            )
+        if decision.action is TurnAction.CLARIFY_INPUT:
+            if semantic_target == "night_waking":
+                return "我确认一下，你刚才说的是晚上中途不会醒，还是会醒？"
+            if semantic_target == "frequency":
+                return "我确认一下，你说的这个情况发生频率是怎样的？"
+            return "我确认一下，你刚才这句话具体是指什么情况？"
+        if decision.action is TurnAction.CONTINUE_SCALE and not getattr(runtime, "active_scale", None):
+            return "这部分我们先记下来了。你可以继续说。"
+        return "嗯，我在听着呢。[breath]你可以慢慢说。"
+
+    def _set_guard_context(
+        self,
+        generation_id: Optional[int],
+        decision: TurnDecision,
+        runtime: Any,
+        *,
+        user_text: str = "",
+        semantic_target: str | None = None,
+    ) -> None:
         if generation_id is None:
             return
         self._guard_contexts[generation_id] = GuardContext(
@@ -478,8 +514,15 @@ class ConversationPipeline:
             turn_action=decision.action,
             active_scale=getattr(runtime, "active_scale", None),
             current_scale_item=getattr(runtime, "current_item", None),
+            semantic_target=semantic_target,
         )
         self._guard_states.setdefault(generation_id, GenerationGuardState())
+        self._guard_fallbacks[generation_id] = self._build_pre_delivery_fallback(
+            decision,
+            runtime,
+            user_text,
+            semantic_target,
+        )
 
     def _ensure_guard_state(self) -> None:
         """Lazily support lightweight pipeline doubles used by old adapters."""
@@ -489,6 +532,8 @@ class ConversationPipeline:
             self._guard_contexts = {}
         if not hasattr(self, "_guard_states"):
             self._guard_states = {}
+        if not hasattr(self, "_guard_fallbacks"):
+            self._guard_fallbacks = {}
 
     def _session_state_name(self, configured: str = "CHATTING") -> str:
         """Return the current lifecycle state without owning that state."""
@@ -1158,7 +1203,13 @@ class ConversationPipeline:
         runtime = self.scale_runtime.snapshot()
         self._apply_scale_answer_transition(result.user_text, decision, result)
         runtime = self.scale_runtime.snapshot()
-        self._set_guard_context(config.generation_id, decision, runtime)
+        self._set_guard_context(
+            config.generation_id,
+            decision,
+            runtime,
+            user_text=result.user_text,
+            semantic_target=semantic_flags.semantic_target,
+        )
 
         # Apply the one turn's symptom observations only after the decision.
         if not before_runtime.active_scale and pre_deltas:
@@ -1220,8 +1271,8 @@ class ConversationPipeline:
 
         # --- No programmatic scale questions ---
         # Scales are explored naturally by the LLM via subtle system_suffix
-        # hints. Structured answer interpretation happens in the pure
-        # ScaleAnswerInterpreter after the response, not in the LLM branch.
+        # hints. Structured answer interpretation and Runtime transition have
+        # already happened before this language-generation branch.
 
         # Append extra system context (e.g. remaining scale questions at exit)
         if config.extra_system_suffix:
@@ -1319,6 +1370,7 @@ class ConversationPipeline:
             emit("finish_streaming", config.generation_id)
             self._guard_contexts.pop(config.generation_id, None)
             self._guard_states.pop(config.generation_id, None)
+            self._guard_fallbacks.pop(config.generation_id, None)
 
         # --- Prepare TTS text immediately ---
         # Limit to one question per reply to prevent rapid-fire questioning
@@ -1494,8 +1546,8 @@ class ConversationPipeline:
 
         This does NOT tell the LLM to "ask question N" or "score this item".
         Instead, it hints which symptom area to naturally explore, and lets
-        the LLM generate a conversational response. Background scoring
-        happens via the pure ScaleAnswerInterpreter after the turn.
+        the LLM generate a conversational response. Background scoring has
+        already passed through ScaleAnswerInterpreter and ScaleRuntime.
         """
         scale_def = self._scale_manager.get_scale_definition(scale_name)
         if scale_def is None:
@@ -2093,6 +2145,28 @@ class ConversationPipeline:
                 event.seq,
                 guard_result.reason,
             )
+            if (
+                state.delivered_sentence_count == 0
+                and not state.fallback_emitted
+                and self.delivery_controller.is_current(event.generation_id)
+            ):
+                fallback_text = self._guard_fallbacks.get(
+                    event.generation_id,
+                    "嗯，我在听着呢。[breath]你可以慢慢说。",
+                )
+                fallback_display = clean_for_display(fallback_text)
+                fallback_tts = clean_for_tts(fallback_text)
+                if fallback_display or fallback_tts:
+                    fallback_event = SentenceReady(
+                        event.generation_id,
+                        event.seq,
+                        fallback_display or fallback_tts,
+                        fallback_tts,
+                    )
+                    if self.delivery_controller.is_current(event.generation_id) and self.delivery_queue.enqueue(fallback_event):
+                        state.fallback_emitted = True
+                        state.delivered_sentence_count += 1
+                        emit("stream_text", fallback_event)
             return
         normalized_tts = clean_for_tts(guard_result.text)
         normalized_display = clean_for_display(guard_result.text)
@@ -2108,8 +2182,9 @@ class ConversationPipeline:
             return
         # Queue first so a worker cannot run against a sentence that was never
         # accepted by the generation owner.  UI commits visibility separately.
-        self.delivery_queue.enqueue(normalized)
-        emit("stream_text", normalized)
+        if self.delivery_queue.enqueue(normalized):
+            state.delivered_sentence_count += 1
+            emit("stream_text", normalized)
 
     def _emit_generation_text(
         self,

@@ -23,12 +23,15 @@ class GuardContext:
     turn_action: TurnAction = TurnAction.CHAT
     active_scale: str | None = None
     current_scale_item: int | None = None
+    semantic_target: str | None = None
     max_primary_questions: int = 1
 
 
 @dataclass
 class GenerationGuardState:
     primary_question_count: int = 0
+    delivered_sentence_count: int = 0
+    fallback_emitted: bool = False
     blocked_reason: str | None = None
 
 

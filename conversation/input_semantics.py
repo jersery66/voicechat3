@@ -7,7 +7,6 @@ clarification before interpretation.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 
@@ -34,10 +33,10 @@ class InputSemanticFlags:
         )
 
 
-_NEGATION_PATTERNS = ("中途不醒", "中途部醒", "不睡不着")
-_FREQUENCY_PATTERNS = ("大概两三天", "大概几天", "有时候吧", "偶尔吧", "说不准频率")
-_DURATION_PATTERNS = ("不知道多久", "大概几周", "大概几个月", "多长时间不清楚")
-_QUANTITY_RE = re.compile(r"(?:大概|差不多)?(?:两三|几|多少|[一二三四五六七八九十\d]+)(?:次|回|天|周|个月)")
+_NEGATION_PATTERNS = ("中途部醒", "不睡不着")
+_FREQUENCY_PATTERNS = ("说不准频率", "频率记不清", "频率我记不清", "频率不清楚", "不知道频率")
+_DURATION_PATTERNS = ("不知道多久", "多长时间我也不清楚", "多久也说不清", "持续多久不清楚")
+_QUANTITY_PATTERNS = ("几次记不清", "多少次记不清", "数量不清楚", "具体几次不知道")
 
 
 def inspect_input_semantics(text: str) -> InputSemanticFlags:
@@ -45,7 +44,7 @@ def inspect_input_semantics(text: str) -> InputSemanticFlags:
     negation = any(pattern in value for pattern in _NEGATION_PATTERNS)
     frequency = any(pattern in value for pattern in _FREQUENCY_PATTERNS)
     duration = any(pattern in value for pattern in _DURATION_PATTERNS)
-    quantity = bool(_QUANTITY_RE.search(value))
+    quantity = any(pattern in value for pattern in _QUANTITY_PATTERNS)
     polarity = negation
 
     reasons: list[str] = []

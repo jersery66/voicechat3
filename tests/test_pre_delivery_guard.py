@@ -76,6 +76,43 @@ def test_pipeline_guard_blocks_scale_wording_before_tts_without_changing_decisio
     try:
         result, _ = harness.run_turn("最近一直睡不着", proposal(RouterAction.START_SCALE, scale="PHQ-9", needs_rag=False))
         assert result.turn_decision.action is TurnAction.START_SCALE
+        assert len(harness.trace.visible_sentences) == 1
+        assert "PHQ" not in harness.trace.visible_sentences[0].text
+        assert harness.tts.started.wait(timeout=1.0)
+        assert len(harness.trace.tts_calls) == 1
+        assert "PHQ" not in harness.trace.tts_calls[0]
+    finally:
+        harness.shutdown()
+
+
+def test_first_unsafe_sentence_emits_one_safe_fallback_and_does_not_recurse():
+    from conversation.contracts import RouterAction
+    from tests.e2e.fixtures import ScenarioHarness, proposal
+
+    harness = ScenarioHarness(responses=["根据PHQ-9评分，你得3分。"])
+    try:
+        result, _ = harness.run_turn("最近有点难受", proposal(RouterAction.CHAT, needs_rag=False))
+        assert result.turn_decision.action is TurnAction.CHAT
+        assert len(harness.trace.visible_sentences) == 1
+        assert harness.tts.started.wait(timeout=1.0)
+        assert len(harness.trace.tts_calls) == 1
+        assert "PHQ" not in harness.trace.visible_sentences[0].text
+    finally:
+        harness.shutdown()
+
+
+def test_stale_or_cancelled_generation_never_emits_fallback():
+    from conversation.delivery import SentenceReady
+    from tests.e2e.fixtures import ScenarioHarness
+
+    harness = ScenarioHarness()
+    try:
+        old = harness.controller.start_generation()
+        harness.controller.start_generation()
+        harness.pipeline._emit_generation_sentence(
+            SentenceReady(old.generation_id, 0, "[END_SESSION]"),
+            harness.emit,
+        )
         assert harness.trace.visible_sentences == []
         assert harness.trace.tts_calls == []
     finally:

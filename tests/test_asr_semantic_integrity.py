@@ -14,15 +14,21 @@ def test_negation_is_never_flipped_by_asr_normalization():
     assert corrected == raw
     assert corrections == []
     flags = inspect_input_semantics(raw)
-    assert flags.negation_ambiguous is True
-    assert flags.symptom_polarity_ambiguous is True
+    assert flags.negation_ambiguous is False
+    assert flags.symptom_polarity_ambiguous is False
 
 
 def test_frequency_ambiguity_is_observed_without_rewriting_text():
-    flags = inspect_input_semantics("大概两三天吧")
+    flags = inspect_input_semantics("频率我记不清")
     assert flags.frequency_ambiguous is True
     corrected, _ = correct_asr_text("大概两三天吧")
     assert corrected == "大概两三天吧"
+
+
+def test_clear_frequency_duration_and_quantity_values_are_not_ambiguous():
+    for text in ("已经两周没睡好了", "每天都会这样", "一周两三天", "发生过两次"):
+        flags = inspect_input_semantics(text)
+        assert flags.any_ambiguous is False, text
 
 
 def test_duration_ambiguity_is_observed():
@@ -30,8 +36,13 @@ def test_duration_ambiguity_is_observed():
     assert flags.duration_ambiguous is True
 
 
+def test_malformed_negation_is_ambiguous_but_clear_negation_is_not():
+    assert inspect_input_semantics("中途部醒").negation_ambiguous is True
+    assert inspect_input_semantics("中途不醒").negation_ambiguous is False
+
+
 def test_quantity_ambiguity_is_observed():
-    flags = inspect_input_semantics("大概两三次")
+    flags = inspect_input_semantics("几次记不清")
     assert flags.quantity_ambiguous is True
 
 
@@ -55,7 +66,7 @@ def test_flags_are_observations_and_do_not_mutate_scale_runtime():
 
 
 def test_semantic_observation_does_not_directly_start_a_scale():
-    flags = inspect_input_semantics("晚上中途不醒")
+    flags = inspect_input_semantics("中途不睡不着")
     assert flags.any_ambiguous is True
     assert flags.semantic_target == "night_waking"
 

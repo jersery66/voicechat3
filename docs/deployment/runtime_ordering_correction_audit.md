@@ -37,3 +37,14 @@ The correction will add only semantic observations, a pre-delivery safety
 boundary, ordering-preserving scale transitions, and the scale-action RAG gate.
 It will not modify model profiles, generation settings, prompts, provider
 implementations, Phase 5/A/B semantics, or SessionEngine lifecycle semantics.
+
+## A.1 closure notes
+
+- Clear semantic values such as `中途不醒`, `已经两周`, `每天`, `一周两三天`,
+  and `发生过两次` are preserved and do not trigger `CLARIFY_INPUT`.
+- Clarification is reserved for malformed or explicitly uncertain phrases such
+  as `中途部醒`, `不知道多久`, `频率我记不清`, or `几次记不清`.
+- A first unsafe stable sentence is blocked and replaced once by a deterministic
+  action/runtime-derived fallback through the same UI/TTS delivery path.
+- A later question-budget overflow is dropped without an additional fallback.
+- Stale/cancelled generations cannot emit a fallback.
