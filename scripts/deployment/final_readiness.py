@@ -99,7 +99,7 @@ def run_offline_gate(*, output_root: str | Path, git_commit: str | None) -> dict
 def _tag_commit(tag: str = FREEZE_TAG) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", tag],
+            ["git", "rev-parse", f"{tag}^{{}}"],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
