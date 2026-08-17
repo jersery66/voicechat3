@@ -177,7 +177,18 @@ def test_performance_summary_never_mixes_simulated_with_measured():
         profile="rtxpro6000_96g",
         git_commit="test-commit",
     )
-    assert summary["status"] == "PASS"
+    assert summary["status"] == EVIDENCE_MEASURED
     assert summary["metrics"]["ttft_ms"]["count"] == 1
     assert summary["metrics"]["ttft_ms"]["median"] == 100.0
     assert summary["model_comparison"] == "NOT PERFORMED"
+
+
+def test_measured_data_does_not_imply_performance_acceptance():
+    summary = build_performance_summary(
+        [{"metric_name": "ttft_ms", "value": 1, "status": STATUS_SUCCESS, "evidence_type": EVIDENCE_MEASURED}],
+        profile="rtxpro6000_96g",
+    )
+    assert summary["status"] == "MEASURED"
+    assert summary["status"] not in {"PASS", "ACCEPTED", "PROMOTED", "WINNER"}
+    assert summary["model_comparison"] == "NOT PERFORMED"
+    assert summary["promotion"] == "NOT APPROVED"

@@ -306,7 +306,10 @@ def build_performance_summary(
         "timestamp_utc": utc_timestamp(),
         "git_commit": git_commit if git_commit is not None else current_git_commit(),
         "profile": profile,
-        "status": "PASS" if has_measured else STATUS_NOT_RUN,
+        # Availability of real samples is not an acceptance verdict.  No
+        # performance threshold is defined in this layer, so measured data is
+        # explicitly reported as MEASURED rather than PASS.
+        "status": EVIDENCE_MEASURED if has_measured else STATUS_NOT_RUN,
         "evidence_type": EVIDENCE_MEASURED if has_measured else EVIDENCE_NOT_AVAILABLE,
         "real_performance_summary": has_measured,
         "metrics": metrics,
