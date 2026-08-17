@@ -31,10 +31,32 @@ _EXPLICIT_GAME_PHRASES = (
     "玩一局",
 )
 
+_RELAXATION_REQUEST_VERBS = ("我想", "想做", "想要", "我要", "要做", "来个", "可以做", "能不能", "试试", "试一下", "做个")
+_RELAXATION_STATEMENT_PREFIXES = ("以前", "曾经", "过去", "老师教过", "做过", "对我没用")
+_TYPED_RELAXATION_PHRASES = (
+    ("breathing", ("呼吸练习", "呼吸训练", "呼吸放松", "深呼吸", "做个呼吸")),
+    ("muscle", ("肌肉放松", "渐进性肌肉放松", "做肌肉放松")),
+    ("meditation", ("冥想练习", "正念练习", "冥想", "正念")),
+)
+
 
 def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:
     normalized = (text or "").strip().lower()
     return any(phrase in normalized for phrase in phrases)
+
+
+def detect_explicit_relaxation_request(text: str) -> tuple[bool, str | None]:
+    """Return a request/type pair without treating historical mentions as requests."""
+    normalized = (text or "").strip().lower()
+    if not normalized or any(normalized.startswith(prefix) for prefix in _RELAXATION_STATEMENT_PREFIXES):
+        return False, None
+    request_like = any(verb in normalized for verb in _RELAXATION_REQUEST_VERBS)
+    for relaxation_type, phrases in _TYPED_RELAXATION_PHRASES:
+        if request_like and any(phrase in normalized for phrase in phrases):
+            return True, relaxation_type
+    if _contains_any(normalized, _EXPLICIT_RELAXATION_PHRASES):
+        return True, None
+    return False, None
 
 
 def collect_turn_signals(
@@ -56,11 +78,13 @@ def collect_turn_signals(
     """
     text = user_text or ""
     interruption = bool(snapshot.active_scale) and is_scale_interruption_text(text)
+    explicit_relaxation, explicit_relaxation_type = detect_explicit_relaxation_request(text)
     return TurnSignals(
         explicit_end_requested=is_user_explicit_end_text(text),
         active_scale_pause_requested=interruption,
         active_scale_refusal=interruption,
-        explicit_relaxation_requested=_contains_any(text, _EXPLICIT_RELAXATION_PHRASES),
+        explicit_relaxation_requested=explicit_relaxation,
+        explicit_relaxation_type=explicit_relaxation_type,
         explicit_game_requested=_contains_any(text, _EXPLICIT_GAME_PHRASES),
         deterministic_scale_candidate=deterministic_scale_candidate,
         proactive_relaxation_candidate=proactive_relaxation_candidate,

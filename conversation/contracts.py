@@ -162,6 +162,7 @@ class TurnSignals(_FrozenContract):
     active_scale_pause_requested: bool = False
     active_scale_refusal: bool = False
     explicit_relaxation_requested: bool = False
+    explicit_relaxation_type: Optional[str] = None
     explicit_game_requested: bool = False
     deterministic_scale_candidate: Optional[str] = None
     proactive_relaxation_candidate: Optional[str] = None

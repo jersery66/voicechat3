@@ -67,9 +67,10 @@ class TurnPolicy:
         # active-scale continuation branch so a user can ask to pause a
         # questionnaire without the Router taking control of the item.
         if signals.explicit_relaxation_requested:
+            requested_type = signals.explicit_relaxation_type or proposal.intervention_type
             return TurnDecision(
                 action=TurnAction.RECOMMEND_RELAXATION,
-                intervention_type=_relaxation_type(proposal.intervention_type),
+                intervention_type=_relaxation_type(requested_type),
                 confidence=1.0,
                 reason="user_relaxation_request",
             )
@@ -124,19 +125,54 @@ class TurnPolicy:
         # at their detection site.  A Router start proposal follows the same
         # gates and never controls an item number.
         requested_scale = proposal.scale_name if proposal.action is RouterAction.START_SCALE else None
-        candidate_scale = requested_scale or signals.deterministic_scale_candidate
-        if candidate_scale:
-            if snapshot.round_count < MIN_ROUNDS_BEFORE_SCALE:
-                return self._chat("router_before_min_rounds")
-            if requested_scale and proposal.confidence < SCALE_ROUTE_CONFIDENCE:
-                return self._chat("router_below_confidence")
-            if candidate_scale in snapshot.completed_scales:
-                return self._chat("router_scale_completed")
+        router_eligible = bool(
+            requested_scale
+            and snapshot.round_count >= MIN_ROUNDS_BEFORE_SCALE
+            and proposal.confidence >= SCALE_ROUTE_CONFIDENCE
+            and requested_scale not in snapshot.completed_scales
+        )
+        deterministic_scale = signals.deterministic_scale_candidate
+        deterministic_eligible = bool(
+            deterministic_scale
+            and snapshot.round_count >= MIN_ROUNDS_BEFORE_SCALE
+            and deterministic_scale not in snapshot.completed_scales
+        )
+        if requested_scale and snapshot.round_count < MIN_ROUNDS_BEFORE_SCALE:
+            return self._chat("router_before_min_rounds")
+        if requested_scale and proposal.confidence < SCALE_ROUTE_CONFIDENCE and not deterministic_eligible:
+            return self._chat("router_below_confidence")
+        if requested_scale and requested_scale in snapshot.completed_scales and not deterministic_eligible:
+            return self._chat("router_scale_completed")
+
+        if router_eligible and deterministic_eligible:
+            if requested_scale != deterministic_scale:
+                return TurnDecision(
+                    action=TurnAction.CHAT,
+                    needs_rag=False,
+                    confidence=1.0,
+                    reason="scale_candidate_conflict",
+                )
             return TurnDecision(
                 action=TurnAction.START_SCALE,
-                scale_name=candidate_scale,
-                confidence=proposal.confidence if requested_scale else 1.0,
-                reason=("router_start_scale_accepted" if requested_scale else "deterministic_scale_signal"),
+                scale_name=requested_scale,
+                confidence=proposal.confidence,
+                reason="router_deterministic_agreement",
+                needs_rag=False,
+            )
+        if router_eligible:
+            return TurnDecision(
+                action=TurnAction.START_SCALE,
+                scale_name=requested_scale,
+                confidence=proposal.confidence,
+                reason="router_start_scale_accepted",
+                needs_rag=False,
+            )
+        if deterministic_eligible:
+            return TurnDecision(
+                action=TurnAction.START_SCALE,
+                scale_name=deterministic_scale,
+                confidence=1.0,
+                reason="deterministic_scale_signal",
                 needs_rag=False,
             )
         if proposal.action is RouterAction.START_SCALE:
