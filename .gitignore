@@ -79,3 +79,4 @@ data/*.mp3
 # OS
 .DS_Store
 Thumbs.db
+.workbuddy/
