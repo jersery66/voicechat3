@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from conversation.coordinator import ConversationCoordinator
 from conversation.contracts import RouterAction
@@ -160,6 +161,47 @@ def test_runtime_manifest_is_reproducible_and_contains_no_secrets():
     assert "D:\\" not in encoded
 
 
+def test_runtime_manifest_uses_effective_dev_override_and_prompt_override():
+    from deployment.profiles import DeploymentProfile
+
+    profile = DeploymentProfile(
+        name="test-dev",
+        expected_gpu_memory_gb=6,
+        runtime_backend="ollama",
+        dialogue_model="default-dialogue",
+        dialogue_base_url="http://localhost:11434",
+        router_model="default-agent",
+        agent_model="default-agent",
+        agent_base_url="http://localhost:11434/v1",
+        enable_streaming_tts=False,
+        system_prompt_override="effective prompt override",
+    )
+    manifest = build_runtime_manifest(
+        profile=profile,
+        git_sha="dev-sha",
+        environment={
+            "VOICECHAT_DIALOGUE_MODEL": "override-dialogue",
+            "AGENT_MODEL": "override-agent",
+            "VOICECHAT_DIALOGUE_BASE_URL": "http://127.0.0.1:19000",
+        },
+    )
+    assert manifest["dialogue_model"] == "override-dialogue"
+    assert manifest["agent_model"] == "override-agent"
+    assert manifest["dialogue_base_url"] == "http://127.0.0.1:19000"
+    assert manifest["effective_prompt_hash"] == manifest["prompt_version"]
+    assert manifest["git_dirty"] in (True, False, None)
+
+
+def test_runtime_manifest_keeps_immutable_profile_frozen_despite_environment():
+    manifest = build_runtime_manifest(
+        profile=get_deployment_profile("rtxpro6000_96g"),
+        git_sha="prod-sha",
+        environment={"VOICECHAT_DIALOGUE_MODEL": "wrong-model", "AGENT_MODEL": "wrong-agent"},
+    )
+    assert manifest["dialogue_model"] == "Qwen/Qwen2.5-72B-Instruct-AWQ"
+    assert manifest["agent_model"] == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+
+
 def test_turn_trace_is_deidentified_and_stage_shaped(tmp_path):
     recorder = TurnTraceRecorder(tmp_path / "turn_trace.jsonl", session_id="research-session")
     recorder.record(
@@ -191,3 +233,76 @@ def test_coordinator_can_write_deidentified_turn_trace(tmp_path):
     coordinator.execute(PipelineConfig(user_text="PRIVATE_COORDINATOR_TEXT"), lambda *_: None)
     encoded = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
     assert "PRIVATE_COORDINATOR_TEXT" not in encoded
+
+
+def test_production_style_main_window_trace_wiring_rotates_per_session(tmp_path):
+    from tests.test_conversation_coordinator import FakePipeline
+    from ui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.data_manager = SimpleNamespace(session_dir=str(tmp_path / "session_a"))
+    coordinator = ConversationCoordinator(pipeline=FakePipeline())
+    coordinator.start_research_session()
+    first_session_id = coordinator.session_id
+    window.conversation_coordinator = coordinator
+    window._attach_session_trace()
+    coordinator.execute(PipelineConfig(user_text="PRIVATE_TRACE_A"), lambda *_: None)
+
+    window.data_manager.session_dir = str(tmp_path / "session_b")
+    coordinator.start_research_session()
+    second_session_id = coordinator.session_id
+    window._attach_session_trace()
+    coordinator.execute(PipelineConfig(user_text="PRIVATE_TRACE_B"), lambda *_: None)
+
+    trace_a = (tmp_path / "session_a" / "turn_trace.jsonl").read_text(encoding="utf-8")
+    trace_b = (tmp_path / "session_b" / "turn_trace.jsonl").read_text(encoding="utf-8")
+    assert first_session_id != second_session_id
+    assert "PRIVATE_TRACE_A" not in trace_a
+    assert "PRIVATE_TRACE_B" not in trace_b
+    assert first_session_id in trace_a
+    assert second_session_id in trace_b
+    assert "turn_action" in trace_a and "turn_action" in trace_b
+
+
+def test_trace_keeps_measured_timings_and_nullable_unmeasured_fields(tmp_path):
+    from tests.test_conversation_coordinator import FakePipeline
+    class TimedPipeline(FakePipeline):
+        def execute(self, config, emit):
+            result = super().execute(config, emit)
+            result.timing = {"agent_ms": 2.5, "rag_ms": 4.0}
+            return result
+
+    trace = TurnTraceRecorder(tmp_path / "timed.jsonl", session_id="r2")
+    coordinator = ConversationCoordinator(pipeline=TimedPipeline(), trace_recorder=trace)
+    coordinator.execute(PipelineConfig(user_text="synthetic"), lambda *_: None)
+    record = json.loads((tmp_path / "timed.jsonl").read_text(encoding="utf-8"))
+    assert record["agent_ms"] == 2.5
+    assert record["rag_ms"] == 4.0
+    assert record["asr_ms"] is None
+    assert record["vad_end_ms"] is None
+    assert record["tts_first_audio_ms"] is None
+
+
+def test_real_pipeline_timing_fields_are_forwarded_when_measurable(tmp_path):
+    harness = ScenarioHarness(responses=["这是一句可交付的测试回应。"])
+    trace = TurnTraceRecorder(tmp_path / "pipeline-trace.jsonl", session_id="r3")
+    harness.pipeline  # keep the real pipeline boundary explicit for this test
+    coordinator = ConversationCoordinator(
+        pipeline=harness.pipeline,
+        trace_recorder=trace,
+    )
+    coordinator.execute(
+        PipelineConfig(
+            user_text="测试 RAG 追踪",
+            router_proposal=proposal(RouterAction.CHAT, needs_rag=True),
+            generation_id=harness.new_generation(),
+        ),
+        harness.emit,
+    )
+    record = json.loads((tmp_path / "pipeline-trace.jsonl").read_text(encoding="utf-8"))
+    assert record["turn_policy_ms"] is not None
+    assert record["rag_ms"] is not None
+    assert record["dialogue_ttft_ms"] is not None
+    assert record["first_sentence_ms"] is not None
+    assert record["asr_ms"] is None
+    harness.shutdown()

@@ -1513,6 +1513,8 @@ class MainWindow(QMainWindow):
             self.emotion_tracker.reset()
         if hasattr(self, 'pipeline') and self.pipeline:
             self.pipeline.reset_session()
+        if getattr(self, "conversation_coordinator", None):
+            self.conversation_coordinator.set_trace_recorder(None)
         if self.llm_service:
             self.llm_service.reset_conversation(clear_context=True)
         from app.contracts import PrepareNextSubjectCommand
@@ -1565,8 +1567,25 @@ class MainWindow(QMainWindow):
                     self.llm_service.set_history_context(context)
         if self.data_manager:
             self.data_manager.start_new_session()
+            self._attach_session_trace()
         if self.report_service:
             self.report_service.start_session()
+
+    def _attach_session_trace(self) -> None:
+        """Attach one de-identified trace sink to the current session folder."""
+        coordinator = getattr(self, "conversation_coordinator", None)
+        data_manager = getattr(self, "data_manager", None)
+        session_dir = getattr(data_manager, "session_dir", None)
+        if coordinator is None or not session_dir:
+            return
+        from research.turn_trace import TurnTraceRecorder
+
+        coordinator.set_trace_recorder(
+            TurnTraceRecorder(
+                os.path.join(session_dir, "turn_trace.jsonl"),
+                session_id=coordinator.session_id,
+            )
+        )
 
     def _highlight_relax_safe(self, relax_key: str):
         """Highlight relaxation button with logging and safety checks."""

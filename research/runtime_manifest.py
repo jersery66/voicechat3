@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import subprocess
 from typing import Any
+from typing import Mapping
 
 from data.atomic_io import atomic_write_json
 from deployment.profiles import DeploymentProfile, get_deployment_profile, resolve_runtime_models
@@ -32,6 +33,18 @@ def _current_git_sha() -> str | None:
         return None
 
 
+def _git_dirty() -> bool | None:
+    try:
+        output = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return bool(output.strip())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _basename_or_none(value: Any) -> str | None:
     if not value:
         return None
@@ -44,14 +57,16 @@ def build_runtime_manifest(
     git_sha: str | None = None,
     started_at: str | None = None,
     app_version: str | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a configuration/provenance manifest for one session."""
     profile = profile or get_deployment_profile()
-    models = resolve_runtime_models(profile, environment={})
+    effective_environment = environment
+    models = resolve_runtime_models(profile, environment=effective_environment)
     try:
         import config
 
-        system_prompt = getattr(config, "SYSTEM_PROMPT", "")
+        system_prompt = profile.system_prompt_override or getattr(config, "SYSTEM_PROMPT", "")
         stt_model = _basename_or_none(getattr(config, "FUNASR_MODEL_PATH", None))
         tts_model = _basename_or_none(getattr(config, "VOXCPM_MODEL_PATH", None))
         app_version = app_version or getattr(config, "APP_VERSION", None) or "UNVERSIONED"
@@ -84,6 +99,14 @@ def build_runtime_manifest(
     except Exception:
         pass
 
+    if profile.immutable_runtime_contract:
+        dialogue_base_url = profile.dialogue_base_url
+        agent_base_url = profile.agent_base_url
+    else:
+        env = effective_environment or {}
+        dialogue_base_url = env.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
+        agent_base_url = env.get("VOICECHAT_AGENT_BASE_URL", profile.agent_base_url)
+
     return {
         "schema_version": 1,
         "artifact_type": "SESSION_RUNTIME_MANIFEST",
@@ -92,15 +115,17 @@ def build_runtime_manifest(
         "git_sha": git_sha or _current_git_sha(),
         "deployment_profile": profile.name,
         "dialogue_model": models.dialogue,
-        "dialogue_base_url": profile.dialogue_base_url,
-        "agent_model": profile.agent_model,
-        "agent_base_url": profile.agent_base_url,
+        "dialogue_base_url": dialogue_base_url,
+        "agent_model": models.router,
+        "agent_base_url": agent_base_url,
         "stt_model": stt_model,
         "tts_model": tts_model,
         "prompt_version": _sha256_bytes(system_prompt.encode("utf-8")) if system_prompt else None,
+        "effective_prompt_hash": _sha256_bytes(system_prompt.encode("utf-8")) if system_prompt else None,
         "scale_definition_hash": scale_hash,
         "rag_corpus_hash": rag_hash,
         "relaxation_catalog_version": catalog_hash,
+        "git_dirty": _git_dirty(),
         "secrets_included": False,
     }
 
