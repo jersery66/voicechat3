@@ -276,7 +276,10 @@ class ReportService:
         # This ensures the LLM 'sees' the event in the context
         actual_relaxation = relaxation_info if relaxation_info != "未进行" else (self.completed_relaxation or "未进行")
         if actual_relaxation != "未进行":
-            formatted_history += f"\n【系统记录】来访者刚刚完成了{actual_relaxation}，目前状态应该有所缓解。"
+            formatted_history += (
+                f"\n【系统记录】来访者已完成{actual_relaxation}。"
+                "系统不对完成后的主观状态作判断。"
+            )
         
         emotion_summary = self._format_emotion_summary(session_emotions)
         prompt = RESEARCHER_REPORT_PROMPT.format(
@@ -346,8 +349,11 @@ class ReportService:
                     "total_rounds": self.round_count,
                     "end_type": end_type.value
                 },
-                "error": f"Report generation failed: {str(e)}",
-                "raw_conversation": formatted_history
+                "error": "Report generation failed",
+                "error_category": "REPORT_GENERATION_ERROR",
+                "report_generation_failed": True,
+                "session_reference": str(subject_id),
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
             }
             if user_info:
                 report["user_info"] = user_info

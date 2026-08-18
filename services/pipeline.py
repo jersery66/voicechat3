@@ -1,6 +1,7 @@
 # Pipeline - Unified conversation pipeline and shared constants
 
 import re
+import hashlib
 import threading
 import time
 import traceback
@@ -1992,8 +1993,17 @@ class ConversationPipeline:
             max_rag = 200 if _rag_active else 1200
             if rag_suffix and len(rag_suffix) > max_rag:
                 rag_suffix = rag_suffix[:max_rag] + "\n【知识库已截断】"
-            logger.warning(f"[RagDebug] user_text={text!r} rag_text={rag_text!r} "
-                          f"injected={bool(rag_suffix)} len={len(rag_suffix) if rag_suffix else 0}")
+            query_hash = hashlib.sha256(rag_text.encode("utf-8")).hexdigest()[:16]
+            logger.info(
+                "[RagDebug] query_hash=%s rag_query_hash=%s query_length=%d rag_query_length=%d "
+                "injected=%s suffix_length=%d",
+                hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+                query_hash,
+                len(text),
+                len(rag_text),
+                bool(rag_suffix),
+                len(rag_suffix) if rag_suffix else 0,
+            )
             if rag_suffix:
                 system_suffix += "\n" + rag_suffix
 

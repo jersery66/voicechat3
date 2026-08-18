@@ -13,6 +13,7 @@ import numpy as np
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DATA_ROOT, SAMPLE_RATE
+from data.atomic_io import atomic_write_json, atomic_write_text
 
 from services.logger import get_logger
 
@@ -90,9 +91,7 @@ class DataManager:
     def _write_json(path: Path, data: Any) -> bool:
         """Safely write JSON to ``path``. Returns True on success."""
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            atomic_write_json(path, data)
             return True
         except OSError as e:
             logger.warning(f"Failed to write JSON {path}: {e}")
@@ -102,9 +101,7 @@ class DataManager:
     def _write_text(path: Path, text: str) -> bool:
         """Safely write UTF-8 text to ``path``. Returns True on success."""
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(text)
+            atomic_write_text(path, text)
             return True
         except OSError as e:
             logger.warning(f"Failed to write text {path}: {e}")
@@ -176,6 +173,7 @@ class DataManager:
             existing_profile = {}
 
         existing_profile.update(profile)
+        existing_profile.setdefault("schema_version", 2)
         existing_profile["subject_id"] = self.current_subject_id
         existing_profile["user_id"] = self.current_subject_id
         existing_profile["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -246,6 +244,7 @@ class DataManager:
             summaries_data = {"subject_id": self.current_subject_id, "sessions": []}
         summaries_data.setdefault("subject_id", self.current_subject_id)
         summaries_data.setdefault("sessions", [])
+        summaries_data.setdefault("schema_version", 2)
 
         session_entry = {
             "date": session_date or self.current_date or datetime.now().strftime("%Y-%m-%d"),
@@ -428,6 +427,7 @@ class DataManager:
 
         # Create metadata file (millisecond-precision start time)
         metadata = {
+            "schema_version": 2,
             "subject_id": subject_id,
             "folder_name": folder_name,
             "date": self.current_date,
@@ -435,6 +435,12 @@ class DataManager:
             "messages": []
         }
         self._save_metadata(metadata)
+        try:
+            from research.runtime_manifest import write_runtime_manifest
+
+            write_runtime_manifest(session_path / "runtime_manifest.json")
+        except Exception as e:
+            logger.warning(f"Failed to write runtime manifest: {e}")
 
         return self.current_folder_name
     
