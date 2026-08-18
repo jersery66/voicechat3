@@ -1,4 +1,4 @@
-"""Native PySide6 presentation for the standalone Untangle candidate."""
+"""Native PySide6 presentation for the standalone Untangle campaign."""
 
 from __future__ import annotations
 
@@ -61,6 +61,11 @@ class UntangleWidget(QWidget):
         self.state_changed.emit()
         return changed
 
+    def request_hint(self):
+        hint = self.model.request_hint()
+        self.update()
+        return hint
+
     def _board_rect(self):
         return self.rect().adjusted(18, 42, -18, -18)
 
@@ -122,11 +127,20 @@ class UntangleWidget(QWidget):
         points = {point.id: self._to_pixel(point.x, point.y) for point in self.model.points}
         for index, edge in enumerate(self.model.edges):
             crossing = index in self.model.crossing_edges
-            painter.setPen(QPen(QColor("#d39a78" if crossing else "#87979b"), 3 if crossing else 2))
+            hinted = index in self.model.hint_edge_indices
+            color = "#c79ac8" if hinted else "#d39a78" if crossing else "#87979b"
+            width = 4 if hinted else 3 if crossing else 2
+            painter.setPen(QPen(QColor(color), width))
             painter.drawLine(points[edge.a], points[edge.b])
 
         for point in self.model.points:
             position = points[point.id]
+            fixed = point.id in self.model.fixed_node_ids
+            hinted = point.id == self.model.hint_node_id
+            if hinted:
+                painter.setBrush(QColor(207, 181, 224, 100))
+                painter.setPen(QPen(QColor("#b18ab8"), 2))
+                painter.drawEllipse(position, 21, 21)
             if point.id == self._dragging_point:
                 painter.setBrush(QColor(255, 229, 166, 150))
                 painter.setPen(QPen(QColor("#d6a75b"), 3))
@@ -134,4 +148,8 @@ class UntangleWidget(QWidget):
             painter.setBrush(QColor("#84aeb0"))
             painter.setPen(QPen(QColor("#527d80"), 2))
             painter.drawEllipse(position, 11, 11)
+            if fixed:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor("#527d80"), 2))
+                painter.drawEllipse(position, 16, 16)
         painter.end()

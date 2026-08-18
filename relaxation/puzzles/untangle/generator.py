@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 import random
+from typing import Iterable
 
 from .geometry import Point, Segment, crossing_pair_count, edge_pair_crosses
 
@@ -68,6 +69,8 @@ def _random_planar_edges(
     count: int,
     target_positions: tuple[Point, ...],
     rng: random.Random,
+    *,
+    diagonal_target: int,
 ) -> tuple[Segment, ...]:
     """Build a seeded, connected planar graph in the convex target embedding.
 
@@ -82,7 +85,7 @@ def _random_planar_edges(
         for second in range(first + 1, count)
         if tuple(sorted((first, second))) not in boundary
     ]
-    diagonal_target = max(0, count - 3)
+    diagonal_target = max(0, min(count - 3, diagonal_target))
     for _attempt in range(32):
         rng.shuffle(candidates)
         selected = set(boundary)
@@ -99,29 +102,71 @@ def _random_planar_edges(
     raise RuntimeError(f"could not generate a planar topology for {count} points")
 
 
-def generate_puzzle(difficulty: Difficulty | str, *, seed: int) -> GeneratedPuzzle:
+def _scramble_order(
+    count: int,
+    rng: random.Random,
+    stationary_node_ids: frozenset[int],
+) -> list[int] | None:
+    movable = [index for index in range(count) if index not in stationary_node_ids]
+    if len(movable) < 2:
+        return None
+    for _ in range(100):
+        shuffled = movable[:]
+        rng.shuffle(shuffled)
+        if all(shuffled[index] != movable[index] for index in range(len(movable))):
+            order = list(range(count))
+            for index, point_id in zip(movable, shuffled):
+                order[index] = point_id
+            return order
+    return None
+
+
+def generate_puzzle(
+    difficulty: Difficulty | str,
+    *,
+    seed: int,
+    point_count: int | None = None,
+    minimum_crossings: int | None = None,
+    diagonal_count: int | None = None,
+    stationary_node_ids: Iterable[int] = (),
+) -> GeneratedPuzzle:
     try:
         difficulty = difficulty if isinstance(difficulty, Difficulty) else Difficulty(difficulty)
     except ValueError as exc:
         raise ValueError(f"unsupported Untangle difficulty: {difficulty!r}") from exc
     rng = random.Random(int(seed))
-    count = difficulty.point_count
+    count = difficulty.point_count if point_count is None else int(point_count)
+    if count < 4:
+        raise ValueError("Untangle puzzles require at least four points")
+    threshold = difficulty.minimum_crossings if minimum_crossings is None else int(minimum_crossings)
+    if threshold < 0:
+        raise ValueError("minimum_crossings must be non-negative")
+    stationary = frozenset(int(node_id) for node_id in stationary_node_ids)
+    if any(node_id < 0 or node_id >= count for node_id in stationary):
+        raise ValueError("stationary node id is outside the puzzle")
+    requested_diagonals = count - 3 if diagonal_count is None else int(diagonal_count)
+    if requested_diagonals < 0 or requested_diagonals > count - 3:
+        raise ValueError("diagonal_count must be between 0 and count - 3")
     target = _circle_points(count)
     target_positions = tuple(GeneratedPoint(index, point.x, point.y) for index, point in enumerate(target))
 
     for _topology_attempt in range(32):
-        edges = _random_planar_edges(count, target, rng)
+        edges = _random_planar_edges(
+            count,
+            target,
+            rng,
+            diagonal_target=requested_diagonals,
+        )
         target_crossings = crossing_pair_count(target, edges)
         if target_crossings != 0:
             raise RuntimeError("internal planar target construction is not planar")
         for _attempt in range(2000):
-            order = list(range(count))
-            rng.shuffle(order)
-            if any(order[index] == index for index in range(count)):
+            order = _scramble_order(count, rng, stationary)
+            if order is None:
                 continue
             scrambled = tuple(target[order[index]] for index in range(count))
             initial_crossings = crossing_pair_count(scrambled, edges)
-            if initial_crossings >= difficulty.minimum_crossings:
+            if initial_crossings >= threshold:
                 points = tuple(GeneratedPoint(index, point.x, point.y) for index, point in enumerate(scrambled))
                 generated_edges = tuple(GeneratedEdge(edge.a, edge.b) for edge in edges)
                 return GeneratedPuzzle(
