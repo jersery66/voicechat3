@@ -57,6 +57,11 @@ class ConversationCoordinator:
         """Set a caller-provided non-identifying journal partition key."""
         self._session_id = session_id
 
+    def set_trace_recorder(self, trace_recorder: Any | None) -> None:
+        """Rotate the de-identified trace sink at a session boundary."""
+        self._trace_recorder = trace_recorder
+        self._turn_counter = 0
+
     def start_research_session(self) -> str:
         """Create a random research-session key without using the subject ID."""
         self._session_id = uuid4().hex
@@ -130,6 +135,7 @@ class ConversationCoordinator:
             cancelled=False,
             fallback_type=None,
             error_category=None,
+            **(result.timing or {}),
         )
         return result
 

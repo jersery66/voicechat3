@@ -335,6 +335,9 @@ class PipelineResult:
     turn_state_snapshot: Optional[TurnStateSnapshot] = None
     turn_decision: Optional[TurnDecision] = None
     agent_observation: Optional[AgentObservation] = None
+    # Passive, monotonic stage timings.  Missing fields mean not measured or
+    # not applicable for the selected input/output mode.
+    timing: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -365,6 +368,7 @@ class _SentenceFlushRegistration:
     emit: Callable[[str, Any], None]
     lock: Any = field(default_factory=threading.RLock, repr=False)
     next_deadline: Optional[float] = field(default=None, repr=False)
+    timing: Optional[dict] = field(default=None, repr=False)
 
 
 # ==================== Unified Conversation Pipeline ====================
@@ -1101,7 +1105,9 @@ class ConversationPipeline:
         if config.transcribed_text:
             result.user_text = config.transcribed_text
         elif config.use_stt:
+            asr_started = time.perf_counter()
             result.user_text = self.transcribe(config.audio_data, emit)
+            result.timing["asr_ms"] = (time.perf_counter() - asr_started) * 1000.0
             if not result.user_text.strip():
                 if config.audio_data is not None and len(config.audio_data) > 0:
                     emit("status", "无法识别内容")
@@ -1156,6 +1162,7 @@ class ConversationPipeline:
                 time_limit_reached=False,
                 session_state=config.session_state,
             )
+            policy_started = time.perf_counter()
             decision = self.turn_policy.decide(
                 user_text=result.user_text,
                 proposal=proposal,
@@ -1168,6 +1175,7 @@ class ConversationPipeline:
                     semantic_reason=semantic_flags.reason,
                 ),
             )
+            result.timing["turn_policy_ms"] = (time.perf_counter() - policy_started) * 1000.0
             result.router_proposal = proposal
             result.turn_state_snapshot = snapshot
             result.turn_decision = decision
@@ -1224,10 +1232,12 @@ class ConversationPipeline:
         agent_route = proposal.model_dump(mode="json") if proposal is not None else None
         agent_observation: AgentObservation | None = None
         if proposal is None:
+            agent_started = time.perf_counter()
             agent_observation = self._request_agent_observation(
                 user_text=result.user_text,
                 current_rounds=current_rounds,
             )
+            result.timing["agent_ms"] = (time.perf_counter() - agent_started) * 1000.0
             proposal = agent_observation.proposal
             agent_route = proposal.model_dump(mode="json")
             result.agent_observation = agent_observation
@@ -1290,12 +1300,14 @@ class ConversationPipeline:
         )
         decision = config.turn_decision
         if decision is None:
+            policy_started = time.perf_counter()
             decision = self.turn_policy.decide(
                 user_text=result.user_text,
                 proposal=proposal,
                 snapshot=snapshot,
                 signals=signals,
             )
+            result.timing["turn_policy_ms"] = (time.perf_counter() - policy_started) * 1000.0
         result.turn_decision = decision
         # An explicit rest request can share one utterance with the answer to
         # the current scale item. Interpret that answer before the policy's
@@ -1337,6 +1349,7 @@ class ConversationPipeline:
 
         # Build ordinary context only after the decision has been formed.  The
         # decision's needs_rag bit is the sole RAG gate for this turn.
+        rag_started = time.perf_counter()
         with metrics.timer("rag.system_suffix"):
             system_suffix = self._build_system_suffix(
                 result.user_text,
@@ -1344,6 +1357,8 @@ class ConversationPipeline:
                 round_count=current_rounds,
                 allow_user_relaxation=(decision.reason == "user_relaxation_request"),
             )
+        if decision.needs_rag:
+            result.timing["rag_ms"] = (time.perf_counter() - rag_started) * 1000.0
 
         decision_context = self._build_decision_language_context(decision, runtime)
         if decision_context:
@@ -1444,6 +1459,7 @@ class ConversationPipeline:
                         final_suffix,
                         emit,
                         generation_id=config.generation_id,
+                        timing=result.timing,
                     )
 
             # Log raw LLM response before post-processing
@@ -2032,10 +2048,11 @@ class ConversationPipeline:
         generation_id: int,
         segmenter: SentenceSegmenter,
         emit: Callable[[str, Any], None],
+        timing: Optional[dict] = None,
     ) -> _SentenceFlushRegistration:
         """Replace the one active watchdog registration by object identity."""
         self._ensure_sentence_flush_state()
-        registration = _SentenceFlushRegistration(generation_id, segmenter, emit)
+        registration = _SentenceFlushRegistration(generation_id, segmenter, emit, timing=timing)
         with self._flush_condition:
             self._active_flush_registration = registration
             self._flush_condition.notify_all()
@@ -2104,6 +2121,10 @@ class ConversationPipeline:
         events: list[SentenceReady],
     ) -> None:
         """Serialize segmenter mutation and emission for one registration."""
+        if events and registration.timing is not None and "first_sentence_ms" not in registration.timing:
+            started = registration.timing.get("_dialogue_started_at")
+            if started is not None:
+                registration.timing["first_sentence_ms"] = (time.perf_counter() - started) * 1000.0
         for event in events:
             self._emit_generation_sentence(event, registration.emit)
 
@@ -2335,6 +2356,7 @@ class ConversationPipeline:
         emit: Callable[[str, Any], None],
         *,
         generation_id: Optional[int] = None,
+        timing: Optional[dict] = None,
     ):
         """Stream provider text and normalize it without business parsing.
 
@@ -2345,9 +2367,14 @@ class ConversationPipeline:
         """
         self._last_stream_generation_id = generation_id
         if generation_id is None:
-            generated_text = "".join(
-                chunk for chunk in self.llm.chat(text, system_suffix=system_suffix)
-            )
+            stream_started = time.perf_counter()
+            generated_parts: list[str] = []
+            for chunk in self.llm.chat(text, system_suffix=system_suffix):
+                content = str(chunk or "")
+                if content and timing is not None and "dialogue_ttft_ms" not in timing:
+                    timing["dialogue_ttft_ms"] = (time.perf_counter() - stream_started) * 1000.0
+                generated_parts.append(content)
+            generated_text = "".join(generated_parts)
             built = ResponseBuilder.build(generated_text)
             if not built.tts_text.strip():
                 logger.warning(
@@ -2365,7 +2392,11 @@ class ConversationPipeline:
             generation_id,
             segmenter,
             emit,
+            timing=timing,
         )
+        stream_started = time.perf_counter()
+        if timing is not None:
+            timing["_dialogue_started_at"] = stream_started
         generated_parts: list[str] = []
         deferred_history_supported = True
         history = getattr(self.llm, "conversation_history", None)
@@ -2389,6 +2420,8 @@ class ConversationPipeline:
                 content = str(chunk or "")
                 if not content:
                     continue
+                if timing is not None and "dialogue_ttft_ms" not in timing:
+                    timing["dialogue_ttft_ms"] = (time.perf_counter() - stream_started) * 1000.0
                 generated_parts.append(content)
                 self.delivery_ledger.record_generated(generation_id, content)
                 if not self._feed_sentence_registration(registration, content):
