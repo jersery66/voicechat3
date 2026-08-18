@@ -19,7 +19,7 @@ def test_inactive_enters_center_then_runs_enabled_content():
     running = runtime.start_content("breathing")
     assert running.state is RelaxationState.RUNNING
     assert running.selected_content_id == "breathing"
-    assert running.content_type.value == "EXERCISE"
+    assert running.content_type.value == "VIDEO"
 
 
 def test_invalid_start_from_inactive_is_rejected():

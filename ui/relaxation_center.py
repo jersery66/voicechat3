@@ -47,7 +47,11 @@ class RelaxationCenterDialog(QDialog):
         self.setMinimumSize(560, 460)
 
         self.core_content_ids = tuple(
-            item.id for item in catalog.list_by_role(RelaxationContentRole.CORE_RELAXATION)
+            item.id
+            for item in catalog.list_by_role(
+                RelaxationContentRole.CORE_RELAXATION,
+                enabled_only=False,
+            )
         )
         self.leisure_game_ids = tuple(
             item.id
@@ -106,6 +110,7 @@ class RelaxationCenterDialog(QDialog):
             button = QPushButton(definition.display_name, page)
             button.setObjectName(f"core_{content_id}")
             button.setMinimumHeight(64)
+            button.setEnabled(definition.is_available)
             button.clicked.connect(
                 lambda _checked=False, item_id=content_id: self.core_content_requested.emit(item_id)
             )
@@ -198,6 +203,10 @@ class RelaxationCenterDialog(QDialog):
             self.close()
         finally:
             self._closing_to_chat = False
+
+    def hide_for_content(self) -> None:
+        """Hide the shell while leaving its Center runtime for a content handoff."""
+        self.hide()
 
     def closeEvent(self, event) -> None:
         if not self._closing_to_chat:

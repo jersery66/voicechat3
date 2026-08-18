@@ -63,6 +63,24 @@ def test_default_catalog_separates_core_relaxation_from_leisure():
     ]
 
 
+def test_core_content_is_video_backed_and_has_real_resource_metadata():
+    catalog = build_default_catalog()
+    expected = {
+        "breathing": "呼吸训练.mp4",
+        "muscle_relaxation": "肌肉放松.mp4",
+        "meditation": "冥想训练.mp4",
+    }
+
+    for content_id, resource_path in expected.items():
+        definition = catalog.require(content_id)
+        assert definition.category is RelaxationContentType.VIDEO
+        assert definition.role is RelaxationContentRole.CORE_RELAXATION
+        assert definition.requires_video is True
+        assert definition.requires_audio is True
+        assert definition.resource_path == resource_path
+        assert definition.is_available is True
+
+
 def test_category_and_role_are_independent_dimensions():
     guided_video = _content(
         id="guided_muscle_video",

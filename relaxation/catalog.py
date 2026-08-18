@@ -67,24 +67,27 @@ def build_default_catalog() -> RelaxationCatalog:
     return RelaxationCatalog(
         [
             _content(
-                id="breathing", display_name="呼吸放松", category=RelaxationContentType.EXERCISE,
+                id="breathing", display_name="呼吸放松", category=RelaxationContentType.VIDEO,
                 role=RelaxationContentRole.CORE_RELAXATION,
                 recommended_duration_seconds=180, max_duration_seconds=300,
-                requires_audio=True, implementation_type="existing_relaxation",
+                requires_audio=True, requires_video=True, resource_path="呼吸训练.mp4",
+                implementation_type="existing_video",
                 implementation_status="AVAILABLE", sort_order=10,
             ),
             _content(
-                id="muscle_relaxation", display_name="肌肉放松", category=RelaxationContentType.EXERCISE,
+                id="muscle_relaxation", display_name="肌肉放松", category=RelaxationContentType.VIDEO,
                 role=RelaxationContentRole.CORE_RELAXATION,
                 recommended_duration_seconds=300, max_duration_seconds=600,
-                requires_audio=True, implementation_type="existing_relaxation",
+                requires_audio=True, requires_video=True, resource_path="肌肉放松.mp4",
+                implementation_type="existing_video",
                 implementation_status="AVAILABLE", sort_order=20,
             ),
             _content(
-                id="meditation", display_name="正念练习", category=RelaxationContentType.EXERCISE,
+                id="meditation", display_name="正念练习", category=RelaxationContentType.VIDEO,
                 role=RelaxationContentRole.CORE_RELAXATION,
                 recommended_duration_seconds=180, max_duration_seconds=600,
-                requires_audio=True, implementation_type="existing_relaxation",
+                requires_audio=True, requires_video=True, resource_path="冥想训练.mp4",
+                implementation_type="existing_video",
                 implementation_status="AVAILABLE", sort_order=30,
             ),
             _content(

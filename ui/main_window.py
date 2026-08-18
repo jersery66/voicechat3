@@ -43,6 +43,8 @@ from services.report_service import EndType
 from conversation.delivery import GenerationController, SentenceReady, SentenceSegmenter
 from core.tags import clean_for_display, clean_for_tts
 from relaxation.catalog import build_default_catalog
+from relaxation.contracts import RelaxationContentRole, RelaxationState
+from relaxation.playback import content_id_from_legacy, legacy_relaxation_key
 from relaxation.runtime import RelaxationRuntime
 
 
@@ -262,9 +264,15 @@ class MainWindow(QMainWindow):
         self.control_panel.modify_user.connect(self._on_modify_user)
         self.control_panel.record_started.connect(self._on_record_started)
         self.control_panel.record_stopped.connect(self._on_record_stopped)
-        self.control_panel.play_breathing.connect(lambda: self._play_relaxation_video("breathing"))
-        self.control_panel.play_muscle.connect(lambda: self._play_relaxation_video("muscle"))
-        self.control_panel.play_meditation.connect(lambda: self._play_relaxation_video("meditation"))
+        self.control_panel.play_breathing.connect(
+            lambda: self._start_core_relaxation("breathing", "DIRECT_SHORTCUT")
+        )
+        self.control_panel.play_muscle.connect(
+            lambda: self._start_core_relaxation("muscle_relaxation", "DIRECT_SHORTCUT")
+        )
+        self.control_panel.play_meditation.connect(
+            lambda: self._start_core_relaxation("meditation", "DIRECT_SHORTCUT")
+        )
         self.control_panel.play_game.connect(self._play_game)
         self.control_panel.play_media.connect(self._open_media_panel)
         self.control_panel.open_relaxation_center.connect(self._open_relaxation_center)
@@ -1174,17 +1182,40 @@ class MainWindow(QMainWindow):
             logger.warning(f"Relaxation Center open failed: {exc}")
 
     def _on_center_core_content(self, content_id: str):
-        """Keep existing core playback behavior during the shell-only phase."""
+        """Handoff Center core selection to the shared core executor."""
         dialog = self._relaxation_center_dialog
         if dialog is not None:
-            dialog.close_to_chat()
-        relaxation_type = {
-            "breathing": "breathing",
-            "muscle_relaxation": "muscle",
-            "meditation": "meditation",
-        }.get(content_id)
-        if relaxation_type:
-            self._play_relaxation_video(relaxation_type)
+            dialog.hide_for_content()
+            self._relaxation_center_dialog = None
+        self._start_core_relaxation(content_id, "CENTER")
+
+    def _start_core_relaxation(self, content_id: str, entry_source: str) -> bool:
+        """Start one catalog-approved core item through the shared lifecycle."""
+        definition = self.relaxation_catalog.get(content_id)
+        if definition is None or definition.role is not RelaxationContentRole.CORE_RELAXATION:
+            logger.warning(f"[Relaxation] rejected non-core content: {content_id!r}")
+            return False
+        if not definition.is_available or not definition.resource_path:
+            logger.warning(f"[Relaxation] unavailable core content: {content_id!r}")
+            return False
+        if not self._engine_can_play_video():
+            return False
+        try:
+            state = self.relaxation_runtime.snapshot().state
+            if state is RelaxationState.INACTIVE:
+                self.relaxation_runtime.enter_center()
+            if self.relaxation_runtime.snapshot().state is not RelaxationState.CENTER:
+                logger.warning(f"[Relaxation] invalid start state: {state.value}")
+                return False
+            self.relaxation_runtime.start_content(content_id)
+            self._active_relaxation_entry_source = entry_source
+            self._play_relaxation_video(content_id)
+            return True
+        except Exception as exc:
+            logger.warning(f"[Relaxation] core start failed: {exc}")
+            if self.relaxation_runtime.snapshot().state is RelaxationState.RUNNING:
+                self.relaxation_runtime.cancel_content("start_failure")
+            return False
 
     def _on_center_returned(self):
         self._relaxation_center_dialog = None
@@ -1326,10 +1357,16 @@ class MainWindow(QMainWindow):
 
     # ==================== Video / Game ====================
 
-    def _play_relaxation_video(self, relaxation_type):
+    def _play_relaxation_video(self, content_id: str):
         """统一的放松视频播放流程：全屏播放 → 弹窗
-        relaxation_type: 'breathing', 'muscle', 'meditation'
+        ``content_id`` is resolved through the catalog; the legacy provider key
+        is kept only at the compatibility boundary.
         """
+        definition = self.relaxation_catalog.require(content_id)
+        relaxation_type = legacy_relaxation_key(content_id)
+        if not relaxation_type:
+            logger.warning(f"[Relaxation] missing provider compatibility key: {content_id!r}")
+            return
         if not self._engine_can_play_video():
             return
 
@@ -1348,20 +1385,40 @@ class MainWindow(QMainWindow):
 
         # Store type for recording after video finishes (not before — video may fail)
         self._pending_relaxation_type = relaxation_type
+        self._pending_relaxation_content_id = content_id
 
         def video_runner():
             completed = False
             try:
-                completed = bool(self.video_tool.execute(relaxation_type=relaxation_type))
+                completed = bool(self.video_tool.execute(filename=definition.resource_path))
             except Exception as e:
                 logger.warning(f"Video error: {e}")
             finally:
-                self.processing_queue.put(("video_finished", (relaxation_type, completed)))
+                self.processing_queue.put(("video_finished", (content_id, completed)))
 
         threading.Thread(target=video_runner, daemon=True).start()
 
-    def _on_video_finished(self, relaxation_type, completed=True):
+    def _on_video_finished(self, content_id, completed=True):
         """视频播放完成：记录放松，回到正常聊天。不弹结束框。"""
+        content_id = content_id_from_legacy(content_id) or content_id
+        definition = self.relaxation_catalog.get(content_id)
+        runtime_snapshot = self.relaxation_runtime.snapshot()
+        owns_active_run = (
+            runtime_snapshot.state is RelaxationState.RUNNING
+            and runtime_snapshot.selected_content_id == content_id
+        )
+        if not owns_active_run:
+            logger.warning(f"[Relaxation] duplicate/stale video completion ignored: {content_id!r}")
+            return
+        if completed:
+            self.relaxation_runtime.complete_content()
+        else:
+            self.relaxation_runtime.cancel_content("provider_failure")
+        if self.relaxation_runtime.snapshot().state is RelaxationState.CENTER:
+            self.relaxation_runtime.exit_to_conversation()
+        if self.relaxation_runtime.snapshot().state is RelaxationState.RETURNING:
+            self.relaxation_runtime.finalize_return()
+        relaxation_type = legacy_relaxation_key(content_id) or content_id
         # A missing or failed video is not a completed intervention.
         try:
             from app.contracts import RelaxationFinishedCommand
@@ -1369,14 +1426,18 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"RelaxationFinished command failed: {e}")
         # Record relaxation AFTER video finishes
-        relax_name = ""
-        if completed:
-            relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
+        relax_name = definition.display_name if (completed and definition is not None) else ""
         if relax_name:
             if self.report_service:
                 self.report_service.record_relaxation(relax_name)
                 self.report_service.activity_log.append({
                     "type": "relaxation",
+                    "content_id": content_id,
+                    "content_role": getattr(definition.role, "value", definition.role),
+                    "content_type": getattr(definition.category, "value", definition.category),
+                    "display_name": definition.display_name,
+                    "entry_source": getattr(self, "_active_relaxation_entry_source", "unknown"),
+                    "completed": True,
                     "relaxation_type": relaxation_type,
                     "relaxation_name": relax_name,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
