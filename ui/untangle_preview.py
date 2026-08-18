@@ -53,8 +53,8 @@ class UntanglePreviewWindow(QMainWindow):
         self.reset_button = QPushButton("重新开始")
         self.new_button = QPushButton("换一局")
         self.close_button = QPushButton("关闭")
-        self.undo_button.clicked.connect(self.puzzle_widget.undo)
-        self.reset_button.clicked.connect(self.puzzle_widget.reset)
+        self.undo_button.clicked.connect(self._undo)
+        self.reset_button.clicked.connect(self._reset)
         self.new_button.clicked.connect(self._new_puzzle)
         self.close_button.clicked.connect(self.close)
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.puzzle_widget.undo)
@@ -76,9 +76,19 @@ class UntanglePreviewWindow(QMainWindow):
 
     def _difficulty_changed(self, index: int) -> None:
         self.puzzle_widget.new_puzzle(difficulty=self.difficulty_combo.itemData(index))
+        self.undo_button.setEnabled(False)
 
     def _new_puzzle(self) -> None:
         self.puzzle_widget.new_puzzle(seed=self._seed_rng.randrange(2**31))
+        self.undo_button.setEnabled(True)
+
+    def _undo(self) -> None:
+        self.puzzle_widget.undo()
+        self.undo_button.setEnabled(self.puzzle_widget.model.can_undo)
+
+    def _reset(self) -> None:
+        self.puzzle_widget.reset()
+        self.undo_button.setEnabled(False)
 
     def _on_completed(self) -> None:
         self.undo_button.setEnabled(False)
