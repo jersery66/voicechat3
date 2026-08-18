@@ -24,6 +24,6 @@ frequency in the context of the current scale question, without guessing
 clinical meaning.
 
 `RelaxationReturnContext` is a frozen, session-memory-only hint containing
-source, whether a scale was paused, scale name for diagnostics, and one short
+source, whether Center caused the pause (`scale_paused_by_center`), scale name for diagnostics, and one short
 existing user-turn anchor.  It is cleared on explicit return, session end, or
 new subject; no transcript or clinical data is persisted.

@@ -9,9 +9,10 @@ Phase 4 adds four small, local leisure interactions to the Center:
 
 They are native PySide6 widgets backed by deterministic, testable Python
 models.  A participant can choose a game from the Center and end it at any
-time.  Completion/exit returns through the existing `RelaxationRuntime`; the
-games do not call the Agent, TurnPolicy, ScaleRuntime, SessionEngine, RAG, or
-legacy `game_service`.
+time.  Completion/exit returns through the existing `RelaxationRuntime` and
+the SessionEngine `PlayLeisureCommand` lifecycle bridge; the game mechanics
+do not call the Agent, TurnPolicy, ScaleRuntime, RAG, or legacy
+`game_service`.
 
 The interactions are intentionally non-competitive.  They do not expose or
 persist scores, lives, countdown pressure, levels, difficulty, rewards,

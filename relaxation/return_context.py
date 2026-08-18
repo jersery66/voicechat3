@@ -10,6 +10,6 @@ class RelaxationReturnContext:
     """Session-memory-only return hints; no scale answers or scores."""
 
     source: str
-    scale_was_paused: bool
+    scale_paused_by_center: bool
     scale_name: str | None = None
     conversation_anchor: str | None = None

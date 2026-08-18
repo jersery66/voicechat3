@@ -1,6 +1,6 @@
 # Games V1 设计规格
 
-状态：**FUTURE DESIGN / Phase 4 实现之前不写游戏代码**
+状态：**IMPLEMENTED / Phase 4 native games**
 
 以下游戏的 `content_type=GAME`、`content_role=LEISURE`，只能由进入 Center 的
 用户选择，Agent 不主动指定某一个游戏。
@@ -32,10 +32,10 @@ Game Over、排行榜和高分，可有轻微粒子反馈。
 ## 开发顺序
 
 ```text
-V1: bubble_pop → gentle_search → calm_puzzle
-V1.1: falling_leaves
-V1.2: zen_garden / gentle_drift (future)
+V1: bubble_pop → gentle_search → calm_puzzle → falling_leaves
+Post-V1: zen_garden / gentle_drift (future)
 ```
 
-游戏不接 Agent、LLM、ScaleRuntime 或 SessionEngine business state，必须从
-Center 用户选择进入。
+游戏 mechanics 不接 Agent、LLM、ScaleRuntime 或 SessionEngine business
+state；它们由 Center 用户选择，并通过 UI 的 RelaxationRuntime /
+SessionEngine lifecycle bridge 进入。

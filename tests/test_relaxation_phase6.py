@@ -19,7 +19,7 @@ from ui.main_window import MainWindow
 def test_return_context_is_frozen_and_contains_no_scale_answers_or_scores():
     context = RelaxationReturnContext(
         source="CENTER",
-        scale_was_paused=True,
+        scale_paused_by_center=True,
         scale_name="PHQ-9",
         conversation_anchor="最近睡不好。",
     )
@@ -64,7 +64,7 @@ def test_center_entry_pauses_active_scale_and_projects_inactive_for_media():
 
     assert runtime.snapshot().paused is True
     assert engine.snapshot().scale_active is False
-    assert window._relaxation_return_context.scale_was_paused is True
+    assert window._relaxation_return_context.scale_paused_by_center is True
     assert window._relaxation_return_context.conversation_anchor == "最近晚上睡不好。"
     engine.shutdown()
 
@@ -104,6 +104,19 @@ def test_center_return_resumes_runtime_first_unanswered_item():
     assert runtime.snapshot().current_item == 2
     assert runtime.snapshot().answers_by_scale["PHQ-9"][1] == 2
     assert window._relaxation_return_context is None
+    engine.shutdown()
+
+
+def test_preexisting_paused_scale_is_not_resumed_by_center_return():
+    window, engine, runtime = _window_stub()
+    runtime.start("PHQ-9")
+    runtime.pause()
+
+    assert window._prepare_relaxation_center_entry("CENTER") is True
+    assert window._relaxation_return_context.scale_paused_by_center is False
+    window._on_center_returned()
+
+    assert runtime.snapshot().paused is True
     engine.shutdown()
 
 

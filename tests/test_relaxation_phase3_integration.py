@@ -129,6 +129,33 @@ def test_failed_core_run_cancels_runtime_and_is_not_recorded():
     assert window.report_service.activity_log == []
 
 
+def test_direct_core_provider_failure_uses_provider_failed_engine_contract():
+    window = _completion_window()
+    window._active_relaxation_entry_source = "DIRECT_SHORTCUT"
+
+    window._on_video_finished("breathing", completed=False)
+
+    command = next(command for command in window._engine_events if command.kind == "relaxation_finished")
+    assert command.provider_failed is True
+    assert window.report_service.recorded == []
+
+
+def test_center_core_provider_failure_returns_center_without_completed_relaxation():
+    window = _completion_window()
+    restored = []
+    window._relaxation_center_dialog = SimpleNamespace(
+        restore_after_core_failure=lambda: restored.append(True),
+    )
+
+    window._on_video_finished("breathing", completed=False)
+
+    command = next(command for command in window._engine_events if command.kind == "relaxation_finished")
+    assert command.provider_failed is True
+    assert window.relaxation_runtime.snapshot().state is RelaxationState.CENTER
+    assert restored == [True]
+    assert window.report_service.recorded == []
+
+
 def test_center_game_selection_starts_native_game_runtime_and_finishes_without_legacy_service(monkeypatch):
     import ui.relaxation_games as game_ui
 

@@ -1,6 +1,6 @@
 # Relaxation Center V1 Implementation Roadmap
 
-状态：**FUTURE DESIGN**
+状态：**SOFTWARE CLOSED / PRE-HARDWARE**
 
 ## Phase 0 — Design re-freeze
 
@@ -12,6 +12,10 @@
 实现 immutable Relaxation contracts、轻量 RelaxationRuntime、deterministic
 RelaxationCatalog 和 unit tests。不接 UI、Agent、TurnPolicy、ScaleRuntime、
 SessionEngine、games、video、TTS、LLM 或 RAG。
+
+## Phase 1.1 — Core / leisure hierarchy
+
+明确 `CORE_RELAXATION` 与 `LEISURE` 的产品角色边界，保留 Catalog 元数据权威。
 
 ## Phase 2 — UI Shell
 
@@ -39,7 +43,26 @@ SessionEngine/ScaleRuntime lifecycle。
 验证聊天 → Center → content → return → 原上下文，以及 active scale explicit
 pause → Center → ScaleRuntime resume first unanswered item。
 
-## Phase 7 — Future content
+## Phase 4.1 — Leisure lifecycle correction
 
-`zen_garden`、`gentle_drift` 和更多视频/练习只在 V1 稳定、隐私和硬件验证后进入
-新任务。每阶段都要求 focused tests、full regression、clean worktree。
+独立 `PlayLeisureCommand` / `LeisureFinishedCommand`，SessionEngine 追踪 active
+leisure media；完成后回 `CHATTING` 和 Games page，不进入 `POST_RELAXATION`。
+
+## Phase 7 — Integration closure / software freeze
+
+完成 provider failure、Center pause/resume、compound scale answer、return context、
+report/privacy/licensing audit 和 deterministic software preflight。
+
+Phase 7 之后 V1 软件闭环冻结为 **SOFTWARE CLOSED / PRE-HARDWARE**。真实
+RTX PRO 6000、vLLM、STT/TTS、音频设备和 E2E 仍需另行实机验证。
+
+## Post-V1 / Future Content
+
+以下内容不属于 V1，不在本路线中实现：
+
+- `zen_garden`
+- `gentle_drift`
+- additional leisure videos
+- additional core exercises
+
+只有 V1 软件闭环、真实硬件验证和实际用户体验评估完成后，才另行授权。

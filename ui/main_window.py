@@ -1196,20 +1196,21 @@ class MainWindow(QMainWindow):
         pipeline = getattr(self, "pipeline", None)
         scale_runtime = getattr(pipeline, "scale_runtime", None)
         scale_snapshot = scale_runtime.snapshot() if scale_runtime is not None else None
-        scale_was_paused = bool(scale_snapshot and scale_snapshot.active_scale)
+        scale_paused_by_center = False
         if scale_snapshot and scale_snapshot.active_scale:
             if not scale_snapshot.paused:
                 update = scale_runtime.pause()
                 if update.status == "rejected":
                     logger.warning("[RelaxResume] Center entry pause rejected: %s", update.reason)
                     return False
+                scale_paused_by_center = True
             # The engine sees only a boolean projection. Queue ordering keeps
             # this false projection ahead of any subsequent media command.
             from app.contracts import ScaleProjectionCommand
             self._engine_submit(ScaleProjectionCommand(active=False))
         self._relaxation_return_context = RelaxationReturnContext(
             source=source,
-            scale_was_paused=scale_was_paused,
+            scale_paused_by_center=scale_paused_by_center,
             scale_name=scale_snapshot.active_scale if scale_snapshot else None,
             conversation_anchor=self._capture_relaxation_conversation_anchor(),
         )
@@ -1222,7 +1223,7 @@ class MainWindow(QMainWindow):
         """Resume only from ScaleRuntime's first unanswered item."""
         context = self._relaxation_return_context
         self._relaxation_return_context = None
-        if context is None or not context.scale_was_paused:
+        if context is None or not context.scale_paused_by_center:
             return None
         pipeline = getattr(self, "pipeline", None)
         scale_runtime = getattr(pipeline, "scale_runtime", None)
@@ -1303,9 +1304,10 @@ class MainWindow(QMainWindow):
     def _start_relaxation_game(self, content_id: str) -> bool:
         """Start one catalog-approved native leisure game.
 
-        The Center owns presentation and this method owns only the
-        RelaxationRuntime handoff.  No legacy game service, SessionEngine
-        command, Agent decision, or model call is involved.
+        The Center owns presentation; this method bridges the
+        RelaxationRuntime content state to the SessionEngine
+        ``PlayLeisureCommand``.  It never calls the legacy game service,
+        Agent, or a model.
         """
         definition = self.relaxation_catalog.get(content_id)
         if (
@@ -1702,7 +1704,7 @@ class MainWindow(QMainWindow):
             from app.contracts import RelaxationFinishedCommand
             self._engine_submit(RelaxationFinishedCommand(
                 completed=completed,
-                provider_failed=center_provider_failure,
+                provider_failed=not completed,
             ))
         except Exception as e:
             logger.warning(f"RelaxationFinished command failed: {e}")
@@ -1745,8 +1747,8 @@ class MainWindow(QMainWindow):
         self._pre_end_relax_prompted = False
 
         if not completed:
-            self.chat_panel.add_system_message("放松训练未能启动，未记录为已完成。请检查媒体文件后重试。")
-            self.control_panel.set_status("放松训练未完成")
+            self.chat_panel.add_system_message("放松内容暂时无法打开，可以稍后再试。")
+            self.control_panel.set_status("放松内容暂时不可用")
             return
 
         # A paused Runtime scale resumes after the next feedback turn.
