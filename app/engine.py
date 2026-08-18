@@ -40,6 +40,9 @@ from app.contracts import (
     PlayRelaxationCommand,
     PlayGameCommand,
     RelaxationFinishedCommand,
+    PlayLeisureCommand,
+    LeisureFinishedCommand,
+    LeisureStartedEvent,
     SessionEndedEvent,
     SessionEndingEvent,
     StartSessionCommand,
@@ -68,6 +71,7 @@ class SessionLifecycleSnapshot:
     pending_end_type: Optional[EndType] = None
     relaxation_type: Optional[str] = None
     playback_kind: Optional[str] = None
+    leisure_content_id: Optional[str] = None
     time_warning_sent: bool = False
     time_limit_ask_sent: bool = False
     time_limit_continue_chosen: bool = False
@@ -118,6 +122,7 @@ class SessionEngine:
         # item/answer/waiting/pause/completion state.
         self._scale_active = False
         self._playback_kind: Optional[str] = None
+        self._leisure_content_id: Optional[str] = None
         self._exit_requested = False
 
         self._handlers = {
@@ -125,6 +130,8 @@ class SessionEngine:
             "end_session": self._handle_end_session,
             "play_relaxation": self._handle_play_relaxation,
             "relaxation_finished": self._handle_relaxation_finished,
+            "play_leisure": self._handle_play_leisure,
+            "leisure_finished": self._handle_leisure_finished,
             "continue_chat": self._handle_continue_chat,
             "acknowledge_time_limit": self._handle_acknowledge_time_limit,
             "check_time_limit": self._handle_check_time_limit,
@@ -240,6 +247,7 @@ class SessionEngine:
             ),
             relaxation_type=context.current_relaxation_type,
             playback_kind=self._playback_kind,
+            leisure_content_id=self._leisure_content_id,
             time_warning_sent=self._time_warning_sent,
             time_limit_ask_sent=self._time_limit_ask_sent,
             time_limit_continue_chosen=self._time_limit_continue_chosen,
@@ -292,6 +300,7 @@ class SessionEngine:
         self._last_end_type = None
         self._scale_active = False
         self._playback_kind = None
+        self._leisure_content_id = None
         self._exit_requested = False
         logger.info(f"SessionEngine: session started for {command.subject.subject_id!r}")
         self._emit_state()
@@ -354,10 +363,47 @@ class SessionEngine:
         self._orchestrator.transition_to(SessionState.VIDEO_PLAYING)
         self._emit_state()
 
+    def _handle_play_leisure(self, command: PlayLeisureCommand) -> None:
+        """Enter active-media state for a catalog-owned leisure activity."""
+        if self._scale_active:
+            self._emit(ErrorEvent(
+                message="cannot play leisure while a scale is active",
+                recoverable=True,
+                context="play_leisure.scale_active",
+            ))
+            return
+        if not self._orchestrator.can_play_video():
+            logger.warning(
+                "SessionEngine: play_leisure rejected in state %s",
+                self._orchestrator.state,
+            )
+            self._emit(ErrorEvent(
+                message=f"cannot play leisure from state {self._orchestrator.state.name}",
+                recoverable=True,
+                context="play_leisure",
+            ))
+            return
+        if not self._orchestrator.transition_to(SessionState.VIDEO_PLAYING):
+            self._emit(ErrorEvent(
+                message="cannot enter active leisure playback",
+                recoverable=True,
+                context="play_leisure",
+            ))
+            return
+        # Leisure is active participant-facing content, but it is not a core
+        # relaxation intervention and must never populate current_relaxation_type.
+        self._playback_kind = "leisure"
+        self._leisure_content_id = command.content_id
+        self._emit_state()
+        self._emit(LeisureStartedEvent(content_id=command.content_id))
+
     def _handle_relaxation_finished(self, command: RelaxationFinishedCommand) -> None:
         """Video ended: move to POST_RELAXATION, then either resume a
         deferred end request or ask continue-or-end."""
-        if self._orchestrator.state != SessionState.VIDEO_PLAYING:
+        if (
+            self._orchestrator.state != SessionState.VIDEO_PLAYING
+            or self._playback_kind == "leisure"
+        ):
             logger.warning(
                 f"SessionEngine: relaxation_finished ignored in state "
                 f"{self._orchestrator.state.name}"
@@ -380,6 +426,35 @@ class SessionEngine:
 
         self._emit(ContinueOrEndAskEvent(reason="post_relaxation"))
 
+    def _handle_leisure_finished(self, command: LeisureFinishedCommand) -> None:
+        """Close one active leisure run without entering POST_RELAXATION."""
+        if (
+            self._orchestrator.state is not SessionState.VIDEO_PLAYING
+            or self._playback_kind != "leisure"
+            or self._leisure_content_id != command.content_id
+        ):
+            self._emit(ErrorEvent(
+                message="leisure_finished is invalid for the current active content",
+                recoverable=True,
+                context="leisure_finished",
+            ))
+            return
+
+        self._playback_kind = None
+        self._leisure_content_id = None
+        pending = self._pending_end
+        self._pending_end = None
+        if not self._orchestrator.transition_to(SessionState.CHATTING):
+            self._emit(ErrorEvent(
+                message="cannot return to chatting after leisure content",
+                recoverable=True,
+                context="leisure_finished",
+            ))
+            return
+        self._emit_state()
+        if pending is not None:
+            self._handle_end_session(pending)
+
     def _handle_continue_chat(self, command: ContinueChatCommand) -> None:
         """User chose to keep chatting after relaxation."""
         if not self._orchestrator.transition_to(SessionState.CHATTING):
@@ -392,7 +467,7 @@ class SessionEngine:
         self._emit_state()
 
     def _handle_play_game(self, command: PlayGameCommand) -> None:
-        """Games use the same lifecycle playback state as relaxation media."""
+        """Legacy compatibility path for the old therapeutic game service."""
         self._handle_play_relaxation(PlayRelaxationCommand(relaxation="game"))
 
     def _handle_exit(self, command: ExitCommand) -> None:
@@ -414,6 +489,7 @@ class SessionEngine:
         self._last_end_type = None
         self._scale_active = False
         self._playback_kind = None
+        self._leisure_content_id = None
         self._exit_requested = False
         self._emit_state()
 
@@ -434,6 +510,7 @@ class SessionEngine:
         self._guard.reset()
         self._scale_active = False
         self._pending_end = None
+        self._leisure_content_id = None
         self._emit_state()
         self._emit(SessionEndedEvent(
             end_type=self._last_end_type or EndType.GOAL_ACHIEVED,

@@ -53,7 +53,7 @@ class RelaxationGameDialog(QDialog):
         root.addWidget(title)
         self.game_widget = _WIDGETS[content_id](parent=self)
         root.addWidget(self.game_widget, 1)
-        self.exit_button = QPushButton("结束练习", self)
+        self.exit_button = QPushButton("结束游戏", self)
         self.exit_button.clicked.connect(lambda: self.finish(False))
         root.addWidget(self.exit_button)
 

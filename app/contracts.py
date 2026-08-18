@@ -122,6 +122,26 @@ class RelaxationFinishedCommand(Command):
     completed: bool = True
 
 
+class PlayLeisureCommand(Command):
+    """Start one catalog-owned leisure activity.
+
+    This is intentionally separate from the legacy ``PlayGameCommand`` and
+    ``PlayRelaxationCommand`` compatibility paths.  ``content_id`` is the
+    stable RelaxationCatalog identity, not a core relaxation kind.
+    """
+    kind: Literal["play_leisure"] = "play_leisure"
+    content_id: str
+
+
+class LeisureFinishedCommand(Command):
+    """Report one completed or cancelled leisure activity run."""
+    kind: Literal["leisure_finished"] = "leisure_finished"
+    content_id: str
+    completed: bool = True
+    cancelled: bool = False
+    reason: Optional[str] = None
+
+
 class ContinueChatCommand(Command):
     """After relaxation, user chose to keep chatting."""
     kind: Literal["continue_chat"] = "continue_chat"
@@ -196,6 +216,8 @@ AnyCommand = (
     | EndSessionCommand
     | PlayRelaxationCommand
     | RelaxationFinishedCommand
+    | PlayLeisureCommand
+    | LeisureFinishedCommand
     | ContinueChatCommand
     | AcknowledgeTimeLimitCommand
     | CheckTimeLimitCommand
@@ -251,6 +273,12 @@ class RelaxationRecommendedEvent(Event):
     kind: Literal["relaxation_recommended"] = "relaxation_recommended"
     relaxation: RelaxationKind
     forced: bool = False  # True when the end flow forces one last session
+
+
+class LeisureStartedEvent(Event):
+    """The lifecycle writer accepted a catalog-owned leisure activity."""
+    kind: Literal["leisure_started"] = "leisure_started"
+    content_id: str
 
 
 class SessionWarningEvent(Event):
@@ -314,6 +342,7 @@ AnyEvent = (
     | StateChangedEvent
     | ScaleProgressEvent
     | RelaxationRecommendedEvent
+    | LeisureStartedEvent
     | SessionWarningEvent
     | TimeLimitAskEvent
     | TimeLimitAcknowledgedEvent

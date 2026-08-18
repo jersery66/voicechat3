@@ -98,6 +98,16 @@ def test_games_page_returns_to_center(qapp, catalog):
     dialog.close_to_chat()
 
 
+def test_center_can_be_restored_to_games_page_after_leisure_game(qapp, catalog):
+    dialog = RelaxationCenterDialog(catalog=catalog, runtime=RelaxationRuntime(catalog))
+    dialog.open_center()
+    dialog.restore_after_game("这一小段结束了。")
+    assert dialog.isVisible() is True
+    assert dialog.stack.currentWidget() is dialog.games_page
+    assert dialog.games_status_label.text() == "这一小段结束了。"
+    dialog.close_to_chat()
+
+
 def test_center_shell_has_no_business_authority_imports():
     source = Path("ui/relaxation_center.py").read_text(encoding="utf-8")
     for forbidden in ("AgentService", "TurnPolicy", "ScaleRuntime", "SessionEngine"):

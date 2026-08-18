@@ -24,6 +24,7 @@ def test_game_dialog_uses_local_native_widget_and_has_explicit_exit(qapp, conten
     assert dialog.content_id == content_id
     assert dialog.game_widget is not None
     assert dialog.exit_button.isEnabled() is True
+    assert dialog.exit_button.text() == "结束游戏"
     emitted = []
     dialog.game_finished.connect(emitted.append)
     dialog.exit_button.click()

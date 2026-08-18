@@ -55,7 +55,10 @@ class SessionOrchestrator:
             SessionState.CHATTING,
             SessionState.SESSION_ENDING,
         },
-        SessionState.VIDEO_PLAYING: {SessionState.POST_RELAXATION},
+        # Core relaxation exits through POST_RELAXATION.  Catalog-owned
+        # leisure content returns directly to CHATTING after its active-media
+        # slot is released.
+        SessionState.VIDEO_PLAYING: {SessionState.POST_RELAXATION, SessionState.CHATTING},
         SessionState.POST_RELAXATION: {
             SessionState.CHATTING,
             SessionState.SESSION_ENDING,

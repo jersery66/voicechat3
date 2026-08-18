@@ -154,9 +154,34 @@ def test_center_game_selection_starts_native_game_runtime_and_finishes_without_l
     assert window._start_relaxation_game("bubble_pop") is True
     assert window.relaxation_runtime.snapshot().state is RelaxationState.RUNNING
     assert window.relaxation_runtime.snapshot().selected_content_id == "bubble_pop"
+    assert window._relaxation_game_dialog is None
+    assert window._pending_leisure_game_start == "bubble_pop"
+
+    window._handle_engine_event(SimpleNamespace(kind="leisure_started", content_id="bubble_pop"))
     dialog = window._relaxation_game_dialog
     assert dialog.content_id == "bubble_pop"
     assert dialog.shown is True
 
     dialog.game_finished.emit(False)
-    assert window.relaxation_runtime.snapshot().state is RelaxationState.INACTIVE
+    assert window.relaxation_runtime.snapshot().state is RelaxationState.CENTER
+
+
+def test_leisure_game_completion_records_usage_only_and_keeps_center_runtime():
+    window = _window_stub()
+    window.relaxation_runtime.enter_center()
+    window.relaxation_runtime.start_content("bubble_pop")
+    window._relaxation_game_dialog = SimpleNamespace(close=lambda: None)
+    window.report_service = SimpleNamespace(activity_log=[])
+    window.report_service.record_relaxation = lambda _name: (_ for _ in ()).throw(
+        AssertionError("leisure must not be recorded as core relaxation")
+    )
+    window.chat_panel = SimpleNamespace(add_system_message=lambda text: setattr(window, "message", text))
+    window.control_panel = SimpleNamespace(set_status=lambda text: setattr(window, "status", text))
+
+    window._on_relaxation_game_finished("bubble_pop", completed=True)
+
+    assert window.relaxation_runtime.snapshot().state is RelaxationState.CENTER
+    assert window.report_service.activity_log[0]["type"] == "leisure"
+    assert window.report_service.activity_log[0]["cancelled"] is False
+    assert not hasattr(window, "message")
+    assert not hasattr(window, "status")

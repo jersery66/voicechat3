@@ -161,6 +161,10 @@ class RelaxationCenterDialog(QDialog):
         hint.setAlignment(Qt.AlignCenter)
         hint.setStyleSheet("color: #8b8175; padding-bottom: 10px;")
         layout.addWidget(hint)
+        self.games_status_label = QLabel("", page)
+        self.games_status_label.setAlignment(Qt.AlignCenter)
+        self.games_status_label.setStyleSheet("color: #6f8e83; padding-bottom: 6px;")
+        layout.addWidget(self.games_status_label)
         grid = QGridLayout()
         grid.setSpacing(10)
         for index, content_id in enumerate(self.leisure_game_ids):
@@ -211,6 +215,16 @@ class RelaxationCenterDialog(QDialog):
     def hide_for_content(self) -> None:
         """Hide the shell while leaving its Center runtime for a content handoff."""
         self.hide()
+
+    def restore_after_game(self, message: str = "") -> None:
+        """Restore the Center Games page after a leisure run ends."""
+        if self.runtime.snapshot().state is not RelaxationState.CENTER:
+            return
+        self.games_status_label.setText(message)
+        self.stack.setCurrentWidget(self.games_page)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def closeEvent(self, event) -> None:
         if not self._closing_to_chat:
