@@ -42,6 +42,8 @@ from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineC
 from services.report_service import EndType
 from conversation.delivery import GenerationController, SentenceReady, SentenceSegmenter
 from core.tags import clean_for_display, clean_for_tts
+from relaxation.catalog import build_default_catalog
+from relaxation.runtime import RelaxationRuntime
 
 
 class MainWindow(QMainWindow):
@@ -82,6 +84,11 @@ class MainWindow(QMainWindow):
         self.video_tool = None
         self.relaxation_tool = None
         self.report_tool = None
+        # Phase 2 shell ownership only. Content playback remains on the
+        # existing core signal handlers until the later integration phase.
+        self.relaxation_catalog = build_default_catalog()
+        self.relaxation_runtime = RelaxationRuntime(self.relaxation_catalog)
+        self._relaxation_center_dialog = None
 
         # State
         self.is_recording = False
@@ -260,6 +267,7 @@ class MainWindow(QMainWindow):
         self.control_panel.play_meditation.connect(lambda: self._play_relaxation_video("meditation"))
         self.control_panel.play_game.connect(self._play_game)
         self.control_panel.play_media.connect(self._open_media_panel)
+        self.control_panel.open_relaxation_center.connect(self._open_relaxation_center)
 
         # Chat panel signals
         self.chat_panel.clear_clicked.connect(self._clear_history)
@@ -1141,6 +1149,45 @@ class MainWindow(QMainWindow):
         self.loading_screen.set_loading_complete()
         self.loading_screen.fade_out(callback=self.loading_screen.hide)
         self.control_panel.set_buttons_enabled(True)
+
+    def _open_relaxation_center(self):
+        """Open one catalog-driven Center shell without changing policy/runtime owners."""
+        dialog = self._relaxation_center_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        try:
+            from ui.relaxation_center import RelaxationCenterDialog
+
+            dialog = RelaxationCenterDialog(
+                catalog=self.relaxation_catalog,
+                runtime=self.relaxation_runtime,
+                parent=self,
+            )
+            dialog.core_content_requested.connect(self._on_center_core_content)
+            dialog.returned_to_chat.connect(self._on_center_returned)
+            self._relaxation_center_dialog = dialog
+            dialog.open_center()
+        except Exception as exc:
+            self._relaxation_center_dialog = None
+            logger.warning(f"Relaxation Center open failed: {exc}")
+
+    def _on_center_core_content(self, content_id: str):
+        """Keep existing core playback behavior during the shell-only phase."""
+        dialog = self._relaxation_center_dialog
+        if dialog is not None:
+            dialog.close_to_chat()
+        relaxation_type = {
+            "breathing": "breathing",
+            "muscle_relaxation": "muscle",
+            "meditation": "meditation",
+        }.get(content_id)
+        if relaxation_type:
+            self._play_relaxation_video(relaxation_type)
+
+    def _on_center_returned(self):
+        self._relaxation_center_dialog = None
 
     # ==================== Session Management ====================
 

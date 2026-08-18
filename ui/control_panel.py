@@ -24,6 +24,7 @@ class ControlPanel(FrostedPanel):
     play_meditation = Signal()
     play_game = Signal()
     play_media = Signal()
+    open_relaxation_center = Signal()
 
     def __init__(self, parent=None):
         super().__init__(alpha=0.65, radius=16, parent=None)
@@ -253,6 +254,30 @@ class ControlPanel(FrostedPanel):
         self.btn_meditation.clicked.connect(self.play_meditation.emit)
         layout.addWidget(self.btn_meditation)
 
+        leisure_title = QLabel("轻松一下")
+        leisure_title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        leisure_title.setStyleSheet("color: #6d5a3a; padding: 8px 4px 0;")
+        layout.addWidget(leisure_title)
+
+        leisure_hint = QLabel("如果只是想休息一会儿，也可以看看内容或玩点简单的。")
+        leisure_hint.setWordWrap(True)
+        leisure_hint.setStyleSheet("color: #8b8175; font-size: 10px; padding: 0 4px 2px;")
+        layout.addWidget(leisure_hint)
+
+        self.btn_relaxation_center = QPushButton("轻松一下")
+        self.btn_relaxation_center.setObjectName("relaxationCenterButton")
+        self.btn_relaxation_center.setStyleSheet("""
+            QPushButton {
+                background-color: #e0c58f; color: #4a3c2a;
+                border: 1px solid #c4a96a; border-radius: 8px;
+                padding: 7px; font-size: 12px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #d4b477; }
+            QPushButton:disabled { background-color: #d8d0c2; color: #9a9287; }
+        """)
+        self.btn_relaxation_center.clicked.connect(self.open_relaxation_center.emit)
+        layout.addWidget(self.btn_relaxation_center)
+
         self.btn_game = BlinkButton("🎮 心理互动游戏")
         self.btn_game.setObjectName("relaxButton")
         self.btn_game._base_color = "#FF8A65"
@@ -266,7 +291,7 @@ class ControlPanel(FrostedPanel):
             QPushButton:disabled { background-color: #FF8A65; color: rgba(255,255,255,0.7); }
         """)
         self.btn_game.clicked.connect(self.play_game.emit)
-        layout.addWidget(self.btn_game)
+        self.btn_game.setVisible(False)
 
         self.btn_media = BlinkButton("🎵 影视音乐")
         self.btn_media.setObjectName("relaxButton")
@@ -281,12 +306,12 @@ class ControlPanel(FrostedPanel):
             QPushButton:disabled { background-color: #26A69A; color: rgba(255,255,255,0.7); }
         """)
         self.btn_media.clicked.connect(self.play_media.emit)
-        layout.addWidget(self.btn_media)
+        self.btn_media.setVisible(False)
 
         # Store blink buttons for easy access
         self._blink_buttons = [
             self.btn_breathing, self.btn_muscle,
-            self.btn_meditation, self.btn_game, self.btn_media
+            self.btn_meditation
         ]
 
         # Small spacer only; do not push progress/status out of view
@@ -455,6 +480,7 @@ class ControlPanel(FrostedPanel):
         self.btn_breathing.setEnabled(enabled)
         self.btn_muscle.setEnabled(enabled)
         self.btn_meditation.setEnabled(enabled)
+        self.btn_relaxation_center.setEnabled(enabled)
         self.btn_game.setEnabled(enabled)
         if hasattr(self, 'btn_media'):
             self.btn_media.setEnabled(enabled)
