@@ -33,9 +33,13 @@ Agent 判断是否适合提供一次休息机会
 TurnPolicy 最终决定是否邀请
         ↓ 用户选择 [放松一下] / [继续聊]
 Relaxation Center
-   ├── Exercises
-   ├── Videos
-   └── Games
+   ├── Core Relaxation
+   │   ├── Breathing
+   │   ├── Progressive Muscle Relaxation
+   │   └── Meditation / Mindfulness
+   └── Optional Leisure
+       ├── Videos
+       └── Games
         ↓ complete/cancel
 恢复原聊天上下文
 ```
@@ -60,6 +64,9 @@ Structured Assessment 继续后台自然采集：
 7. Dialogue LLM 只生成邀请和恢复聊天措辞。
 8. UI 只展示内容并提交明确 command。
 9. 游戏/练习使用 deterministic local logic，不依赖 LLM。
+
+Agent recommendation target 是 core relaxation opportunity，不是 GAME、VIDEO
+或其他 leisure content。用户进入 Center 后才自行选择辅助内容。
 
 ## V1 内容
 

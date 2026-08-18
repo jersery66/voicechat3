@@ -11,6 +11,7 @@ entry_source: USER_REQUEST | AGENT_OFFER
 accepted: boolean
 declined: boolean
 content_type: EXERCISE | VIDEO | GAME
+content_role: CORE_RELAXATION | LEISURE
 content_id: string
 started_at: timestamp | null
 ended_at: timestamp | null
@@ -20,7 +21,8 @@ cancelled: boolean
 cancel_reason: string | null
 ```
 
-只保存进入来源、选择、时间和 lifecycle 事实。`content_id` 不代表心理评分。
+只保存进入来源、选择、角色、时间和 lifecycle 事实。`content_id` 不代表心理
+评分；leisure completion 不得解释为 core relaxation completion 或心理干预效果。
 
 ## Usage statistics
 

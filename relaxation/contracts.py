@@ -26,6 +26,13 @@ class RelaxationContentType(str, Enum):
     GAME = "GAME"
 
 
+class RelaxationContentRole(str, Enum):
+    """Product role, independent from the technical content type."""
+
+    CORE_RELAXATION = "CORE_RELAXATION"
+    LEISURE = "LEISURE"
+
+
 class _FrozenContract(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -38,6 +45,7 @@ class RelaxationContentDefinition(_FrozenContract):
     id: str
     display_name: str
     category: RelaxationContentType
+    role: RelaxationContentRole
     enabled: bool = True
     recommended_duration_seconds: int = Field(ge=0)
     max_duration_seconds: int = Field(ge=0)

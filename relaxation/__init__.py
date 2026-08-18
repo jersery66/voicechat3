@@ -7,6 +7,7 @@ content lifecycle, with no application/UI integration yet.
 from .catalog import RelaxationCatalog, build_default_catalog
 from .contracts import (
     RelaxationContentDefinition,
+    RelaxationContentRole,
     RelaxationContentType,
     RelaxationRuntimeError,
     RelaxationSnapshot,
@@ -17,6 +18,7 @@ from .runtime import RelaxationRuntime
 __all__ = [
     "RelaxationCatalog",
     "RelaxationContentDefinition",
+    "RelaxationContentRole",
     "RelaxationContentType",
     "RelaxationRuntime",
     "RelaxationRuntimeError",

@@ -30,8 +30,9 @@ SessionEngine/ScaleRuntime lifecycle。
 
 ## Phase 5 — Agent/TurnPolicy
 
-保留高层 `RECOMMEND_RELAXATION`，语义收束为邀请进入 Center，而不是直接启动
-内容。Agent 不选择 content；用户进入后自行选择。
+保留高层 `RECOMMEND_RELAXATION`，语义收束为邀请进入 Center/core relaxation，
+而不是直接启动内容。Agent 不主动推荐 GAME、VIDEO 或具体 leisure content；
+用户进入后自行选择。
 
 ## Phase 6 — Context/scale resume
 

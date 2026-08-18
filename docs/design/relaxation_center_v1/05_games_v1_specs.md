@@ -2,6 +2,9 @@
 
 状态：**FUTURE DESIGN / Phase 4 实现之前不写游戏代码**
 
+以下游戏的 `content_type=GAME`、`content_role=LEISURE`，只能由进入 Center 的
+用户选择，Agent 不主动指定某一个游戏。
+
 统一规则：纯本地 deterministic、无 LLM、随时退出、建议 2–5 分钟、低刺激；
 禁止积分、连击、排名、等级、金币、抽奖、奖励循环、Game Over、失败或羞辱反馈；
 不得产生 attention/anxiety/willpower/relapse/addiction score。
