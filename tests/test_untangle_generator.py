@@ -42,3 +42,24 @@ def test_difficulty_presets_are_six_ten_and_fifteen_points():
     assert Difficulty.EASY.point_count == 6
     assert Difficulty.NORMAL.point_count == 10
     assert Difficulty.CHALLENGE.point_count == 15
+
+
+def _topology_signature(puzzle):
+    adjacency = {point.id: set() for point in puzzle.target_positions}
+    for edge in puzzle.edges:
+        adjacency[edge.a].add(edge.b)
+        adjacency[edge.b].add(edge.a)
+    return tuple(tuple(sorted(adjacency[index])) for index in sorted(adjacency))
+
+
+@pytest.mark.parametrize(
+    "difficulty,minimum_signatures",
+    [
+        (Difficulty.EASY, 3),
+        (Difficulty.NORMAL, 8),
+        (Difficulty.CHALLENGE, 12),
+    ],
+)
+def test_topology_diversity_corpus(difficulty, minimum_signatures):
+    signatures = {_topology_signature(generate_puzzle(difficulty, seed=seed)) for seed in range(200)}
+    assert len(signatures) >= minimum_signatures

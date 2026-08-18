@@ -51,3 +51,29 @@ def test_generator_target_embedding_is_planar():
     puzzle = generate_puzzle(Difficulty.CHALLENGE, seed=99)
     assert puzzle.target_crossing_count == 0
     assert puzzle.initial_crossing_count >= 6
+
+
+def test_drag_rejects_positions_that_overlap_another_point():
+    model = UntangleModel(difficulty=Difficulty.EASY, seed=12)
+    first, second = model.points[:2]
+    before = model.state.points
+
+    assert model.begin_drag(first.id) is True
+    assert model.drag_point(first.id, second.x, second.y) is False
+    assert model.end_drag() is False
+    assert model.state.points == before
+    assert model.can_undo is False
+
+
+def test_drag_keeps_board_clamp_and_all_points_separated():
+    model = UntangleModel(difficulty=Difficulty.NORMAL, seed=21)
+    point = model.points[0]
+    assert model.move_point(point.id, -10, 10) is True
+    moved = model.points[point.id]
+    assert 0.04 <= moved.x <= 0.96
+    assert 0.04 <= moved.y <= 0.96
+    for other in model.points:
+        if other.id == point.id:
+            continue
+        distance = ((moved.x - other.x) ** 2 + (moved.y - other.y) ** 2) ** 0.5
+        assert distance >= model.MIN_POINT_SEPARATION

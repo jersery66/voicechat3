@@ -104,6 +104,8 @@ class UntangleModel:
         if self._completed or not self._valid_point_id(point_id):
             return False
         position = UntanglePoint(point_id, self._clamp(x), self._clamp(y))
+        if not self._position_is_legal(position):
+            return False
         self._points = tuple(position if point.id == point_id else point for point in self._points)
         self._recompute()
         return True
@@ -120,7 +122,38 @@ class UntangleModel:
     def move_point(self, point_id: int, x: float, y: float) -> bool:
         if not self.begin_drag(point_id):
             return False
-        changed = self.drag_point(point_id, x, y)
+        target = UntanglePoint(point_id, self._clamp(x), self._clamp(y))
+        changed = False
+        if self._position_is_legal(target):
+            self._points = tuple(target if point.id == point_id else point for point in self._points)
+            self._recompute()
+            changed = True
+        else:
+            # The programmatic helper is also used to apply a known target
+            # permutation in tests. If that target is occupied, exchange the
+            # two nodes rather than ever creating an overlapping position.
+            occupant = next(
+                (
+                    point
+                    for point in self._points
+                    if point.id != point_id
+                    and point.x == target.x
+                    and point.y == target.y
+                ),
+                None,
+            )
+            if occupant is not None:
+                origin = self._points[point_id]
+                self._points = tuple(
+                    target
+                    if point.id == point_id
+                    else UntanglePoint(point.id, origin.x, origin.y)
+                    if point.id == occupant.id
+                    else point
+                    for point in self._points
+                )
+                self._recompute()
+                changed = True
         self.end_drag()
         return changed
 
@@ -173,6 +206,14 @@ class UntangleModel:
 
     def _valid_point_id(self, point_id: int) -> bool:
         return isinstance(point_id, int) and 0 <= point_id < len(self._points)
+
+    def _position_is_legal(self, position: UntanglePoint) -> bool:
+        minimum_squared = self.MIN_POINT_SEPARATION**2
+        return all(
+            (position.x - other.x) ** 2 + (position.y - other.y) ** 2 >= minimum_squared
+            for other in self._points
+            if other.id != position.id
+        )
 
     @staticmethod
     def _clamp(value: float) -> float:

@@ -48,6 +48,7 @@ class UntanglePreviewWindow(QMainWindow):
             model=UntangleModel(difficulty=Difficulty.EASY, seed=seed)
         )
         self.puzzle_widget.completed_signal.connect(self._on_completed)
+        self.puzzle_widget.state_changed.connect(self._sync_controls)
 
         self.undo_button = QPushButton("撤销")
         self.reset_button = QPushButton("重新开始")
@@ -57,7 +58,7 @@ class UntanglePreviewWindow(QMainWindow):
         self.reset_button.clicked.connect(self._reset)
         self.new_button.clicked.connect(self._new_puzzle)
         self.close_button.clicked.connect(self.close)
-        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.puzzle_widget.undo)
+        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._undo)
 
         controls = QHBoxLayout()
         controls.addWidget(self.difficulty_combo)
@@ -73,25 +74,29 @@ class UntanglePreviewWindow(QMainWindow):
         central = QWidget(self)
         central.setLayout(root)
         self.setCentralWidget(central)
+        self._sync_controls()
 
     def _difficulty_changed(self, index: int) -> None:
         self.puzzle_widget.new_puzzle(difficulty=self.difficulty_combo.itemData(index))
-        self.undo_button.setEnabled(False)
+        self._sync_controls()
 
     def _new_puzzle(self) -> None:
         self.puzzle_widget.new_puzzle(seed=self._seed_rng.randrange(2**31))
-        self.undo_button.setEnabled(True)
+        self._sync_controls()
 
     def _undo(self) -> None:
         self.puzzle_widget.undo()
-        self.undo_button.setEnabled(self.puzzle_widget.model.can_undo)
+        self._sync_controls()
 
     def _reset(self) -> None:
         self.puzzle_widget.reset()
-        self.undo_button.setEnabled(False)
+        self._sync_controls()
 
     def _on_completed(self) -> None:
-        self.undo_button.setEnabled(False)
+        self._sync_controls()
+
+    def _sync_controls(self) -> None:
+        self.undo_button.setEnabled(self.puzzle_widget.model.can_undo)
 
 
 def main(argv: list[str] | None = None) -> int:

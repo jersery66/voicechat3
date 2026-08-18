@@ -12,6 +12,7 @@ from relaxation.puzzles.untangle.model import UntangleModel
 
 class UntangleWidget(QWidget):
     completed_signal = Signal()
+    state_changed = Signal()
 
     def __init__(self, *, model: UntangleModel | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -32,23 +33,32 @@ class UntangleWidget(QWidget):
         self._dragging_point = None
         self._refresh_status()
         self.update()
+        self.state_changed.emit()
 
     def undo(self) -> bool:
         changed = self.model.undo()
         self._refresh_status()
         self.update()
+        self.state_changed.emit()
         return changed
 
     def reset(self) -> bool:
         changed = self.model.reset()
         self._refresh_status()
         self.update()
+        self.state_changed.emit()
         return changed
 
-    def new_puzzle(self, *, difficulty: Difficulty | str | None = None) -> bool:
-        changed = self.model.new_puzzle(difficulty=difficulty)
+    def new_puzzle(
+        self,
+        *,
+        seed: int | None = None,
+        difficulty: Difficulty | str | None = None,
+    ) -> bool:
+        changed = self.model.new_puzzle(seed=seed, difficulty=difficulty)
         self._refresh_status()
         self.update()
+        self.state_changed.emit()
         return changed
 
     def _board_rect(self):
@@ -95,6 +105,7 @@ class UntangleWidget(QWidget):
             self._dragging_point = None
             self._refresh_status()
             self.update()
+            self.state_changed.emit()
             if self.model.completed:
                 self.completed_signal.emit()
         super().mouseReleaseEvent(event)

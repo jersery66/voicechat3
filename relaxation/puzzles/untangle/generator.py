@@ -7,7 +7,7 @@ from enum import Enum
 import math
 import random
 
-from .geometry import Point, Segment, crossing_pair_count
+from .geometry import Point, Segment, crossing_pair_count, edge_pair_crosses
 
 
 class Difficulty(str, Enum):
@@ -60,12 +60,43 @@ def _circle_points(count: int, *, center: float = 0.5, radius: float = 0.39) -> 
     )
 
 
-def _planar_cycle_fan(count: int) -> tuple[Segment, ...]:
-    # A cycle plus a fan from node 0 is planar in the convex target embedding;
-    # it gives every node a meaningful degree and enough edges for crossings.
-    edges = {tuple(sorted((index, (index + 1) % count))) for index in range(count)}
-    edges.update(tuple(sorted((0, index))) for index in range(2, count - 1))
-    return tuple(Segment(a, b) for a, b in sorted(edges))
+def _cycle_edges(count: int) -> set[tuple[int, int]]:
+    return {tuple(sorted((index, (index + 1) % count))) for index in range(count)}
+
+
+def _random_planar_edges(
+    count: int,
+    target_positions: tuple[Point, ...],
+    rng: random.Random,
+) -> tuple[Segment, ...]:
+    """Build a seeded, connected planar graph in the convex target embedding.
+
+    The cycle guarantees connectivity.  Randomly ordered diagonals are added
+    only when they do not cross an already selected edge, yielding a
+    triangulation-sized non-crossing family without privileging one hub node.
+    """
+    boundary = _cycle_edges(count)
+    candidates = [
+        tuple(sorted((first, second)))
+        for first in range(count)
+        for second in range(first + 1, count)
+        if tuple(sorted((first, second))) not in boundary
+    ]
+    diagonal_target = max(0, count - 3)
+    for _attempt in range(32):
+        rng.shuffle(candidates)
+        selected = set(boundary)
+        for a, b in candidates:
+            candidate = Segment(a, b)
+            if any(
+                edge_pair_crosses(target_positions, candidate, Segment(left, right))
+                for left, right in selected
+            ):
+                continue
+            selected.add((a, b))
+            if len(selected) - len(boundary) >= diagonal_target:
+                return tuple(Segment(left, right) for left, right in sorted(selected))
+    raise RuntimeError(f"could not generate a planar topology for {count} points")
 
 
 def generate_puzzle(difficulty: Difficulty | str, *, seed: int) -> GeneratedPuzzle:
@@ -76,30 +107,33 @@ def generate_puzzle(difficulty: Difficulty | str, *, seed: int) -> GeneratedPuzz
     rng = random.Random(int(seed))
     count = difficulty.point_count
     target = _circle_points(count)
-    edges = _planar_cycle_fan(count)
-    target_crossings = crossing_pair_count(target, edges)
-    if target_crossings != 0:
-        raise RuntimeError("internal planar target construction is not planar")
+    target_positions = tuple(GeneratedPoint(index, point.x, point.y) for index, point in enumerate(target))
 
-    for _attempt in range(2000):
-        order = list(range(count))
-        rng.shuffle(order)
-        scrambled = tuple(target[order[index]] for index in range(count))
-        initial_crossings = crossing_pair_count(scrambled, edges)
-        if initial_crossings >= difficulty.minimum_crossings:
-            points = tuple(GeneratedPoint(index, point.x, point.y) for index, point in enumerate(scrambled))
-            target_positions = tuple(GeneratedPoint(index, point.x, point.y) for index, point in enumerate(target))
-            generated_edges = tuple(GeneratedEdge(edge.a, edge.b) for edge in edges)
-            return GeneratedPuzzle(
-                points=points,
-                target_positions=target_positions,
-                edges=generated_edges,
-                seed=int(seed),
-                difficulty=difficulty,
-                initial_crossing_count=initial_crossings,
-                crossing_count=initial_crossings,
-                target_crossing_count=target_crossings,
-            )
+    for _topology_attempt in range(32):
+        edges = _random_planar_edges(count, target, rng)
+        target_crossings = crossing_pair_count(target, edges)
+        if target_crossings != 0:
+            raise RuntimeError("internal planar target construction is not planar")
+        for _attempt in range(2000):
+            order = list(range(count))
+            rng.shuffle(order)
+            if any(order[index] == index for index in range(count)):
+                continue
+            scrambled = tuple(target[order[index]] for index in range(count))
+            initial_crossings = crossing_pair_count(scrambled, edges)
+            if initial_crossings >= difficulty.minimum_crossings:
+                points = tuple(GeneratedPoint(index, point.x, point.y) for index, point in enumerate(scrambled))
+                generated_edges = tuple(GeneratedEdge(edge.a, edge.b) for edge in edges)
+                return GeneratedPuzzle(
+                    points=points,
+                    target_positions=target_positions,
+                    edges=generated_edges,
+                    seed=int(seed),
+                    difficulty=difficulty,
+                    initial_crossing_count=initial_crossings,
+                    crossing_count=initial_crossings,
+                    target_crossing_count=target_crossings,
+                )
     raise RuntimeError(
         f"could not generate a non-trivial Untangle puzzle for {difficulty.value} seed {seed}"
     )
