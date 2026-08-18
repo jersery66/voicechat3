@@ -31,8 +31,16 @@ _RELAXATION_TYPE_ALIASES = {
 }
 
 
-def _relaxation_type(value: str | None) -> str:
-    return _RELAXATION_TYPE_ALIASES.get(str(value or "").strip().lower(), "breathing")
+def _relaxation_type(value: str | None) -> str | None:
+    """Canonicalize only an explicit user content preference.
+
+    A missing value means "open the relaxation flow"; it must never silently
+    become breathing merely because a Router or deterministic candidate did
+    not name a specific content item.
+    """
+    if value is None or not str(value).strip():
+        return None
+    return _RELAXATION_TYPE_ALIASES.get(str(value).strip().lower())
 
 
 class TurnPolicy:
@@ -67,10 +75,9 @@ class TurnPolicy:
         # active-scale continuation branch so a user can ask to pause a
         # questionnaire without the Router taking control of the item.
         if signals.explicit_relaxation_requested:
-            requested_type = signals.explicit_relaxation_type or proposal.intervention_type
             return TurnDecision(
                 action=TurnAction.RECOMMEND_RELAXATION,
-                intervention_type=_relaxation_type(requested_type),
+                intervention_type=_relaxation_type(signals.explicit_relaxation_type),
                 confidence=1.0,
                 reason="user_relaxation_request",
             )
@@ -201,10 +208,7 @@ class TurnPolicy:
                 return self._chat("router_below_confidence")
             return TurnDecision(
                 action=TurnAction.RECOMMEND_RELAXATION,
-                intervention_type=_relaxation_type(
-                    proposal.intervention_type
-                    or signals.proactive_relaxation_candidate
-                ),
+                intervention_type=None,
                 confidence=proposal.confidence if proposal.action is RouterAction.RECOMMEND_RELAXATION else 1.0,
                 reason="proactive_relaxation_accepted",
             )
@@ -216,7 +220,7 @@ class TurnPolicy:
                 return self._chat("game_requires_explicit_request")
             return TurnDecision(
                 action=TurnAction.RECOMMEND_GAME,
-                intervention_type=proposal.intervention_type,
+                intervention_type=None,
                 confidence=proposal.confidence,
                 reason="router_game_accepted",
             )

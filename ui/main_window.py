@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         self._relaxation_center_dialog = None
         self._relaxation_game_dialog = None
         self._pending_leisure_game_start: str | None = None
+        self._pending_relaxation_preference: str | None = None
 
         # State
         self.is_recording = False
@@ -665,12 +666,13 @@ class MainWindow(QMainWindow):
             return
 
         if action == "recommend_relaxation":
-            relaxation = decision.intervention_type or "breathing"
-            self.processing_queue.put(("highlight_relax_delayed", (relaxation, 500)))
-            self.processing_queue.put(("status", "可以尝试左侧放松训练"))
+            # Invitation only: specific content remains a user-owned Center
+            # choice. An explicit preference is carried only as a highlight.
+            self.processing_queue.put(("relaxation_invitation", decision.intervention_type))
         elif action == "recommend_game":
-            self.processing_queue.put(("highlight_relax", "game"))
-            self.processing_queue.put(("status", "准备就绪"))
+            # Explicit game requests open the selection page, never a legacy
+            # game service or one of the concrete games.
+            self.processing_queue.put(("open_games_center", None))
         else:
             self.processing_queue.put(("status", "准备就绪"))
 
@@ -748,6 +750,14 @@ class MainWindow(QMainWindow):
 
                 elif msg_type == "status":
                     self.control_panel.set_status(content)
+
+                elif msg_type == "relaxation_invitation":
+                    self._pending_relaxation_preference = content or None
+                    self._highlight_relax_safe("center")
+                    self.control_panel.set_status("可以打开“轻松一下”看看")
+
+                elif msg_type == "open_games_center":
+                    self._open_relaxation_center(show_games=True)
 
                 elif msg_type == "append_chat":
                     role, text = content
@@ -1166,10 +1176,16 @@ class MainWindow(QMainWindow):
         self.loading_screen.fade_out(callback=self.loading_screen.hide)
         self.control_panel.set_buttons_enabled(True)
 
-    def _open_relaxation_center(self):
+    def _open_relaxation_center(self, *, show_games: bool = False):
         """Open one catalog-driven Center shell without changing policy/runtime owners."""
         dialog = self._relaxation_center_dialog
         if dialog is not None and dialog.isVisible():
+            if show_games:
+                self._pending_relaxation_preference = None
+                dialog.show_games_page()
+            elif self._pending_relaxation_preference:
+                dialog.highlight_core_content(self._pending_relaxation_preference)
+                self._pending_relaxation_preference = None
             dialog.raise_()
             dialog.activateWindow()
             return
@@ -1186,6 +1202,12 @@ class MainWindow(QMainWindow):
             dialog.returned_to_chat.connect(self._on_center_returned)
             self._relaxation_center_dialog = dialog
             dialog.open_center()
+            if show_games:
+                self._pending_relaxation_preference = None
+                dialog.show_games_page()
+            elif self._pending_relaxation_preference:
+                dialog.highlight_core_content(self._pending_relaxation_preference)
+                self._pending_relaxation_preference = None
         except Exception as exc:
             self._relaxation_center_dialog = None
             logger.warning(f"Relaxation Center open failed: {exc}")

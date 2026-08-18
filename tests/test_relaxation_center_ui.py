@@ -108,6 +108,14 @@ def test_center_can_be_restored_to_games_page_after_leisure_game(qapp, catalog):
     dialog.close_to_chat()
 
 
+def test_center_maps_canonical_muscle_preference_to_catalog_content(qapp, catalog):
+    dialog = RelaxationCenterDialog(catalog=catalog, runtime=RelaxationRuntime(catalog))
+    dialog.open_center()
+    dialog.highlight_core_content("muscle")
+    assert dialog.preferred_core_content_id == "muscle_relaxation"
+    dialog.close_to_chat()
+
+
 def test_center_shell_has_no_business_authority_imports():
     source = Path("ui/relaxation_center.py").read_text(encoding="utf-8")
     for forbidden in ("AgentService", "TurnPolicy", "ScaleRuntime", "SessionEngine"):

@@ -61,6 +61,7 @@ class RelaxationCenterDialog(QDialog):
         )
         self.core_buttons: dict[str, QPushButton] = {}
         self.game_buttons: dict[str, QPushButton] = {}
+        self.preferred_core_content_id: str | None = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -216,12 +217,30 @@ class RelaxationCenterDialog(QDialog):
         """Hide the shell while leaving its Center runtime for a content handoff."""
         self.hide()
 
+    def highlight_core_content(self, content_id: str | None) -> None:
+        """Remember a user-owned core preference without starting playback."""
+        content_id = {
+            "muscle": "muscle_relaxation",
+            "breathing": "breathing",
+            "meditation": "meditation",
+        }.get(content_id, content_id)
+        if content_id not in self.core_buttons:
+            self.preferred_core_content_id = None
+            return
+        self.preferred_core_content_id = content_id
+        self.stack.setCurrentWidget(self.center_page)
+        self.core_buttons[content_id].setFocus()
+
+    def show_games_page(self) -> None:
+        """Show the leisure selection page without starting a game."""
+        self.stack.setCurrentWidget(self.games_page)
+
     def restore_after_game(self, message: str = "") -> None:
         """Restore the Center Games page after a leisure run ends."""
         if self.runtime.snapshot().state is not RelaxationState.CENTER:
             return
         self.games_status_label.setText(message)
-        self.stack.setCurrentWidget(self.games_page)
+        self.show_games_page()
         self.show()
         self.raise_()
         self.activateWindow()

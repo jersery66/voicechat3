@@ -258,6 +258,7 @@ class TestAgentRecommendationNormalization:
 
         assert result.intent == "entertainment"
         assert result.turn_decision.action.value == "recommend_game"
+        assert result.turn_decision.intervention_type is None
 
     def test_explicit_relaxation_request_is_normalized_for_ui_and_video(self, ctx):
         agent = FakeAgent()
@@ -273,6 +274,22 @@ class TestAgentRecommendationNormalization:
 
         assert result.relaxation_rec == "muscle"
         assert result.scale_active is False
+
+    def test_generic_relaxation_request_does_not_default_to_breathing(self, ctx):
+        agent = FakeAgent()
+        agent.route_script = [{
+            "action": "recommend_relaxation",
+            "intervention_type": "breathing",
+            "confidence": 0.95,
+            "reason": "持续疲惫",
+        }]
+        p = ctx(agent=agent)
+
+        result, _ = run_turn(p, "我想放松一下")
+
+        assert result.turn_decision.action.value == "recommend_relaxation"
+        assert result.turn_decision.intervention_type is None
+        assert result.relaxation_rec is None
 
 
 class TestSeparatorEdgeCases:

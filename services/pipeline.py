@@ -29,9 +29,11 @@ _RELAXATION_TYPE_ALIASES = {
 }
 
 
-def _normalize_relaxation_type(value) -> str:
-    """Map agent intervention labels to the UI/media contract."""
-    return _RELAXATION_TYPE_ALIASES.get(str(value or "").strip().lower(), "breathing")
+def _normalize_relaxation_type(value) -> Optional[str]:
+    """Map an explicit user content preference to the UI/media contract."""
+    if value is None or not str(value).strip():
+        return None
+    return _RELAXATION_TYPE_ALIASES.get(str(value).strip().lower())
 
 
 # ==================== Tag Detection Constants (single source of truth) ====================
@@ -317,7 +319,7 @@ class PipelineResult:
     clean_spoken: str = ""
     tts_text: str = ""
     end_type: Optional[str] = None          # 'goal_achieved', 'time_limit', etc.
-    relaxation_rec: Optional[str] = None    # 'breathing', 'muscle', 'meditation', 'game'
+    relaxation_rec: Optional[str] = None    # explicit core preference only
     intent: str = "counseling"
     emotion_result: dict = field(default_factory=dict)
     agent_route: dict = field(default_factory=dict)
@@ -1342,15 +1344,21 @@ class ConversationPipeline:
             if hint:
                 system_suffix += hint
         elif decision.action is TurnAction.RECOMMEND_RELAXATION:
-            relax_type = _normalize_relaxation_type(decision.intervention_type)
-            relax_hint = {
-                "breathing": "你可以试试旁边的呼吸放松训练，跟着做几分钟，身体会松一些。",
-                "muscle": "你可以试试旁边的肌肉放松训练，让身体缓一缓。",
-                "meditation": "你可以试试旁边的冥想训练，静一静对睡眠也有帮助。",
-            }.get(relax_type, "你可以试试旁边的放松训练。")
-            system_suffix += f"\n【建议放松】{relax_hint} 把这句话自然地融入你的回复里，不要原样照搬。"
+            if decision.intervention_type:
+                system_suffix += (
+                    "\n【放松邀请】来访者明确提到一种放松偏好。可以自然邀请其打开放松中心，"
+                    "但不要自动播放或把偏好说成系统决定。"
+                )
+            else:
+                system_suffix += (
+                    "\n【放松邀请】可以自然邀请来访者先到放松中心看一看，"
+                    "由来访者自行决定是否休息和选择什么内容。不要指定具体活动。"
+                )
         elif decision.action is TurnAction.RECOMMEND_GAME:
-            system_suffix += "\n【建议游戏】你可以试试旁边的小游戏，换换心情。把这句话自然地融入你的回复里，不要原样照搬。"
+            system_suffix += (
+                "\n【游戏入口】只引导来访者进入放松中心的游戏选择页，"
+                "由来访者自行选择，不要指定或自动开始某个游戏。"
+            )
 
         # Deterministic detectors have already been reduced to ``signals`` and
         # approved (or rejected) by TurnPolicy.  There is intentionally no
@@ -1867,8 +1875,8 @@ class ConversationPipeline:
             TurnAction.START_SCALE: "自然提出系统选定的当前了解问题",
             TurnAction.CONTINUE_SCALE: "自然承接并继续系统选定的当前了解问题",
             TurnAction.PAUSE_SCALE: "温和确认暂停，不继续追问",
-            TurnAction.RECOMMEND_RELAXATION: "自然表达已经批准的放松安排",
-            TurnAction.RECOMMEND_GAME: "自然表达已经批准的游戏安排",
+            TurnAction.RECOMMEND_RELAXATION: "自然邀请进入放松中心",
+            TurnAction.RECOMMEND_GAME: "自然引导进入游戏选择页",
             TurnAction.END_SESSION: "按照会话流程自然完成结束表达",
         }.get(decision.action, "自然回应来访者")
         lines = [
@@ -1892,9 +1900,21 @@ class ConversationPipeline:
             }.get(decision.semantic_target or "", "刚才表达中的关键信息")
             lines.append(f"只确认：{target_text}。不要猜测、打分或推进其他业务任务。")
         elif decision.action is TurnAction.RECOMMEND_RELAXATION:
-            lines.append("只说明已经批准的放松方式，邀请来访者自愿尝试，不要追加其他建议。")
+            if decision.intervention_type:
+                lines.append(
+                    "来访者明确提到了一种偏好；只把它作为进入 Relaxation Center 后的高亮偏好，"
+                    "不要自动开始，也不要把它说成系统替来访者选择。"
+                )
+            else:
+                lines.append(
+                    "只邀请来访者进入 Relaxation Center 自己选择是否休息和选择内容，"
+                    "不要指定呼吸、肌肉、冥想或其他具体活动。"
+                )
         elif decision.action is TurnAction.RECOMMEND_GAME:
-            lines.append("只说明已经批准的游戏安排，等待来访者回应，不要自行开始其他活动。")
+            lines.append(
+                "只引导来访者进入 Relaxation Center 的 Games 页面，等待其自行选择，"
+                "不要指定或自动开始某个游戏。"
+            )
         elif decision.action is TurnAction.PAUSE_SCALE:
             lines.append("尊重来访者的暂停请求，保持简短，不要求回答当前问题。")
         elif decision.action is TurnAction.END_SESSION:

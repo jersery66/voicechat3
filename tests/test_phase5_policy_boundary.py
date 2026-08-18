@@ -21,6 +21,8 @@ def test_router_prompt_requires_explicit_game_request():
     source = _function_source(ROOT / "services" / "agent_service.py", "route_conversation_actions")
     assert "无聊时：action=\"recommend_game\"" not in source
     assert "明确提出想玩游戏" in source
+    assert '"intervention_type": null' in source
+    assert "不要选择呼吸、肌肉、冥想" in source
 
 
 def test_pipeline_does_not_emit_timeout_ask_outside_session_engine():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.contracts import (
+    ContinueChatCommand,
     EndSessionCommand,
     LeisureFinishedCommand,
     PlayLeisureCommand,
@@ -92,3 +93,20 @@ def test_leisure_is_rejected_while_scale_projection_is_active(engine):
     assert engine.state is SessionState.CHATTING
     assert engine.snapshot().playback_kind is None
     assert any(event.kind == "error" for event in engine._test_events)
+
+
+def test_completed_core_relaxation_type_is_cleared_only_when_returning_to_chat(engine):
+    from app.contracts import PlayRelaxationCommand, RelaxationFinishedCommand
+
+    engine.process_command(PlayRelaxationCommand(relaxation="breathing"))
+    engine.process_command(RelaxationFinishedCommand(completed=True))
+    assert engine.state is SessionState.POST_RELAXATION
+    assert engine.snapshot().relaxation_type == "breathing"
+
+    engine.process_command(ContinueChatCommand())
+
+    assert engine.state is SessionState.CHATTING
+    assert engine.snapshot().relaxation_type is None
+    engine.process_command(PlayLeisureCommand(content_id="bubble_pop"))
+    assert engine.snapshot().playback_kind == "leisure"
+    assert engine.snapshot().relaxation_type is None

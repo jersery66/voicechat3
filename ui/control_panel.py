@@ -458,6 +458,7 @@ class ControlPanel(FrostedPanel):
             "meditation": self.btn_meditation,
             "game": self.btn_game,
             "media": self.btn_media,
+            "center": self.btn_relaxation_center,
         }
         btn = btn_map.get(btn_name)
         if btn:

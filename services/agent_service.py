@@ -533,7 +533,7 @@ class AgentService:
 {
   "action": "chat|start_scale|recommend_relaxation|recommend_game|end_session",
   "scale_name": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
-  "intervention_type": null 或 "breathing" 或 "muscle_relaxation" 或 "mindfulness" 或 "game" 或 "media",
+  "intervention_type": null,
   "intent": "counseling|entertainment|chitchat|relaxation",
   "emotion": "neutral|calm|sad|anxious|angry|fearful",
   "intensity": 0.0-1.0,
@@ -549,8 +549,10 @@ class AgentService:
 - 达到系统当前最低轮次门槛且症状持续，或症状明确影响功能时：action="start_scale"
 - 单次轻微信号（如"还好""不太开心"）不触发量表，继续观察
 - 当前已有量表时不要切换量表，由系统根据状态继续当前题目
-- 用户焦虑/紧张/失眠/疲惫且量表已部分完成：action="recommend_relaxation"
+- 用户焦虑/紧张/失眠/疲惫且量表已部分完成：action="recommend_relaxation"，intervention_type=null
+- recommend_relaxation 只表示提供一次放松机会，不要选择呼吸、肌肉、冥想或其他具体内容；具体选择由用户在 Relaxation Center 内完成
 - 用户明确提出想玩游戏时：action="recommend_game"；仅说无聊/没意思时保持 action="chat"
+- recommend_game 只表示打开游戏选择页，不要指定具体游戏
 - 用户明确想退出时：action="end_session"
 
 症状→量表映射：
@@ -612,16 +614,11 @@ class AgentService:
                 scale_action = raw_action
 
             # Build normalized result — derive booleans from action field
-            intervention = result.get("intervention_type")
-            if raw_action == "recommend_relaxation":
-                intervention = {
-                    "mindfulness": "meditation",
-                    "meditation": "meditation",
-                    "muscle": "muscle",
-                    "muscle_relaxation": "muscle",
-                    "progressive_muscle_relaxation": "muscle",
-                    "breathing": "breathing",
-                }.get(str(intervention or "").strip().lower(), "breathing")
+            # Content selection belongs to deterministic TurnSignals and the
+            # user-facing Center.  The Agent may observe an opportunity, but
+            # it cannot turn a proactive recommendation into breathing,
+            # muscle, meditation, or a specific game.
+            intervention = None
             normalized = {
                 "action": raw_action,
                 "scale_action": scale_action,
