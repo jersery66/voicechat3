@@ -63,7 +63,7 @@ def _content(**values) -> RelaxationContentDefinition:
 
 
 def build_default_catalog() -> RelaxationCatalog:
-    """Register current exercises plus planned V1 game metadata."""
+    """Register current exercises plus the native V1 leisure games."""
     return RelaxationCatalog(
         [
             _content(
@@ -95,28 +95,28 @@ def build_default_catalog() -> RelaxationCatalog:
                 role=RelaxationContentRole.LEISURE,
                 recommended_duration_seconds=120, max_duration_seconds=300,
                 requires_mouse=True, implementation_type="local_deterministic",
-                implementation_status="PLANNED", sort_order=40,
+                implementation_status="AVAILABLE", sort_order=40,
             ),
             _content(
                 id="gentle_search", display_name="找一找", category=RelaxationContentType.GAME,
                 role=RelaxationContentRole.LEISURE,
                 recommended_duration_seconds=180, max_duration_seconds=300,
                 requires_mouse=True, implementation_type="local_deterministic",
-                implementation_status="PLANNED", sort_order=50,
+                implementation_status="AVAILABLE", sort_order=50,
             ),
             _content(
                 id="calm_puzzle", display_name="轻拼图", category=RelaxationContentType.GAME,
                 role=RelaxationContentRole.LEISURE,
                 recommended_duration_seconds=300, max_duration_seconds=600,
                 requires_mouse=True, implementation_type="local_deterministic",
-                implementation_status="PLANNED", sort_order=60,
+                implementation_status="AVAILABLE", sort_order=60,
             ),
             _content(
                 id="falling_leaves", display_name="接住落叶", category=RelaxationContentType.GAME,
                 role=RelaxationContentRole.LEISURE,
                 recommended_duration_seconds=120, max_duration_seconds=300,
                 requires_mouse=True, implementation_type="local_deterministic",
-                implementation_status="PLANNED", sort_order=70,
+                implementation_status="AVAILABLE", sort_order=70,
             ),
         ]
     )

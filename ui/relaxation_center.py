@@ -1,8 +1,8 @@
-"""Phase 2 Relaxation Center UI shell.
+"""Relaxation Center catalog and presentation shell.
 
 The shell is catalog-driven and deliberately contains no Agent, policy, scale,
-session, media-provider, or game business logic.  Existing core relaxation
-signals remain owned by MainWindow until the later content-integration phase.
+session, media-provider, or game business logic.  Core media and native game
+execution are handed to the owning window through typed content signals.
 """
 
 from __future__ import annotations
@@ -26,9 +26,10 @@ from relaxation.runtime import RelaxationRuntime
 
 
 class RelaxationCenterDialog(QDialog):
-    """Catalog-driven Center shell with planned leisure cards disabled."""
+    """Catalog-driven Center shell for core content and native games."""
 
     core_content_requested = Signal(str)
+    game_content_requested = Signal(str)
     returned_to_chat = Signal()
 
     def __init__(
@@ -156,7 +157,7 @@ class RelaxationCenterDialog(QDialog):
         title.setAlignment(Qt.AlignCenter)
         title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
         layout.addWidget(title)
-        hint = QLabel("这些内容正在逐步整理，当前仅展示目录。")
+        hint = QLabel("可以随时结束，按自己的节奏玩一会儿。")
         hint.setAlignment(Qt.AlignCenter)
         hint.setStyleSheet("color: #8b8175; padding-bottom: 10px;")
         layout.addWidget(hint)
@@ -164,10 +165,13 @@ class RelaxationCenterDialog(QDialog):
         grid.setSpacing(10)
         for index, content_id in enumerate(self.leisure_game_ids):
             definition = self.catalog.require(content_id)
-            button = QPushButton(f"{definition.display_name}\n即将开放", page)
-            button.setObjectName(f"planned_game_{content_id}")
+            button = QPushButton(definition.display_name, page)
+            button.setObjectName(f"game_{content_id}")
             button.setMinimumHeight(64)
-            button.setEnabled(False)
+            button.setEnabled(definition.is_available)
+            button.clicked.connect(
+                lambda _checked=False, item_id=content_id: self.game_content_requested.emit(item_id)
+            )
             self.game_buttons[content_id] = button
             grid.addWidget(button, index // 2, index % 2)
         layout.addLayout(grid)

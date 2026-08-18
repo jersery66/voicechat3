@@ -1,6 +1,6 @@
 # Phase 3 Existing Content Integration Note
 
-状态：**IMPLEMENTED / FUTURE MEDIA EXPANSION 仍未完成**
+状态：**IMPLEMENTED / Phase 4 native leisure games added separately**
 
 Phase 3 将三个已有 core relaxation 视频接入 Catalog metadata 和统一的
 RelaxationRuntime lifecycle：
@@ -21,5 +21,5 @@ meditation         → 冥想训练.mp4
 状态，ScaleRuntime 仍拥有量表 pause/resume。
 
 当前 `media_library/library_config.json` 没有真实本地 leisure video entries，故
-Center 的“看看视频”继续 disabled/内容整理中。四个游戏仍为 `PLANNED`，未实现、
-未接 legacy game engine。Agent/TurnPolicy recommendation 仍属于 Phase 5。
+Center 的“看看视频”继续 disabled/内容整理中。四个游戏已在 Phase 4 以 native
+PySide6 实现，未接 legacy game engine。Agent/TurnPolicy recommendation 仍属于 Phase 5。

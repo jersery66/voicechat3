@@ -37,7 +37,7 @@ CORE_RELAXATION:
   guided relaxation video (future VIDEO)
 LEISURE:
   nature/rest videos (VIDEO)
-  bubble_pop, gentle_search, calm_puzzle, falling_leaves (GAME, planned)
+  bubble_pop, gentle_search, calm_puzzle, falling_leaves (GAME, Phase 4 AVAILABLE)
 ```
 
 Catalog 不包含 `clinical_score`、`treatment_effect`、`addiction_score`、

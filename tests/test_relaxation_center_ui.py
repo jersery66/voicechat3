@@ -57,16 +57,20 @@ def test_center_reads_core_and_leisure_roles_from_catalog(qapp, catalog):
     dialog.deleteLater()
 
 
-def test_planned_games_are_visible_but_disabled_and_never_started(qapp, catalog):
+def test_available_games_are_selectable_and_emit_content_request(qapp, catalog):
     runtime = RelaxationRuntime(catalog)
     dialog = RelaxationCenterDialog(catalog=catalog, runtime=runtime)
+    requested = []
+    dialog.game_content_requested.connect(requested.append)
     dialog.open_center()
     dialog.games_button.click()
 
     assert dialog.games_page.isVisible() is True
     for button in dialog.game_buttons.values():
-        assert button.isEnabled() is False
-        assert "即将开放" in button.text()
+        assert button.isEnabled() is True
+        assert "即将开放" not in button.text()
+    dialog.game_buttons["bubble_pop"].click()
+    assert requested == ["bubble_pop"]
     assert runtime.snapshot().state is RelaxationState.CENTER
     dialog.close_to_chat()
     assert runtime.snapshot().state is RelaxationState.INACTIVE

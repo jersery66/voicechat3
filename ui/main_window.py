@@ -43,7 +43,7 @@ from services.report_service import EndType
 from conversation.delivery import GenerationController, SentenceReady, SentenceSegmenter
 from core.tags import clean_for_display, clean_for_tts
 from relaxation.catalog import build_default_catalog
-from relaxation.contracts import RelaxationContentRole, RelaxationState
+from relaxation.contracts import RelaxationContentRole, RelaxationContentType, RelaxationState
 from relaxation.playback import content_id_from_legacy, legacy_relaxation_key
 from relaxation.runtime import RelaxationRuntime
 
@@ -91,6 +91,7 @@ class MainWindow(QMainWindow):
         self.relaxation_catalog = build_default_catalog()
         self.relaxation_runtime = RelaxationRuntime(self.relaxation_catalog)
         self._relaxation_center_dialog = None
+        self._relaxation_game_dialog = None
 
         # State
         self.is_recording = False
@@ -1174,6 +1175,7 @@ class MainWindow(QMainWindow):
                 parent=self,
             )
             dialog.core_content_requested.connect(self._on_center_core_content)
+            dialog.game_content_requested.connect(self._on_center_game_content)
             dialog.returned_to_chat.connect(self._on_center_returned)
             self._relaxation_center_dialog = dialog
             dialog.open_center()
@@ -1188,6 +1190,107 @@ class MainWindow(QMainWindow):
             dialog.hide_for_content()
             self._relaxation_center_dialog = None
         self._start_core_relaxation(content_id, "CENTER")
+
+    def _on_center_game_content(self, content_id: str):
+        """Handoff a Center game selection to the native game host."""
+        dialog = self._relaxation_center_dialog
+        if dialog is not None:
+            dialog.hide_for_content()
+            self._relaxation_center_dialog = None
+        self._start_relaxation_game(content_id)
+
+    def _start_relaxation_game(self, content_id: str) -> bool:
+        """Start one catalog-approved native leisure game.
+
+        The Center owns presentation and this method owns only the
+        RelaxationRuntime handoff.  No legacy game service, SessionEngine
+        command, Agent decision, or model call is involved.
+        """
+        definition = self.relaxation_catalog.get(content_id)
+        if (
+            definition is None
+            or definition.role is not RelaxationContentRole.LEISURE
+            or definition.category is not RelaxationContentType.GAME
+            or not definition.is_available
+        ):
+            logger.warning(f"[Relaxation] rejected unavailable game: {content_id!r}")
+            return False
+        if not self._engine_can_play_video():
+            return False
+        try:
+            state = self.relaxation_runtime.snapshot().state
+            if state is RelaxationState.INACTIVE:
+                self.relaxation_runtime.enter_center()
+            if self.relaxation_runtime.snapshot().state is not RelaxationState.CENTER:
+                logger.warning(f"[Relaxation] invalid game start state: {state.value}")
+                return False
+            self.relaxation_runtime.start_content(content_id)
+            self._active_relaxation_entry_source = "CENTER"
+            self.control_panel.stop_all_blinks()
+            from ui.relaxation_games import RelaxationGameDialog
+
+            game_dialog = RelaxationGameDialog(content_id=content_id, parent=self)
+            game_dialog.game_finished.connect(
+                lambda completed, item_id=content_id: self._on_relaxation_game_finished(
+                    item_id, completed
+                )
+            )
+            self._relaxation_game_dialog = game_dialog
+            game_dialog.show()
+            return True
+        except Exception as exc:
+            logger.warning(f"[Relaxation] game start failed: {exc}")
+            if self.relaxation_runtime.snapshot().state is RelaxationState.RUNNING:
+                self.relaxation_runtime.cancel_content("start_failure")
+            self._relaxation_game_dialog = None
+            return False
+
+    def _on_relaxation_game_finished(self, content_id: str, completed: bool = True):
+        """Finish a native game and return to the conversation boundary."""
+        runtime_snapshot = self.relaxation_runtime.snapshot()
+        if not (
+            runtime_snapshot.state is RelaxationState.RUNNING
+            and runtime_snapshot.selected_content_id == content_id
+        ):
+            logger.warning(f"[Relaxation] duplicate/stale game completion ignored: {content_id!r}")
+            return
+        if completed:
+            self.relaxation_runtime.complete_content()
+        else:
+            self.relaxation_runtime.cancel_content("participant_exit")
+        if self.relaxation_runtime.snapshot().state is RelaxationState.CENTER:
+            self.relaxation_runtime.exit_to_conversation()
+        if self.relaxation_runtime.snapshot().state is RelaxationState.RETURNING:
+            self.relaxation_runtime.finalize_return()
+
+        definition = self.relaxation_catalog.get(content_id)
+        if completed and definition is not None and self.report_service:
+            self.report_service.record_relaxation(definition.display_name)
+            self.report_service.activity_log.append({
+                "type": "relaxation",
+                "content_id": content_id,
+                "content_role": getattr(definition.role, "value", definition.role),
+                "content_type": getattr(definition.category, "value", definition.category),
+                "display_name": definition.display_name,
+                "entry_source": "CENTER",
+                "completed": True,
+                "relaxation_name": definition.display_name,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        if self._relaxation_game_dialog is not None:
+            self._relaxation_game_dialog.close()
+        self._relaxation_game_dialog = None
+        message = (
+            "刚才这个练习先到这里，你可以感受一下现在的状态。我们可以继续聊。"
+            if completed
+            else "练习先停在这里，没有记录为已完成。我们可以继续聊。"
+        )
+        if getattr(self, "chat_panel", None):
+            self.chat_panel.add_system_message(message)
+        if completed and hasattr(self, "_play_tts_async"):
+            self._play_tts_async(message)
+        if getattr(self, "control_panel", None):
+            self.control_panel.set_status("继续对话中..." if completed else "练习已结束")
 
     def _start_core_relaxation(self, content_id: str, entry_source: str) -> bool:
         """Start one catalog-approved core item through the shared lifecycle."""

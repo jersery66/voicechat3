@@ -132,3 +132,13 @@ def test_planned_content_is_not_reported_as_implemented():
     catalog = RelaxationCatalog([_content(implementation_status="PLANNED")])
     assert catalog.require("bubble_pop").implementation_status == "PLANNED"
     assert catalog.require("bubble_pop").is_available is False
+
+
+def test_phase4_games_are_available_from_the_default_catalog():
+    catalog = build_default_catalog()
+    for content_id in ("bubble_pop", "gentle_search", "calm_puzzle", "falling_leaves"):
+        definition = catalog.require(content_id)
+        assert definition.category is RelaxationContentType.GAME
+        assert definition.role is RelaxationContentRole.LEISURE
+        assert definition.implementation_status == "AVAILABLE"
+        assert definition.is_available is True
