@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import random
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from relaxation.puzzles.untangle.campaign import CampaignMode, UntangleCampaign, campaign_levels
 from relaxation.puzzles.untangle.generator import Difficulty
+from ui.untangle_progression_dialogs import UntangleCompletionDialog, UntangleSkipDialog
 from ui.untangle_widget import UntangleWidget
 
 
@@ -30,6 +30,10 @@ class UntanglePreviewWindow(QMainWindow):
         self.setWindowTitle("解开线团")
         self.setMinimumSize(700, 700)
         self.campaign = UntangleCampaign(all_levels_unlocked=True, seed=seed)
+        self._completion_pending = False
+        self._completion_key = None
+        self._completion_dialog = None
+        self._skip_dialog = None
         self.title_label = QLabel("解开线团")
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #4f625f;")
@@ -131,13 +135,13 @@ class UntanglePreviewWindow(QMainWindow):
     def _difficulty_changed(self, index: int) -> None:
         if self.campaign.mode is CampaignMode.ENDLESS:
             self.campaign.next_endless(difficulty=self.difficulty_combo.itemData(index))
-            self.puzzle_widget.set_model(self.campaign.model)
+            self._install_current_model()
             self._refresh_campaign_ui()
 
     def _new_puzzle(self) -> None:
         if self.campaign.mode is CampaignMode.ENDLESS:
             self.campaign.next_endless()
-            self.puzzle_widget.set_model(self.campaign.model)
+            self._install_current_model()
             self._refresh_campaign_ui()
         else:
             self._replay_level()
@@ -151,6 +155,18 @@ class UntanglePreviewWindow(QMainWindow):
         self._sync_controls()
 
     def _on_completed(self) -> None:
+        level = self.campaign.current_level
+        completion_key = (
+            self.campaign.mode.value,
+            level.number if level is not None else self.campaign.model.seed,
+        )
+        if (
+            self._completion_pending
+            or self._completion_dialog is not None
+            or completion_key == self._completion_key
+        ):
+            return
+        self._completion_key = completion_key
         self.campaign.complete_current()
         if self.campaign.mode is CampaignMode.CAMPAIGN and self.campaign.campaign_completed:
             self.completion_label.setText("全部解开了\n你已经完成全部 15 个关卡。")
@@ -166,6 +182,68 @@ class UntanglePreviewWindow(QMainWindow):
         self.hint_label.clear()
         self._sync_controls()
         self._refresh_campaign_ui(clear_completion=False)
+        self._completion_pending = True
+        QTimer.singleShot(350, self._show_completion_dialog)
+
+    def _show_completion_dialog(self) -> None:
+        if not self._completion_pending or self._completion_dialog is not None:
+            return
+        self._completion_pending = False
+        level = self.campaign.current_level
+        is_final = (
+            self.campaign.mode is CampaignMode.CAMPAIGN
+            and level is not None
+            and level.number == 15
+            and self.campaign.campaign_completed
+        )
+        dialog = UntangleCompletionDialog(
+            level_number=level.number if level is not None else 0,
+            final=is_final,
+            parent=self,
+        )
+        self._completion_dialog = dialog
+        if is_final:
+            dialog.continue_button.clicked.connect(self._completion_continue)
+            dialog.restart_button.clicked.connect(self._completion_restart)
+            dialog.select_button.clicked.connect(self._completion_select)
+            dialog.return_button.clicked.connect(self._completion_return)
+        else:
+            dialog.next_button.clicked.connect(self._completion_next)
+            dialog.replay_button.clicked.connect(self._completion_replay)
+            dialog.select_button.clicked.connect(self._completion_select)
+        dialog.show()
+
+    def _dismiss_completion_dialog(self) -> None:
+        dialog = self._completion_dialog
+        self._completion_dialog = None
+        if dialog is not None:
+            dialog.close()
+
+    def _completion_next(self) -> None:
+        self._dismiss_completion_dialog()
+        self._next_level()
+
+    def _completion_replay(self) -> None:
+        self._dismiss_completion_dialog()
+        self._replay_level()
+
+    def _completion_select(self) -> None:
+        self._dismiss_completion_dialog()
+        self._open_level_selector()
+
+    def _completion_continue(self) -> None:
+        self._dismiss_completion_dialog()
+        self._enter_endless()
+
+    def _completion_restart(self) -> None:
+        self._dismiss_completion_dialog()
+        self.campaign.load_level(1)
+        self._install_current_model()
+        self.hint_label.clear()
+        self._refresh_campaign_ui()
+
+    def _completion_return(self) -> None:
+        self._dismiss_completion_dialog()
 
     def _sync_controls(self) -> None:
         self.undo_button.setEnabled(self.puzzle_widget.model.can_undo)
@@ -212,7 +290,7 @@ class UntanglePreviewWindow(QMainWindow):
     def _level_selected(self, index: int) -> None:
         number = self.level_combo.itemData(index)
         if self.campaign.load_level(number):
-            self.puzzle_widget.set_model(self.campaign.model)
+            self._install_current_model()
             self.hint_label.clear()
             self._refresh_campaign_ui()
 
@@ -231,24 +309,46 @@ class UntanglePreviewWindow(QMainWindow):
     def _skip(self) -> bool:
         if self.campaign.mode is not CampaignMode.CAMPAIGN:
             return False
-        if not self.campaign.skip_current():
+        if self._skip_dialog is not None:
             return False
-        self.puzzle_widget.set_model(self.campaign.model)
+        dialog = UntangleSkipDialog(parent=self)
+        self._skip_dialog = dialog
+        dialog.confirm_button.clicked.connect(self._confirm_skip)
+        dialog.continue_button.clicked.connect(self._cancel_skip)
+        dialog.show()
+        return True
+
+    def _confirm_skip(self) -> None:
+        dialog = self._skip_dialog
+        self._skip_dialog = None
+        if dialog is not None:
+            dialog.close()
+        if not self.campaign.skip_current():
+            return
+        self._install_current_model()
         if self.campaign.campaign_completed:
             self.completion_label.setText("全部解开了\n你已经完成全部 15 个关卡。")
             self.completion_label.show()
             self.continue_button.show()
             self.hint_label.clear()
             self._refresh_campaign_ui(clear_completion=False)
+            self._completion_key = (CampaignMode.CAMPAIGN.value, 15)
+            self._completion_pending = True
+            QTimer.singleShot(350, self._show_completion_dialog)
         else:
             self.hint_label.setText("已跳过，可以之后再回来。")
             self._refresh_campaign_ui()
-        return True
+
+    def _cancel_skip(self) -> None:
+        dialog = self._skip_dialog
+        self._skip_dialog = None
+        if dialog is not None:
+            dialog.close()
 
     def _next_level(self) -> bool:
         if not self.campaign.next_level():
             return False
-        self.puzzle_widget.set_model(self.campaign.model)
+        self._install_current_model()
         self.hint_label.clear()
         self._refresh_campaign_ui()
         return True
@@ -256,7 +356,7 @@ class UntanglePreviewWindow(QMainWindow):
     def _replay_level(self) -> bool:
         if not self.campaign.replay_current():
             return False
-        self.puzzle_widget.set_model(self.campaign.model)
+        self._install_current_model()
         self.hint_label.clear()
         self._refresh_campaign_ui()
         return True
@@ -265,7 +365,7 @@ class UntanglePreviewWindow(QMainWindow):
         if self.campaign.mode is CampaignMode.ENDLESS:
             return False
         self.campaign.start_endless(self.difficulty_combo.currentData())
-        self.puzzle_widget.set_model(self.campaign.model)
+        self._install_current_model()
         self.hint_label.clear()
         self._refresh_campaign_ui()
         return True
@@ -274,10 +374,19 @@ class UntanglePreviewWindow(QMainWindow):
         if self.campaign.mode is CampaignMode.CAMPAIGN:
             return False
         self.campaign.start_campaign()
-        self.puzzle_widget.set_model(self.campaign.model)
+        self._install_current_model()
         self.hint_label.clear()
         self._refresh_campaign_ui()
         return True
+
+    def _open_level_selector(self) -> None:
+        self.level_combo.setFocus()
+        self.level_combo.showPopup()
+
+    def _install_current_model(self) -> None:
+        self._completion_pending = False
+        self._completion_key = None
+        self.puzzle_widget.set_model(self.campaign.model)
 
 
 def main(argv: list[str] | None = None) -> int:
