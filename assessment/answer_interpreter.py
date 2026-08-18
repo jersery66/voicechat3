@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Optional
 
 from core.scoring import infer_scale_score_from_text, is_scale_interruption_text
@@ -58,16 +59,17 @@ class ScaleAnswerInterpreter:
             )
 
         normalized = (text or "").strip()
-        if is_scale_interruption_text(normalized):
-            return ScaleAnswerInterpretation(
-                status="pause",
-                score=None,
-                scale_name=scale_name,
-                item=item,
-                reason="participant_interruption",
-            )
+        # A compound utterance may contain a valid answer before the request
+        # to rest. Interpret that prefix first; an ambiguous prefix remains
+        # unanswered and is handled as a pause below.
+        answer_text = re.split(
+            r"(?:先让我|让我|先|我想|我要)?(?:休息|暂停)",
+            normalized,
+            maxsplit=1,
+        )[0]
+        answer_text = answer_text.strip(" ，,。！？!?；;") or normalized
 
-        if not normalized or any(marker in normalized for marker in self._AMBIGUOUS_MARKERS):
+        if not answer_text or any(marker in answer_text for marker in self._AMBIGUOUS_MARKERS):
             return ScaleAnswerInterpretation(
                 status="ambiguous",
                 score=None,
@@ -76,7 +78,18 @@ class ScaleAnswerInterpreter:
                 reason="clarification_required",
             )
 
-        score = infer_scale_score_from_text(normalized, scale_name, item=item)
+        score = infer_scale_score_from_text(answer_text, scale_name, item=item)
+        if score is None and scale_name in ("PHQ-9", "GAD-7"):
+            # The current scale question supplies the symptom context, so a
+            # standalone clear frequency answer is sufficient here.
+            if answer_text in {"没有", "没", "完全不会", "不会"}:
+                score = 0
+            elif "几乎每天" in answer_text or "每天" in answer_text or "天天" in answer_text:
+                score = 3
+            elif "一半以上" in answer_text or "大多数" in answer_text or "超过一半" in answer_text:
+                score = 2
+            elif "几天" in answer_text or "偶尔" in answer_text:
+                score = 1
         if score is not None and self._manager.validate_answer(
             scale_name, item=item, score=score
         ):
@@ -86,6 +99,15 @@ class ScaleAnswerInterpreter:
                 scale_name=scale_name,
                 item=item,
                 reason="definition_backed_phrase",
+            )
+
+        if is_scale_interruption_text(normalized):
+            return ScaleAnswerInterpretation(
+                status="pause",
+                score=None,
+                scale_name=scale_name,
+                item=item,
+                reason="participant_interruption",
             )
 
         return ScaleAnswerInterpretation(

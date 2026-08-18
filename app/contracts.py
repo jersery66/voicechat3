@@ -120,6 +120,7 @@ class RelaxationFinishedCommand(Command):
     """Relaxation video finished (or was exited early)."""
     kind: Literal["relaxation_finished"] = "relaxation_finished"
     completed: bool = True
+    provider_failed: bool = False
 
 
 class PlayLeisureCommand(Command):

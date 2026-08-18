@@ -129,7 +129,36 @@ def test_pause_preserves_actual_unanswered_item_and_resume_recalculates_it():
     assert resumed.snapshot.paused is False
     assert resumed.snapshot.current_item == 2
     assert resumed.snapshot.resume_item is None
-    assert resumed.snapshot.waiting_for_answer is True
+
+
+def test_accepted_item_before_pause_resumes_next_item_without_losing_answers():
+    runtime = ScaleRuntime()
+    runtime.start("PHQ-9")
+    runtime.accept_answer(scale_name="PHQ-9", item=1, score=1)
+    runtime.present_current_item()
+    runtime.accept_answer(scale_name="PHQ-9", item=2, score=2)
+    runtime.present_current_item()
+    runtime.pause()
+
+    resumed = runtime.resume()
+    snapshot = resumed.snapshot
+    assert dict(snapshot.answers_by_scale["PHQ-9"]) == {1: 1, 2: 2}
+    assert snapshot.current_item == 3
+    assert snapshot.waiting_for_answer is True
+
+
+def test_multiple_pause_resume_cycles_do_not_duplicate_or_change_answers():
+    runtime = ScaleRuntime()
+    runtime.start("GAD-7")
+    runtime.pause()
+    runtime.resume()
+    runtime.pause()
+    runtime.resume()
+
+    snapshot = runtime.snapshot()
+    assert snapshot.answers_by_scale["GAD-7"] == {}
+    assert snapshot.current_item == 1
+    assert snapshot.waiting_for_answer is True
 
 
 def test_completion_clears_active_and_waiting_state():

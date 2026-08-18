@@ -724,9 +724,9 @@ class ConversationPipeline:
             self._proactive_relaxation_candidate = None
             if decision.reason == "proactive_relaxation_accepted":
                 self._proactive_relaxation_offered = True
-            runtime = self.scale_runtime.snapshot()
-            if runtime.active_scale and not runtime.paused:
-                self.scale_runtime.pause()
+            # The invitation does not own entry.  ScaleRuntime is paused by
+            # the unified Center-entry helper only after the participant
+            # actually chooses to enter the Center.
         elif decision.action is TurnAction.END_SESSION:
             result.end_type = {
                 "time_limit": "time_limit",
@@ -742,7 +742,11 @@ class ConversationPipeline:
         cancelled response cannot roll back an already-confirmed answer.
         """
         result.scale_tags = {}
-        if decision.action is not TurnAction.CONTINUE_SCALE:
+        explicit_relaxation_pause = (
+            decision.action is TurnAction.RECOMMEND_RELAXATION
+            and decision.reason == "user_relaxation_request"
+        )
+        if decision.action is not TurnAction.CONTINUE_SCALE and not explicit_relaxation_pause:
             return
         runtime = self.scale_runtime.snapshot()
         if not runtime.active_scale or not runtime.current_item:
@@ -1292,10 +1296,21 @@ class ConversationPipeline:
                 signals=signals,
             )
         result.turn_decision = decision
+        # An explicit rest request can share one utterance with the answer to
+        # the current scale item. Interpret that answer before the policy's
+        # pause command, then let the same TurnDecision pause the next item.
+        compound_relaxation_turn = bool(
+            decision.action is TurnAction.RECOMMEND_RELAXATION
+            and decision.reason == "user_relaxation_request"
+            and snapshot.active_scale
+        )
+        if compound_relaxation_turn:
+            self._apply_scale_answer_transition(result.user_text, decision, result)
         self._apply_turn_decision(decision, result)
         self._commit_user_turn(config, result, emit)
         runtime = self.scale_runtime.snapshot()
-        self._apply_scale_answer_transition(result.user_text, decision, result)
+        if not compound_relaxation_turn:
+            self._apply_scale_answer_transition(result.user_text, decision, result)
         runtime = self.scale_runtime.snapshot()
         self._set_guard_context(
             config.generation_id,

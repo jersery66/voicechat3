@@ -34,6 +34,7 @@ _RELAXATION_REQUEST_MARKERS = (
     "试一下",
     "做个",
     "做一下",
+    "先",
     "帮我做",
     "帮我来",
 )
@@ -71,8 +72,12 @@ _STANDALONE_RELAXATION_COMMANDS = {
     "做个放松": None,
     "做放松训练": None,
     "做冥想": "meditation",
+    "休息一下": None,
+    "暂停一下": None,
+    "先休息一下": None,
+    "先暂停一下": None,
 }
-_GENERIC_RELAXATION_PHRASES = ("放松", "呼吸", "肌肉", "冥想", "正念")
+_GENERIC_RELAXATION_PHRASES = ("放松", "休息", "暂停", "呼吸", "肌肉", "冥想", "正念")
 _TYPED_RELAXATION_PHRASES = (
     ("breathing", ("呼吸练习", "呼吸训练", "呼吸放松", "深呼吸", "做个呼吸")),
     ("muscle", ("肌肉放松", "渐进性肌肉放松", "做肌肉放松")),

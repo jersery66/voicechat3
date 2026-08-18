@@ -29,6 +29,8 @@ def _window_stub():
     window.relaxation_catalog = build_default_catalog()
     window.relaxation_runtime = RelaxationRuntime(window.relaxation_catalog)
     window._relaxation_center_dialog = None
+    window._relaxation_return_context = None
+    window._engine_submit = lambda command: window.calls.append(("engine", command))
     window.calls = []
     window._engine_can_play_video = lambda: True
     window._play_relaxation_video = lambda content_id: window.calls.append(

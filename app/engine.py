@@ -414,6 +414,13 @@ class SessionEngine:
                 context="relaxation_finished",
             ))
             return
+        if command.provider_failed:
+            # A provider failure releases the active-media slot without
+            # presenting a successful core-relaxation feedback choice.
+            self._orchestrator.transition_to(SessionState.CHATTING)
+            self._playback_kind = None
+            self._emit_state()
+            return
         self._orchestrator.transition_to(SessionState.POST_RELAXATION)
         self._playback_kind = None
         self._emit_state()

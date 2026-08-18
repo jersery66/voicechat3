@@ -14,6 +14,7 @@ from .contracts import (
     RelaxationState,
 )
 from .runtime import RelaxationRuntime
+from .return_context import RelaxationReturnContext
 
 __all__ = [
     "RelaxationCatalog",
@@ -21,6 +22,7 @@ __all__ = [
     "RelaxationContentRole",
     "RelaxationContentType",
     "RelaxationRuntime",
+    "RelaxationReturnContext",
     "RelaxationRuntimeError",
     "RelaxationSnapshot",
     "RelaxationState",

@@ -46,6 +46,7 @@ from relaxation.catalog import build_default_catalog
 from relaxation.contracts import RelaxationContentRole, RelaxationContentType, RelaxationState
 from relaxation.playback import content_id_from_legacy, legacy_relaxation_key
 from relaxation.runtime import RelaxationRuntime
+from relaxation.return_context import RelaxationReturnContext
 
 
 class MainWindow(QMainWindow):
@@ -94,6 +95,7 @@ class MainWindow(QMainWindow):
         self._relaxation_game_dialog = None
         self._pending_leisure_game_start: str | None = None
         self._pending_relaxation_preference: str | None = None
+        self._relaxation_return_context: RelaxationReturnContext | None = None
 
         # State
         self.is_recording = False
@@ -1176,6 +1178,74 @@ class MainWindow(QMainWindow):
         self.loading_screen.fade_out(callback=self.loading_screen.hide)
         self.control_panel.set_buttons_enabled(True)
 
+    def _capture_relaxation_conversation_anchor(self) -> str | None:
+        """Capture one short existing user turn for a transient return bridge."""
+        history = getattr(getattr(self, "llm_service", None), "conversation_history", None)
+        if not history:
+            return None
+        for message in reversed(history):
+            if message.get("role") != "user":
+                continue
+            text = str(message.get("content") or "").strip()
+            if text:
+                return text[:200]
+        return None
+
+    def _prepare_relaxation_center_entry(self, source: str) -> bool:
+        """Pause the real ScaleRuntime before any Center content can start."""
+        pipeline = getattr(self, "pipeline", None)
+        scale_runtime = getattr(pipeline, "scale_runtime", None)
+        scale_snapshot = scale_runtime.snapshot() if scale_runtime is not None else None
+        scale_was_paused = bool(scale_snapshot and scale_snapshot.active_scale)
+        if scale_snapshot and scale_snapshot.active_scale:
+            if not scale_snapshot.paused:
+                update = scale_runtime.pause()
+                if update.status == "rejected":
+                    logger.warning("[RelaxResume] Center entry pause rejected: %s", update.reason)
+                    return False
+            # The engine sees only a boolean projection. Queue ordering keeps
+            # this false projection ahead of any subsequent media command.
+            from app.contracts import ScaleProjectionCommand
+            self._engine_submit(ScaleProjectionCommand(active=False))
+        self._relaxation_return_context = RelaxationReturnContext(
+            source=source,
+            scale_was_paused=scale_was_paused,
+            scale_name=scale_snapshot.active_scale if scale_snapshot else None,
+            conversation_anchor=self._capture_relaxation_conversation_anchor(),
+        )
+        return True
+
+    def _clear_relaxation_return_context(self) -> None:
+        self._relaxation_return_context = None
+
+    def _resume_scale_from_relaxation_context(self) -> str | None:
+        """Resume only from ScaleRuntime's first unanswered item."""
+        context = self._relaxation_return_context
+        self._relaxation_return_context = None
+        if context is None or not context.scale_was_paused:
+            return None
+        pipeline = getattr(self, "pipeline", None)
+        scale_runtime = getattr(pipeline, "scale_runtime", None)
+        if scale_runtime is None:
+            return None
+        snapshot = scale_runtime.snapshot()
+        if not snapshot.active_scale:
+            from app.contracts import ScaleProjectionCommand
+            self._engine_submit(ScaleProjectionCommand(active=False))
+            return None
+        if snapshot.paused:
+            update = scale_runtime.resume()
+            if update.status == "rejected":
+                logger.warning("[RelaxResume] resume rejected: %s", update.reason)
+                return None
+        snapshot = scale_runtime.snapshot()
+        from app.contracts import ScaleProjectionCommand
+        self._engine_submit(ScaleProjectionCommand(active=bool(snapshot.active_scale)))
+        if not snapshot.active_scale:
+            return None
+        question_getter = getattr(pipeline, "get_active_scale_question_text", None)
+        return question_getter() if callable(question_getter) else None
+
     def _open_relaxation_center(self, *, show_games: bool = False):
         """Open one catalog-driven Center shell without changing policy/runtime owners."""
         dialog = self._relaxation_center_dialog
@@ -1188,6 +1258,10 @@ class MainWindow(QMainWindow):
                 self._pending_relaxation_preference = None
             dialog.raise_()
             dialog.activateWindow()
+            return
+        if not self._prepare_relaxation_center_entry(
+            "EXPLICIT_GAME" if show_games else "CENTER"
+        ):
             return
         try:
             from ui.relaxation_center import RelaxationCenterDialog
@@ -1217,7 +1291,6 @@ class MainWindow(QMainWindow):
         dialog = self._relaxation_center_dialog
         if dialog is not None:
             dialog.hide_for_content()
-            self._relaxation_center_dialog = None
         self._start_core_relaxation(content_id, "CENTER")
 
     def _on_center_game_content(self, content_id: str):
@@ -1242,6 +1315,14 @@ class MainWindow(QMainWindow):
             or not definition.is_available
         ):
             logger.warning(f"[Relaxation] rejected unavailable game: {content_id!r}")
+            return False
+        scale_runtime = getattr(getattr(self, "pipeline", None), "scale_runtime", None)
+        if (
+            getattr(self, "_relaxation_return_context", None) is None
+            and scale_runtime is not None
+            and scale_runtime.snapshot().active_scale
+            and not self._prepare_relaxation_center_entry("CENTER")
+        ):
             return False
         if not self._engine_can_play_video():
             return False
@@ -1366,6 +1447,14 @@ class MainWindow(QMainWindow):
         if not definition.is_available or not definition.resource_path:
             logger.warning(f"[Relaxation] unavailable core content: {content_id!r}")
             return False
+        scale_runtime = getattr(getattr(self, "pipeline", None), "scale_runtime", None)
+        if (
+            getattr(self, "_relaxation_return_context", None) is None
+            and scale_runtime is not None
+            and scale_runtime.snapshot().active_scale
+            and not self._prepare_relaxation_center_entry(entry_source)
+        ):
+            return False
         if not self._engine_can_play_video():
             return False
         try:
@@ -1387,6 +1476,12 @@ class MainWindow(QMainWindow):
 
     def _on_center_returned(self):
         self._relaxation_center_dialog = None
+        resumed_question = self._resume_scale_from_relaxation_context()
+        if resumed_question:
+            message = f"好，我们接着刚才没完成的部分聊。{resumed_question}"
+            self.chat_panel.add_system_message(message)
+            self._play_tts_async(message)
+            self.control_panel.set_status("继续量表中...")
 
     # ==================== Session Management ====================
 
@@ -1398,6 +1493,7 @@ class MainWindow(QMainWindow):
         which runs only when the next subject confirms their info.
         """
         self._cancel_active_pipeline(reason="next subject")
+        self._clear_relaxation_return_context()
         self.chat_panel.clear_chat()
         self.session_emotions = []
         self._scale_tags = {}
@@ -1501,12 +1597,19 @@ class MainWindow(QMainWindow):
             self._engine_submit(ContinueChatCommand())
         except Exception as exc:
             logger.warning(f"ContinueChat command failed: {exc}")
-        resumed_question = None
-        if self.pipeline and hasattr(self.pipeline, "resume_scale_after_relaxation"):
-            try:
-                resumed_question = self.pipeline.resume_scale_after_relaxation()
-            except Exception as exc:
-                logger.warning(f"ScaleRuntime post-relaxation resume failed: {exc}")
+        had_return_context = getattr(self, "_relaxation_return_context", None) is not None
+        resumed_question = self._resume_scale_from_relaxation_context()
+        if not had_return_context and resumed_question is None:
+            # Compatibility for older callers that reached POST_RELAXATION
+            # before the Center-entry context was created.
+            if self.pipeline and hasattr(self.pipeline, "resume_scale_after_relaxation"):
+                try:
+                    resumed_question = self.pipeline.resume_scale_after_relaxation()
+                    if resumed_question:
+                        from app.contracts import ScaleProjectionCommand
+                        self._engine_submit(ScaleProjectionCommand(active=True))
+                except Exception as exc:
+                    logger.warning(f"ScaleRuntime post-relaxation resume failed: {exc}")
         if resumed_question:
             message = f"好，我们接着把刚才没完成的部分聊完。{resumed_question}"
         else:
@@ -1517,6 +1620,7 @@ class MainWindow(QMainWindow):
     def _on_end_chosen(self):
         """用户在放松后弹窗选择结束"""
         self._cancel_post_relaxation_timer()
+        self._clear_relaxation_return_context()
         self._handle_session_end(
             EndType.GOAL_ACHIEVED,
             allow_force_relaxation=False,
@@ -1544,11 +1648,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"PlayRelaxation command failed: {e}")
 
-        # ScaleRuntime owns the paused item; the UI only issues its command.
-        if self.pipeline and self.pipeline.scale_runtime.snapshot().active_scale:
-            update = self.pipeline.scale_runtime.pause()
-            if update.accepted:
-                logger.warning("[RelaxResume] Runtime scale paused for relaxation")
+        # Center entry normally paused the Runtime already. Keep this guarded
+        # compatibility fallback for callers that reach the media boundary
+        # directly, without issuing a second pause for an already-paused scale.
+        if self.pipeline:
+            scale_snapshot = self.pipeline.scale_runtime.snapshot()
+            if scale_snapshot.active_scale and not scale_snapshot.paused:
+                update = self.pipeline.scale_runtime.pause()
+                if update.status != "rejected":
+                    from app.contracts import ScaleProjectionCommand
+                    self._engine_submit(ScaleProjectionCommand(active=False))
         self.control_panel.stop_all_blinks()
 
         # Store type for recording after video finishes (not before — video may fail)
@@ -1578,21 +1687,42 @@ class MainWindow(QMainWindow):
         if not owns_active_run:
             logger.warning(f"[Relaxation] duplicate/stale video completion ignored: {content_id!r}")
             return
+        entry_source = getattr(self, "_active_relaxation_entry_source", "unknown")
+        center_dialog = getattr(self, "_relaxation_center_dialog", None)
+        center_provider_failure = (
+            not completed and entry_source == "CENTER" and center_dialog is not None
+        )
         if completed:
             self.relaxation_runtime.complete_content()
         else:
             self.relaxation_runtime.cancel_content("provider_failure")
-        if self.relaxation_runtime.snapshot().state is RelaxationState.CENTER:
-            self.relaxation_runtime.exit_to_conversation()
-        if self.relaxation_runtime.snapshot().state is RelaxationState.RETURNING:
-            self.relaxation_runtime.finalize_return()
         relaxation_type = legacy_relaxation_key(content_id) or content_id
         # A missing or failed video is not a completed intervention.
         try:
             from app.contracts import RelaxationFinishedCommand
-            self._engine_submit(RelaxationFinishedCommand(completed=completed))
+            self._engine_submit(RelaxationFinishedCommand(
+                completed=completed,
+                provider_failed=center_provider_failure,
+            ))
         except Exception as e:
             logger.warning(f"RelaxationFinished command failed: {e}")
+
+        if center_provider_failure:
+            self._end_decision_open = False
+            self._pre_end_relax_prompted = False
+            center_dialog.restore_after_core_failure()
+            return
+
+        if self.relaxation_runtime.snapshot().state is RelaxationState.CENTER:
+            self.relaxation_runtime.exit_to_conversation()
+        if self.relaxation_runtime.snapshot().state is RelaxationState.RETURNING:
+            self.relaxation_runtime.finalize_return()
+        if completed and center_dialog is not None and entry_source == "CENTER":
+            # Successful core relaxation follows POST_RELAXATION, not the
+            # Center return path; prevent closeEvent from resuming the scale.
+            center_dialog.blockSignals(True)
+            center_dialog.close()
+            self._relaxation_center_dialog = None
         # Record relaxation AFTER video finishes
         relax_name = definition.display_name if (completed and definition is not None) else ""
         if relax_name:
@@ -2426,6 +2556,12 @@ class MainWindow(QMainWindow):
     def _handle_session_end(self, end_type, relaxation_tag=None,
                             allow_force_relaxation=True, source="ui"):
         """Submit an end request; SessionEngine owns all lifecycle decisions."""
+        # Ending a session must never resume a paused scale; keep incomplete
+        # answers for reporting and discard only the transient Center context.
+        self._clear_relaxation_return_context()
+        center = getattr(self, "_relaxation_center_dialog", None)
+        if center is not None and center.isVisible():
+            center.close_to_chat()
         try:
             from app.contracts import EndSessionCommand
             self._engine_submit(EndSessionCommand(

@@ -19,6 +19,17 @@ def test_clear_frequency_answer_is_accepted_without_mutating_runtime():
     assert result.item == 3
 
 
+def test_contextual_frequency_answer_can_be_completed_with_pause_request():
+    result = ScaleAnswerInterpreter().interpret(
+        "几乎每天，先让我休息一下",
+        scale_name="PHQ-9",
+        item=3,
+    )
+
+    assert result.status == "accepted"
+    assert result.score == 3
+
+
 def test_pcl5_definition_backed_answer_accepts_score_four():
     result = ScaleAnswerInterpreter().interpret(
         "极度严重",

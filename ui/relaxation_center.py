@@ -101,6 +101,10 @@ class RelaxationCenterDialog(QDialog):
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("color: #8b8175; padding-bottom: 8px;")
         layout.addWidget(subtitle)
+        self.center_status_label = QLabel("", page)
+        self.center_status_label.setAlignment(Qt.AlignCenter)
+        self.center_status_label.setStyleSheet("color: #9b6f58; padding-bottom: 6px;")
+        layout.addWidget(self.center_status_label)
 
         core_heading = QLabel("核心放松")
         core_heading.setFont(QFont("Microsoft YaHei", 13, QFont.Bold))
@@ -234,6 +238,16 @@ class RelaxationCenterDialog(QDialog):
     def show_games_page(self) -> None:
         """Show the leisure selection page without starting a game."""
         self.stack.setCurrentWidget(self.games_page)
+
+    def restore_after_core_failure(self, message: str = "内容暂时无法播放，可以换一个选项。") -> None:
+        """Return to the core selection page after a provider failure."""
+        if self.runtime.snapshot().state is not RelaxationState.CENTER:
+            return
+        self.center_status_label.setText(message)
+        self.stack.setCurrentWidget(self.center_page)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def restore_after_game(self, message: str = "") -> None:
         """Restore the Center Games page after a leisure run ends."""

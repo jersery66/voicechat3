@@ -18,6 +18,11 @@ def test_generic_relaxation_request_has_no_invented_type():
     assert detect_explicit_relaxation_request("我想放松一下") == (True, None)
 
 
+def test_explicit_rest_and_pause_requests_are_recognized_without_type():
+    assert detect_explicit_relaxation_request("先让我休息一下") == (True, None)
+    assert detect_explicit_relaxation_request("我想暂停一下") == (True, None)
+
+
 def test_historical_relaxation_mentions_are_not_requests():
     for text in ("以前做过冥想", "老师教过我冥想", "冥想对我没用"):
         assert detect_explicit_relaxation_request(text) == (False, None)
