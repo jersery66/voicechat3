@@ -3,6 +3,7 @@
 import os
 import sys
 import json
+import hashlib
 from collections import OrderedDict
 from typing import Optional, List, Dict, Any, Set
 from pathlib import Path
@@ -559,8 +560,11 @@ class RAGService:
         # Debug trigger remains deterministic and uses only the curated core.
         if "知识库测试" in user_text:
             results = self._simple_search("失眠 焦虑 戒断", top_k=3)
-            logger.warning(f"[RagDebug] DEBUG trigger '知识库测试' results="
-                          f"{[{'title': r.get('title'), 'score': r.get('score')} for r in results]}")
+            logger.info(
+                "[RagDebug] debug_trigger=knowledge_test query_length=%d result_count=%d",
+                len(user_text),
+                len(results),
+            )
             if results:
                 return "\n\n".join(f"【{r['title']}】\n{r['content']}" for r in results)
             return None
@@ -570,8 +574,12 @@ class RAGService:
         # override the decision.
         results = self._simple_search(user_text, top_k=3)
 
-        logger.warning(f"[RagDebug] query={user_text!r} results="
-                      f"{[{'title': r.get('title'), 'score': round(r.get('score', 0), 1)} for r in results]}")
+        logger.info(
+            "[RagDebug] query_hash=%s query_length=%d result_count=%d",
+            hashlib.sha256(user_text.encode("utf-8")).hexdigest()[:16],
+            len(user_text),
+            len(results),
+        )
 
         if not results:
             return None

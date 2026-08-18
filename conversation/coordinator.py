@@ -37,10 +37,13 @@ class ConversationCoordinator:
 
     def __init__(self, pipeline: LegacyPipeline, *,
                  journal: EventJournal | None = None, session_id: str | None = None,
-                 turn_policy: TurnPolicy | None = None):
+                 turn_policy: TurnPolicy | None = None,
+                 trace_recorder: Any | None = None):
         self._pipeline = pipeline
         self._journal = journal
         self._session_id = session_id
+        self._trace_recorder = trace_recorder
+        self._turn_counter = 0
         # The normal production caller is the pipeline's single policy
         # invocation.  This policy is only used for compatibility fakes or
         # explicit standalone ``decide_turn`` calls.
@@ -76,11 +79,24 @@ class ConversationCoordinator:
     def execute(self, config: PipelineConfig,
                 emit: Callable[[str, Any], None]) -> PipelineResult:
         """Run one text or voice turn through the legacy pipeline."""
+        self._turn_counter += 1
+        turn_id = self._turn_counter
         input_mode = "voice" if config.use_stt else "text"
         if config.use_stt:
             transcript = self._pipeline.transcribe(config.audio_data, emit)
             if not transcript.strip():
                 self._record("turn_completed", {"input_mode": "voice", "end_type": None})
+                self._record_trace(
+                    turn_id=turn_id,
+                    input_mode=input_mode,
+                    turn_action=None,
+                    session_state=None,
+                    scale_state=None,
+                    rag_used=False,
+                    cancelled=False,
+                    fallback_type="EMPTY_TRANSCRIPT",
+                    error_category=None,
+                )
                 return PipelineResult()
             config = replace(config, transcribed_text=transcript)
 
@@ -104,8 +120,23 @@ class ConversationCoordinator:
         self._record("turn_state_snapshot", snapshot)
         self._record("turn_decision", decision)
         self._record("turn_completed", {"input_mode": input_mode, "end_type": result.end_type})
+        self._record_trace(
+            turn_id=turn_id,
+            input_mode=input_mode,
+            turn_action=getattr(decision.action, "value", str(decision.action)),
+            session_state=snapshot.session_state,
+            scale_state=snapshot.active_scale,
+            rag_used=decision.needs_rag,
+            cancelled=False,
+            fallback_type=None,
+            error_category=None,
+        )
         return result
 
     def _record(self, event_type: str, payload: Any) -> None:
         if self._journal is not None:
             self._journal.append(event_type, payload, session_id=self._session_id)
+
+    def _record_trace(self, **values: Any) -> None:
+        if self._trace_recorder is not None:
+            self._trace_recorder.record(**values)
