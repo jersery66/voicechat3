@@ -175,10 +175,10 @@ _PROFILES = {
         name="rtx5090_32g",
         expected_gpu_memory_gb=32,
         runtime_backend="vllm",
-        dialogue_model="Qwen/Qwen2.5-14B-Instruct-AWQ",
+        dialogue_model="/root/models/Qwen3.8-27B-Q4_K_S.gguf",
         dialogue_base_url="http://127.0.0.1:8000/v1",
-        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
-        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        router_model="/root/models/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="/root/models/Qwen2.5-3B-Instruct-AWQ",
         agent_base_url="http://127.0.0.1:8001/v1",
         enable_streaming_tts=True,
         vllm_request_mode="chat",
@@ -187,12 +187,14 @@ _PROFILES = {
         immutable_runtime_contract=True,
         strict_preflight=True,
         notes=(
-            "Single RTX 5090 32GB workstation profile. Qwen2.5-14B AWQ "
-            "dialogue and Qwen2.5-3B Agent run behind local vLLM endpoints "
-            "under WSL2. The GPU is shared with the Windows-side FunASR and "
-            "VoxCPM2 services, so the dialogue model is sized one step below "
-            "the 72B production profiles. Hardware, WSL2 runtime, memory "
-            "budget, and latency remain unvalidated."
+            "Single RTX 5090 32GB workstation profile. Qwen3.8-27B Q4_K_S GGUF "
+            "dialogue (language stack only; the multimodal mmproj weights are "
+            "deliberately not loaded) and Qwen2.5-3B Instruct AWQ Agent run "
+            "behind local vLLM endpoints under WSL2. The GPU is shared with the "
+            "Windows-side FunASR and VoxCPM2 services, leaving roughly 3GB of "
+            "headroom, so the Agent stays on GPU with a small utilization cap. "
+            "Hardware, WSL2 runtime, memory budget, and latency remain "
+            "unvalidated."
         ),
     ),
 }
