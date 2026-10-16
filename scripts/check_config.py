@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Pre-launch service health check (NON-BLOCKING DIAGNOSTIC).
 
-Validates the configured dialogue and Agent services, model files, knowledge
-base, and relaxation media before the main UI starts. Checks are engine
-agnostic: any OpenAI-compatible provider (llama.cpp, vLLM, ...) is probed
-through its ``/v1/models`` endpoint, and the Ollama provider through the
-Ollama client API.
+Validates the configured dialogue and Agent services, the configured
+ASR/TTS providers' model files, the knowledge base, and relaxation media
+before the main UI starts. Checks are engine agnostic: any
+OpenAI-compatible provider (llama.cpp, vLLM, ...) is probed through its
+``/v1/models`` endpoint, and the Ollama provider through the Ollama
+client API. Voice checks apply to the provider named by runtime.yaml;
+an unselected provider is reported as such instead of being probed.
 
 IMPORTANT: this is a *diagnostic*. When ``runtime.strict_preflight`` is
 false the launcher may still continue for troubleshooting; strict runtime
@@ -128,8 +130,11 @@ def check_agent_backend() -> bool:
 
 
 def check_funasr() -> bool:
-    """Verify FunASR model directory exists."""
-    from config import FUNASR_MODEL_PATH
+    """Verify the FunASR model directory when it is the configured ASR provider."""
+    from config import ASR_PROVIDER, FUNASR_MODEL_PATH
+    if ASR_PROVIDER != "funasr":
+        _ok(f"FunASR (not the configured ASR provider: {ASR_PROVIDER})")
+        return True
     if FUNASR_MODEL_PATH and os.path.isdir(FUNASR_MODEL_PATH):
         _ok(f"FunASR ({FUNASR_MODEL_PATH})")
         return True
@@ -138,18 +143,25 @@ def check_funasr() -> bool:
 
 
 def check_cosyvoice() -> bool:
-    """Verify CosyVoice model directory exists (legacy)."""
-    from config import COSYVOICE_MODEL_PATH
-    if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
-        _ok(f"CosyVoice (legacy, {COSYVOICE_MODEL_PATH})")
+    """Verify the CosyVoice model directory when it is the configured TTS provider."""
+    from config import COSYVOICE_MODEL_PATH, TTS_PROVIDER
+    if TTS_PROVIDER != "cosyvoice":
+        _ok(f"CosyVoice (not the configured TTS provider: {TTS_PROVIDER})")
         return True
-    _warn("CosyVoice (legacy)", f"path not found: {COSYVOICE_MODEL_PATH}")
+    if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
+        _ok(f"CosyVoice ({COSYVOICE_MODEL_PATH})")
+        return True
+    _warn("CosyVoice", f"path not found: {COSYVOICE_MODEL_PATH}")
     return True
 
 
 def check_voxcpm() -> bool:
-    """Verify VoxCPM2 model availability."""
-    from config import VOXCPM_MODEL_PATH
+    """Verify VoxCPM2 availability when it is the configured TTS provider."""
+    from config import TTS_PROVIDER, VOXCPM_MODEL_PATH
+    if TTS_PROVIDER != "voxcpm":
+        _ok(f"VoxCPM2 (not the configured TTS provider: {TTS_PROVIDER})")
+        return True
+
     from services.tts_service_voxcpm import TTSService
 
     blocker = TTSService.get_load_blocker()

@@ -613,6 +613,10 @@ class TTSService:
             except Exception as exc:
                 logger.warning("Legacy VoxCPM stream stop failed: %s", exc)
 
+    def cancel(self):
+        """Cancel the current synthesis/playback (unified voice cancel interface)."""
+        self.stop_playing()
+
     def play_audio(self, audio: np.ndarray):
         with self._play_lock:
             self.stop_playing()

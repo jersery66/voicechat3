@@ -406,10 +406,27 @@ def test_tts09_voxcpm_paths_propagate_provider_failure(monkeypatch, prompt_cache
     assert result.error.startswith("generation_error")
 
 
-def test_tts10_production_selector_is_voxcpm_only():
+def test_tts10_tts_selector_is_config_driven(monkeypatch):
+    """The TTS selector maps the configured provider to its implementation.
+
+    Replaces the former "VoxCPM-only selector" contract: switching the
+    speech backend is now a runtime.yaml edit (tts.provider), and an
+    unknown provider fails loudly instead of silently defaulting.
+    """
+    import services.tts_service as selector
+
+    monkeypatch.setattr("config.TTS_PROVIDER", "voxcpm")
+    assert selector.build_tts_service().__class__.__module__ == "services.tts_service_voxcpm"
+
+    monkeypatch.setattr("config.TTS_PROVIDER", "cosyvoice")
+    assert selector.build_tts_service().__class__.__module__ == "services.tts_service_cosyvoice"
+
+    with pytest.raises(ValueError, match="unknown TTS provider"):
+        selector.build_tts_service("typo")
+
     selector_source = (ROOT / "services" / "tts_service.py").read_text(encoding="utf-8")
-    assert "services.tts_service_voxcpm" in selector_source
-    assert "tts_service_cosyvoice" not in selector_source
+    assert "tts.provider" in selector_source
+    assert "importlib.import_module" in selector_source
 
 
 def test_tts11_preflight_and_cleanup_contracts_remain_available(monkeypatch):
@@ -772,3 +789,4 @@ def test_x05_deployment_ports_and_voxcpm_selector_remain_unchanged():
     assert "a100_80g" in profiles
     selector = (ROOT / "services" / "tts_service.py").read_text(encoding="utf-8")
     assert "tts_service_voxcpm" in selector
+    assert "tts_service_cosyvoice" in selector

@@ -933,9 +933,9 @@ class MainWindow(QMainWindow):
     def load_models(self):
         """Load all models with progress updates."""
         try:
-            from services.stt_service import STTService
+            from services.stt_service import get_stt_service
             from services.llm_factory import build_llm_service
-            from services.tts_service import TTSService
+            from services.tts_service import get_tts_service
             from services.rag_service import get_rag_service
             from data.data_manager import DataManager
             from services.report_service import ReportService
@@ -956,7 +956,7 @@ class MainWindow(QMainWindow):
             def load_stt():
                 nonlocal stt_ok
                 try:
-                    service = STTService()
+                    service = get_stt_service()
                     service.load_model()
                     self.stt_service = service
                     stt_ok = True
@@ -973,7 +973,7 @@ class MainWindow(QMainWindow):
                     logger.warning("TTS disabled by config; continuing without TTS.")
                     return
                 try:
-                    service = TTSService()
+                    service = get_tts_service()
                     service.load_model(use_streaming=True)
                     self.tts_service = service
                     tts_ok = True

@@ -58,3 +58,17 @@ def test_disabled_agent_is_reported_and_non_critical(monkeypatch):
                         lambda *_: (_ for _ in ()).throw(AssertionError("must not probe")))
 
     assert check_config.check_agent_backend() is True
+
+
+def test_unselected_tts_provider_is_reported_not_probed(monkeypatch, capsys):
+    monkeypatch.setattr("config.TTS_PROVIDER", "cosyvoice")
+
+    assert check_config.check_voxcpm() is True
+    assert "not the configured TTS provider" in capsys.readouterr().out
+
+
+def test_unselected_asr_provider_is_reported_not_probed(monkeypatch, capsys):
+    monkeypatch.setattr("config.ASR_PROVIDER", "not-funasr")
+
+    assert check_config.check_funasr() is True
+    assert "not the configured ASR provider" in capsys.readouterr().out

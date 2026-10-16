@@ -78,6 +78,7 @@ class _RecordingState:
     stream: object | None = None
     accepting_frames: bool = False
     stop_requested: bool = False
+    cancelled: bool = False
     sentinel_enqueued: bool = False
     vad_triggered: bool = False
     vad_silence_frames: int = 0
@@ -623,6 +624,23 @@ class STTService:
         self._close_stream_handle(stream)
         self.stream = None
 
+    def cancel(self) -> None:
+        """Abandon an in-flight capture; stop_recording() then yields no audio.
+
+        Implements the unified voice cancel interface.  The lossless stop
+        request still runs so the queue drains and the stream closes
+        deterministically, but the captured frames are discarded at the
+        return boundary instead of being transcribed.
+        """
+        recording_state = self._recording_state
+        if recording_state is None:
+            self.is_recording = False
+            self._stop_stream()
+            return
+        with recording_state.lock:
+            recording_state.cancelled = True
+        self._request_recording_stop(recording_state)
+
     def stop_recording(self) -> np.ndarray:
         """Stop recording and return the audio data."""
         recording_state = self._recording_state
@@ -659,6 +677,12 @@ class STTService:
                         self.recorded_audio = []
                     if self.audio_queue is recording_state.audio_queue:
                         self.audio_queue = queue.Queue()
+
+            if recording_state.cancelled:
+                # cancel() was requested: the drain above still ran so the
+                # capture lifecycle stays deterministic, but no frames are
+                # handed back for transcription.
+                return np.array([])
 
             chunks = completed_chunks
 
@@ -858,8 +882,24 @@ class STTService:
 # Singleton instance
 _stt_service = None
 
+
 def get_stt_service() -> STTService:
+    """Return the shared speech-input service for the configured provider.
+
+    The ASR provider is selected by runtime configuration
+    (config/runtime.yaml -> asr.provider).  ``funasr`` is currently the
+    only implementation; an unknown provider is a hard error so a
+    misconfiguration cannot silently disable speech input.
+    """
     global _stt_service
+    from config import ASR_PROVIDER
+    from deployment.runtime_config import ASR_PROVIDERS, ASR_PROVIDER_FUNASR
+
+    if ASR_PROVIDER != ASR_PROVIDER_FUNASR:
+        raise ValueError(
+            f"unknown ASR provider {ASR_PROVIDER!r}; "
+            f"supported providers: {', '.join(sorted(ASR_PROVIDERS))}"
+        )
     if _stt_service is None:
         _stt_service = STTService()
     return _stt_service

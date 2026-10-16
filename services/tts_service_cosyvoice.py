@@ -473,6 +473,10 @@ class TTSService:
         if state is not None and stream is not None:
             self._close_stream(stream, state=state)
 
+    def cancel(self):
+        """Cancel the current synthesis/playback (unified voice cancel interface)."""
+        self.stop_playing()
+
     def play_audio(self, audio: np.ndarray):
         """Play pre-generated audio data synchronously."""
         with self._play_lock:
