@@ -1,0 +1,69 @@
+# ============================================================================
+# voicechat3 统一运行配置 —— 整个项目唯一需要修改的部署文件
+# ============================================================================
+# 原则：
+#   1. 应用从不检测显卡来选模型。dialogue / agent / asr / tts 全部在这里显式
+#      指定，心理访谈实验因此可复现。
+#   2. 换显卡、换主模型、换 Agent、换推理引擎（llama.cpp ↔ vLLM ↔ Ollama），
+#      只改这个文件，不改代码、不改项目架构。
+#   3. 主模型与 Agent 相互独立：允许使用不同的 provider、地址和模型。
+#
+# 路径规则：
+#   - 默认使用本文件；设环境变量 VOICECHAT_RUNTIME_CONFIG 可指向另一份 yaml
+#     （例如实验对照组），整套配置随之切换。
+#   - base_url / model 必须与服务端实际公布的一致（llama-server 用 --alias
+#     或模型文件名；vLLM 用 --served-model-name）。
+#
+# provider 取值：
+#   dialogue / agent:
+#     openai_compatible —— llama.cpp、vLLM、Ollama 等任何 OpenAI 兼容服务
+#     ollama            —— Ollama 原生 SDK（仅本地开发调试）
+#   asr: funasr
+#   tts: voxcpm / cosyvoice
+#
+# model_path 取值：
+#   绝对路径    —— 直接使用
+#   相对路径    —— 相对 VOICECHAT_MODELS_DIR（默认上级目录的 models/）
+#   auto 或留空 —— 使用 config.py 的自动探测逻辑
+# ============================================================================
+
+dialogue:
+  provider: openai_compatible
+  # llama-server 在 WSL2 内监听 127.0.0.1:8000；WSL2 的 localhost 转发使
+  # Windows 侧的 127.0.0.1:8000 直达该服务。
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen3.8-27B-Q4_K_S
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.35
+  top_p: 0.8
+  top_k: null                 # 可选；llama.cpp 经 extra_body 传递
+  presence_penalty: null       # 可选
+  enable_thinking: false       # Qwen3.8 思考模式：访谈场景必须关闭
+  request_mode: chat           # chat = 聊天端点；completion = 无模板基础模型
+  system_role_mode: native     # native = 系统消息走原生 system role
+
+agent:
+  enabled: true
+  provider: openai_compatible  # Agent 可独立于主模型选择后端
+  base_url: http://127.0.0.1:8001/v1
+  model: Qwen3-4B-Instruct-2507
+  api_key: EMPTY
+  timeout: 10
+  temperature: 0.1
+
+asr:
+  provider: funasr
+  model_path: auto
+
+tts:
+  provider: voxcpm
+  model_path: auto
+  voice_prompt_path: auto      # 零样本音色提示音频；auto = 自动探测
+
+runtime:
+  strict_preflight: true       # true = 启动前强校验，失败即拒绝启动
+  immutable_contract: true     # true = 忽略遗留环境变量覆盖，配置即契约
+  manage_model_servers: false  # 应用不负责拉起/停止模型服务（由引擎脚本管理）
+  enable_streaming_tts: true
