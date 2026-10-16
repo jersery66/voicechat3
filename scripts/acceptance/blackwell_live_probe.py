@@ -27,8 +27,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from deployment.profiles import DeploymentProfile, RuntimeModels
+from deployment.runtime_config import get_runtime_config
 from inference.factory import build_dialogue_client
-from inference.vllm_client import build_no_keepalive_http_client
+from inference.openai_client import build_no_keepalive_http_client
 try:
     from . import probe_support as support
 except ImportError:  # Direct ``python scripts/acceptance/blackwell_live_probe.py`` execution.
@@ -165,11 +166,13 @@ def run_agent_json_probe(call_json: Callable[..., Any], *, model: str | None = N
     }
 
 
-def build_profile_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
-                                  *, timeout_seconds: float):
-    client = build_dialogue_client(profile, models, timeout=float(timeout_seconds))
+def build_profile_dialogue_client(*, timeout_seconds: float):
+    client = build_dialogue_client(get_runtime_config(), timeout=float(timeout_seconds))
     if client is None:
-        raise support.ProbeError("DIALOGUE_CLIENT_BUILD_FAILED", "selected profile did not build a vLLM dialogue client")
+        raise support.ProbeError(
+            "DIALOGUE_CLIENT_BUILD_FAILED",
+            "the runtime configuration did not build an OpenAI-compatible dialogue client",
+        )
     return client
 
 
@@ -540,7 +543,7 @@ def run_probe(profile_name: str, *, distro: str | None = None,
         summary["agent_inference_status"] = agent_result["status"]
         _write_artifact(directory, "agent_probe.json", agent_result)
 
-        client = build_profile_dialogue_client(profile, models, timeout_seconds=timeout_seconds)
+        client = build_profile_dialogue_client(timeout_seconds=timeout_seconds)
         validate_thinking_contract(profile, client)
         nonstream = run_dialogue_nonstream_probe(client, timeout_seconds=timeout_seconds)
         summary["production_client_nonstream_status"] = "RAN"

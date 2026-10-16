@@ -6,8 +6,6 @@ import sys
 import pytest
 
 from deployment.profiles import get_deployment_profile, resolve_runtime_models
-from inference.factory import build_dialogue_client
-from services import llm_factory
 
 
 BLACKWELL_PROFILES = (
@@ -101,54 +99,6 @@ def test_blackwell_config_keeps_loopback_endpoints_despite_environment_overrides
         sys.modules.pop("config", None)
         if original is not None:
             sys.modules["config"] = original
-
-
-@pytest.mark.parametrize("profile_name", BLACKWELL_PROFILES)
-def test_blackwell_dialogue_factory_preserves_model_endpoint_and_generation_contract(
-    monkeypatch, profile_name
-):
-    profile = get_deployment_profile(profile_name)
-    monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://wrong.example/v1")
-    client = build_dialogue_client(profile, resolve_runtime_models(profile))
-
-    assert client.model == profile.dialogue_model
-    assert client.base_url == profile.dialogue_base_url
-    assert client.request_mode == profile.vllm_request_mode
-    assert client.system_role_mode == profile.vllm_system_role_mode
-    assert client.max_tokens == profile.dialogue_max_tokens
-    assert client.dialogue_temperature == profile.dialogue_temperature
-    assert client.dialogue_top_p == profile.dialogue_top_p
-    assert client.dialogue_top_k == profile.dialogue_top_k
-    assert client.dialogue_presence_penalty == profile.dialogue_presence_penalty
-    assert client.dialogue_enable_thinking == profile.dialogue_enable_thinking
-
-
-@pytest.mark.parametrize("profile_name", BLACKWELL_PROFILES)
-def test_blackwell_compatibility_llm_factory_preserves_model_and_endpoint(
-    monkeypatch, profile_name
-):
-    profile = get_deployment_profile(profile_name)
-    captured = {}
-
-    class FakeVLLMClient:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(llm_factory, "VLLMOpenAIClient", FakeVLLMClient)
-    monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://wrong.example/v1")
-    service = llm_factory.build_llm_service(profile_name=profile_name)
-
-    assert service.model == profile.dialogue_model
-    assert captured["model"] == profile.dialogue_model
-    assert captured["base_url"] == profile.dialogue_base_url
-    assert captured["request_mode"] == profile.vllm_request_mode
-    assert captured["system_role_mode"] == profile.vllm_system_role_mode
-    assert captured["max_tokens"] == profile.dialogue_max_tokens
-    assert captured["dialogue_temperature"] == profile.dialogue_temperature
-    assert captured["dialogue_top_p"] == profile.dialogue_top_p
-    assert captured["dialogue_top_k"] == profile.dialogue_top_k
-    assert captured["dialogue_presence_penalty"] == profile.dialogue_presence_penalty
-    assert captured["dialogue_enable_thinking"] == profile.dialogue_enable_thinking
 
 
 def test_legacy_a100_profiles_remain_unchanged():

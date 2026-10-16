@@ -154,23 +154,25 @@ def test_probe_12_invalid_agent_json_fails():
         probe.run_agent_json_probe(call_json)
 
 
-def test_probe_13_dialogue_client_uses_profile_factory(monkeypatch):
-    profile = get_deployment_profile("rtxpro6000_96g")
-    models = resolve_runtime_models(profile, environment={})
+def test_probe_13_dialogue_client_uses_runtime_config_factory(monkeypatch):
+    from deployment.runtime_config import get_runtime_config
+
+    config = get_runtime_config()
     calls = []
 
     class FakeClient:
-        model = profile.dialogue_model
+        model = config.dialogue.model
         dialogue_enable_thinking = None
 
-    def fake_factory(received_profile, received_models, *, timeout):
-        calls.append((received_profile, received_models, timeout))
+    def fake_factory(received_config, *, timeout):
+        calls.append((received_config, timeout))
         return FakeClient()
 
+    monkeypatch.setattr(probe, "get_runtime_config", lambda: config)
     monkeypatch.setattr(probe, "build_dialogue_client", fake_factory)
-    client = probe.build_profile_dialogue_client(profile, models, timeout_seconds=7)
+    client = probe.build_profile_dialogue_client(timeout_seconds=7)
     assert isinstance(client, FakeClient)
-    assert calls == [(profile, models, 7.0)]
+    assert calls == [(config, 7.0)]
 
 
 def test_probe_14_nonstream_empty_response_fails():

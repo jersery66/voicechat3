@@ -26,6 +26,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from deployment.profiles import DeploymentProfile, RuntimeModels, get_deployment_profile, resolve_runtime_models
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    AgentConfig,
+    ASRConfig,
+    DialogueConfig,
+    RuntimeConfig,
+    RuntimeSection,
+    TTSConfig,
+    get_runtime_config,
+)
 from inference.factory import build_dialogue_client
 
 try:
@@ -315,6 +325,44 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
+def _runtime_config_for_profile(profile: DeploymentProfile) -> RuntimeConfig:
+    """Express the profile under test as an equivalent runtime configuration.
+
+    Transitional bridge: the A/B harness still selects runs by profile name,
+    while the dialogue client is built from a runtime configuration so the
+    client contract stays config-driven. Replaced by loading real runtime
+    YAML files once the harness compares two configurations directly.
+    """
+    return RuntimeConfig(
+        dialogue=DialogueConfig(
+            provider=PROVIDER_OPENAI_COMPATIBLE,
+            base_url=profile.dialogue_base_url,
+            model=profile.dialogue_model,
+            max_tokens=profile.dialogue_max_tokens,
+            temperature=profile.dialogue_temperature,
+            top_p=profile.dialogue_top_p,
+            top_k=profile.dialogue_top_k,
+            presence_penalty=profile.dialogue_presence_penalty,
+            enable_thinking=profile.dialogue_enable_thinking,
+            request_mode=profile.vllm_request_mode,
+            system_role_mode=profile.vllm_system_role_mode,
+        ),
+        agent=AgentConfig(
+            enabled=True,
+            base_url=profile.agent_base_url,
+            model=profile.agent_model,
+        ),
+        asr=ASRConfig(),
+        tts=TTSConfig(),
+        runtime=RuntimeSection(
+            strict_preflight=profile.strict_preflight,
+            immutable_contract=profile.immutable_runtime_contract,
+            enable_streaming_tts=profile.enable_streaming_tts,
+        ),
+        source_path=f"profile:{profile.name}",
+    )
+
+
 def _generation_options(client: Any) -> dict[str, Any]:
     options = getattr(client, "_generation_options", None)
     if not callable(options):
@@ -514,7 +562,7 @@ def run_profile(
         artifact["hardware_validation"] = "PHASE5_PASS_REFERENCED"
         system_prompt = _system_prompt()
         artifact["system_prompt_hash"] = _text_hash(system_prompt)
-        client = build_dialogue_client(profile, models, timeout=float(timeout_seconds))
+        client = build_dialogue_client(_runtime_config_for_profile(profile), timeout=float(timeout_seconds))
         if client is None:
             raise ABError("profile factory returned no dialogue client")
         options = _generation_options(client)

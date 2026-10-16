@@ -1,10 +1,38 @@
-"""Compatibility contract for the opt-in Qwen3.8 dialogue profile."""
+"""Compatibility contract for the opt-in Qwen3.8 dialogue configuration."""
 
 from types import SimpleNamespace
 
 from deployment.profiles import get_deployment_profile, resolve_runtime_models
+from deployment.runtime_config import load_runtime_config
 from inference.factory import build_dialogue_client
-from inference.vllm_client import VLLMOpenAIClient
+from inference.openai_client import OpenAICompatibleClient
+
+CANDIDATE_CONFIG_YAML = """dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen/Qwen3.8-27B-FP8
+  max_tokens: 1024
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  presence_penalty: 1.5
+  enable_thinking: false
+agent:
+  enabled: false
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+runtime:
+  strict_preflight: true
+  immutable_contract: true
+"""
+
+
+def _write_config(tmp_path):
+    path = tmp_path / "runtime.yaml"
+    path.write_text(CANDIDATE_CONFIG_YAML, encoding="utf-8")
+    return path
 
 
 def test_q38_01_production_a100_profile_remains_qwen25_72b():
@@ -59,7 +87,7 @@ def _fake_chat_client(calls, chunks=None, completion_text="reply"):
                 SimpleNamespace(message=SimpleNamespace(content=completion_text))
             ])
 
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "Qwen/Qwen3.8-27B-FP8"
     client.request_mode = "chat"
     client.system_role_mode = "native"
@@ -75,7 +103,7 @@ def _fake_chat_client(calls, chunks=None, completion_text="reply"):
 
 def test_q38_06_qwen25_baseline_request_keeps_legacy_sampling():
     calls = []
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "Qwen/Qwen2.5-72B-Instruct-AWQ"
     client._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
         create=lambda **kwargs: calls.append(kwargs) or iter([])
@@ -155,9 +183,9 @@ def test_q38_15_candidate_keeps_dialogue_and_router_ports():
     assert profile.agent_base_url == "http://127.0.0.1:8001/v1"
 
 
-def test_q38_16_candidate_factory_transfers_generation_contract():
-    profile = get_deployment_profile("a100_80g_qwen38_candidate")
-    client = build_dialogue_client(profile, resolve_runtime_models(profile))
+def test_q38_16_candidate_factory_transfers_generation_contract(tmp_path):
+    config = load_runtime_config(_write_config(tmp_path))
+    client = build_dialogue_client(config)
     assert client.model == "Qwen/Qwen3.8-27B-FP8"
     assert client.dialogue_top_k == 20
     assert client.dialogue_temperature == 0.7

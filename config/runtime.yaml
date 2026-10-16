@@ -43,6 +43,7 @@ dialogue:
   enable_thinking: false       # Qwen3.8 思考模式：访谈场景必须关闭
   request_mode: chat           # chat = 聊天端点；completion = 无模板基础模型
   system_role_mode: native     # native = 系统消息走原生 system role
+  system_prompt_override: null # 可选：覆盖 config.py 的 SYSTEM_PROMPT（实验用）
 
 agent:
   enabled: true

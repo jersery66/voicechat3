@@ -1,12 +1,32 @@
-"""Deployment immutability and preflight policy belong to profile data."""
+"""Deployment immutability and preflight policy belong to configuration data."""
 
-from dataclasses import replace
 from types import SimpleNamespace
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-from inference.factory import build_dialogue_client
-from services import llm_factory
+from deployment.profiles import get_deployment_profile
+from deployment.runtime_config import load_runtime_config
 from scripts import check_config
+from services import llm_factory
+
+CONFIG_YAML = """dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: contract-model
+agent:
+  enabled: false
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+runtime:
+  strict_preflight: true
+  immutable_contract: true
+"""
+
+
+def _write_config(tmp_path):
+    path = tmp_path / "runtime.yaml"
+    path.write_text(CONFIG_YAML, encoding="utf-8")
+    return path
 
 
 def test_current_profiles_declare_immutability_and_preflight_policy():
@@ -24,41 +44,42 @@ def test_current_profiles_declare_immutability_and_preflight_policy():
         assert profile.strict_preflight is True
 
 
-def test_renamed_immutable_profile_still_pins_models_and_dialogue_endpoint(monkeypatch):
-    profile = replace(
-        get_deployment_profile("a100_80g"),
-        name="future_blackwell_profile",
-    )
-    monkeypatch.setenv("VOICECHAT_DIALOGUE_MODEL", "wrong-dialogue")
-    monkeypatch.setenv("AGENT_MODEL", "wrong-agent")
-    monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://wrong.example/v1")
-
-    models = resolve_runtime_models(profile)
-    client = build_dialogue_client(profile, models)
-
-    assert models.dialogue == profile.dialogue_model
-    assert models.router == profile.router_model
-    assert client.base_url == profile.dialogue_base_url
-
-
-def test_renamed_immutable_profile_pins_compatibility_llm_factory(monkeypatch):
-    profile = replace(
-        get_deployment_profile("a100_80g"),
-        name="future_blackwell_profile",
-    )
+def test_immutable_runtime_config_pins_the_compatibility_service(tmp_path, monkeypatch):
     captured = {}
 
-    class FakeVLLMClient:
+    class FakeClient:
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(llm_factory, "get_deployment_profile", lambda _name=None: profile)
-    monkeypatch.setattr(llm_factory, "VLLMOpenAIClient", FakeVLLMClient)
+    monkeypatch.setattr("inference.factory.OpenAICompatibleClient", FakeClient)
     monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://wrong.example/v1")
+    monkeypatch.setenv("VOICECHAT_DIALOGUE_MODEL", "wrong-dialogue")
+    monkeypatch.setenv("AGENT_MODEL", "wrong-agent")
 
-    llm_factory.build_llm_service(profile_name=profile.name)
+    llm_factory.build_llm_service(load_runtime_config(_write_config(tmp_path)))
 
-    assert captured["base_url"] == profile.dialogue_base_url
+    assert captured["base_url"] == "http://127.0.0.1:8000/v1"
+    assert captured["model"] == "contract-model"
+
+
+def test_non_immutable_runtime_config_honors_endpoint_overrides(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    path = tmp_path / "runtime.yaml"
+    path.write_text(
+        CONFIG_YAML.replace("immutable_contract: true", "immutable_contract: false"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("inference.factory.OpenAICompatibleClient", FakeClient)
+    monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://dev-override.example/v1")
+
+    llm_factory.build_llm_service(load_runtime_config(path))
+
+    assert captured["base_url"] == "http://dev-override.example/v1"
 
 
 def test_check_config_uses_runtime_owned_strict_preflight(monkeypatch):

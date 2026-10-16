@@ -12,11 +12,11 @@ from scripts.acceptance import qwen_dialogue_ab as harness
 
 
 class FakeDialogueClient:
-    def __init__(self, profile):
-        self.model = profile.dialogue_model
-        self.base_url = profile.dialogue_base_url
-        self.dialogue_enable_thinking = profile.dialogue_enable_thinking
-        self._profile = profile
+    def __init__(self, config):
+        self.model = config.dialogue.model
+        self.base_url = config.dialogue.base_url
+        self.dialogue_enable_thinking = config.dialogue.enable_thinking
+        self._config = config
         self.calls = []
 
     def list_model_ids(self):
@@ -24,35 +24,35 @@ class FakeDialogueClient:
 
     def _generation_options(self, requested_max_tokens=None):
         return {
-            "temperature": self._profile.dialogue_temperature,
-            "top_p": self._profile.dialogue_top_p,
-            "max_tokens": requested_max_tokens or self._profile.dialogue_max_tokens,
+            "temperature": self._config.dialogue.temperature,
+            "top_p": self._config.dialogue.top_p,
+            "max_tokens": requested_max_tokens or self._config.dialogue.max_tokens,
             "extra_body": (
                 {
-                    "top_k": self._profile.dialogue_top_k,
+                    "top_k": self._config.dialogue.top_k,
                     "chat_template_kwargs": {"enable_thinking": False},
                 }
-                if self._profile.dialogue_top_k is not None
+                if self._config.dialogue.top_k is not None
                 else {}
             ),
         }
 
     def complete_messages(self, *, messages, max_tokens):
         self.calls.append(("complete", messages, max_tokens))
-        return f"{self._profile.name} 的简短回应。"
+        return "固定测试回应。"
 
     def stream_messages(self, *, messages):
         self.calls.append(("stream", messages))
-        yield f"{self._profile.name} 的"
+        yield "固定测试"
         yield "流式回应。"
 
 
 def _fake_factory(monkeypatch):
     clients = {}
 
-    def build(profile, models, *, timeout):
-        client = FakeDialogueClient(profile)
-        clients[profile.name] = client
+    def build(config=None, *, timeout=None):
+        client = FakeDialogueClient(config)
+        clients[config.source_path] = client
         return client
 
     monkeypatch.setattr(harness, "build_dialogue_client", build)
@@ -213,7 +213,7 @@ def test_ab_06_run_records_phase5_evidence_and_profile_options(tmp_path, monkeyp
         live_probe_summary=summary,
     )
     assert result == 0
-    assert clients["rtxpro6000_96g"].calls
+    assert clients["profile:rtxpro6000_96g"].calls
     artifact = json.loads(next(tmp_path.rglob("run.json")).read_text(encoding="utf-8"))
     assert artifact["status"] == "PASS"
     assert artifact["dialogue_model"] == "Qwen/Qwen2.5-72B-Instruct-AWQ"
@@ -250,7 +250,7 @@ def test_ab_08_repeatability_and_performance_are_recorded(tmp_path, monkeypatch)
     assert harness.run_profile(
         "rtxpro6000_96g", output_root=tmp_path, timeout_seconds=1, live_probe_summary=summary
     ) == 0
-    assert len(clients["rtxpro6000_96g"].calls) == len(harness.SCENARIOS) * 2 + len(
+    assert len(clients["profile:rtxpro6000_96g"].calls) == len(harness.SCENARIOS) * 2 + len(
         harness.REPEATABILITY_SCENARIO_IDS
     ) * harness.REPEAT_COUNT
     artifact = json.loads(next(tmp_path.rglob("run.json")).read_text(encoding="utf-8"))
@@ -274,7 +274,7 @@ def test_ab_09_output_leak_fails_without_stripping(tmp_path, monkeypatch):
     monkeypatch.setattr(
         harness,
         "build_dialogue_client",
-        lambda profile, models, *, timeout: LeakingClient(profile),
+        lambda config=None, *, timeout=None: LeakingClient(config),
     )
     result = harness.run_profile(
         "rtxpro6000_96g", output_root=tmp_path / "run", timeout_seconds=1, live_probe_summary=summary

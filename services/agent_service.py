@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any, Generator
 
 from openai import OpenAI
 
-from inference.vllm_client import build_no_keepalive_http_client
+from inference.openai_client import build_no_keepalive_http_client
 from services.logger import get_logger
 from config import (
     AGENT_ENABLED,

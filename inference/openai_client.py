@@ -1,4 +1,8 @@
-"""OpenAI-compatible streaming client for a separately deployed vLLM server."""
+"""OpenAI-compatible streaming client for a separately deployed model server.
+
+The server may be llama.cpp (llama-server), vLLM, Ollama's OpenAI-compatible
+endpoint, or any other service that speaks the OpenAI ``/v1`` API.
+"""
 
 from __future__ import annotations
 
@@ -23,12 +27,13 @@ def build_no_keepalive_http_client(timeout: float) -> httpx.Client:
     )
 
 
-class VLLMOpenAIClient:
-    """Dialogue adapter for vLLM's OpenAI-compatible `/v1` API.
+class OpenAICompatibleClient:
+    """Dialogue adapter for any OpenAI-compatible ``/v1`` API.
 
-    vLLM runs outside the desktop application. This adapter intentionally has
-    no import dependency on vLLM itself, which keeps Windows development and
-    Linux/A100 deployment cleanly separated.
+    The model server (llama.cpp, vLLM, ...) runs outside the desktop
+    application. This adapter intentionally has no import dependency on any
+    inference engine, which keeps Windows development and Linux deployment
+    cleanly separated and makes the engine a configuration choice.
     """
 
     def __init__(self, *, model: str, base_url: str, api_key: str = "EMPTY",
@@ -83,7 +88,7 @@ class VLLMOpenAIClient:
         return getattr(value, name, default)
 
     def list_model_ids(self) -> list[str]:
-        """Return the model IDs currently exposed by the selected vLLM server."""
+        """Return the model IDs currently exposed by the configured server."""
         response = self._client.models.list()
         data = self._field(response, "data", []) or []
         return [
@@ -96,9 +101,9 @@ class VLLMOpenAIClient:
     def _completion_prompt(messages: Sequence[dict[str, str]]) -> str:
         """Render OpenAI-style messages for base models without a chat template.
 
-        This route is profile-selected for the local Gemma smoke server only.
-        Production instruction models keep their native chat template and use
-        the regular OpenAI chat endpoint.
+        This route is config-selected for servers without a chat template
+        only. Production instruction models keep their native chat template
+        and use the regular OpenAI chat endpoint.
         """
         role_names = {
             "system": "System",
@@ -142,7 +147,7 @@ class VLLMOpenAIClient:
         return min(max(1, int(requested)), configured)
 
     def _generation_options(self, requested_max_tokens: int | None = None) -> dict[str, Any]:
-        """Build one profile-scoped generation contract for both endpoints."""
+        """Build one config-scoped generation contract for both endpoints."""
         options: dict[str, Any] = {
             "temperature": getattr(self, "dialogue_temperature", 0.35),
             "top_p": getattr(self, "dialogue_top_p", 0.8),
@@ -174,10 +179,10 @@ class VLLMOpenAIClient:
         yield from self.stream_messages(messages=messages)
 
     def stream_messages(self, *, messages: Sequence[dict[str, str]]) -> Iterator[str]:
-        """Stream a complete OpenAI chat message list through vLLM.
+        """Stream a complete OpenAI chat message list through the model server.
 
         Keeping the message list intact is essential: the legacy service
-        retains multi-turn counselling context, so a vLLM adapter must not
+        retains multi-turn counselling context, so an adapter must not
         reduce every request to only the most recent utterance.
         """
         if self._uses_completion_endpoint():
@@ -247,5 +252,5 @@ class VLLMOpenAIClient:
         return str(self._field(message, "content", "") or "")
 
     def warmup(self) -> bool:
-        """Verify that the already-managed vLLM server exposes this model."""
+        """Verify that the configured model server exposes this model."""
         return self.model in self.list_model_ids()

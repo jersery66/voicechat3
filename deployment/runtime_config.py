@@ -53,7 +53,7 @@ _TOP_LEVEL_SECTIONS = ("dialogue", "agent", "asr", "tts", "runtime")
 _DIALOGUE_KEYS = (
     "provider", "base_url", "model", "api_key", "timeout", "max_tokens",
     "temperature", "top_p", "top_k", "presence_penalty", "enable_thinking",
-    "request_mode", "system_role_mode",
+    "request_mode", "system_role_mode", "system_prompt_override",
 )
 _AGENT_KEYS = ("enabled", "provider", "base_url", "model", "api_key", "timeout", "temperature")
 _ASR_KEYS = ("provider", "model_path")
@@ -95,6 +95,7 @@ class DialogueConfig:
     enable_thinking: Optional[bool] = None
     request_mode: str = "chat"
     system_role_mode: str = "native"
+    system_prompt_override: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -350,6 +351,7 @@ def _parse_dialogue(section: Mapping[str, Any], source: Path) -> DialogueConfig:
         enable_thinking=_optional_bool(section, "enable_thinking", name),
         request_mode=request_mode,
         system_role_mode=system_role_mode,
+        system_prompt_override=_optional_str(section, "system_prompt_override", name),
     )
 
 
