@@ -2,12 +2,12 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import OLLAMA_MODEL
-print(f"OLLAMA_MODEL = {OLLAMA_MODEL}")
+from config import DIALOGUE_MODEL
+print(f"DIALOGUE_MODEL = {DIALOGUE_MODEL}")
 
 from services.llm_service import LLMService
 print(f"\nLLMService model: {LLMService().model}")
-assert LLMService().model == OLLAMA_MODEL, "LLM should use OLLAMA_MODEL!"
+assert LLMService().model == DIALOGUE_MODEL, "LLM should use DIALOGUE_MODEL!"
 
 from services.pipeline import ConversationPipeline, PipelineConfig
 from services.llm_service import LLMService

@@ -1,11 +1,11 @@
 """
 Agent Service — 独立路由模型意图分类 + 报告生成
 
-使用 OpenAI 兼容 API 调用由部署 profile 指定的语言模型服务。
-在 vLLM profile 下，路由模型是独立的 vLLM 实例，
-不会降级到 Ollama。
+使用 OpenAI 兼容 API 调用由运行配置（config/runtime.yaml）指定的语言模型
+服务。Agent 与主模型相互独立：可以各自配置 provider、地址与模型，
+例如主模型走 llama.cpp，Agent 走 vLLM 或 Ollama。
 
-Fallback 策略：3B 模型故障时自动降级到关键词分类 / 72B 报告生成。
+Fallback 策略：Agent 模型故障时自动降级到关键词分类 / 主模型报告生成。
 """
 
 import json
@@ -18,8 +18,9 @@ from openai import OpenAI
 from inference.vllm_client import build_no_keepalive_http_client
 from services.logger import get_logger
 from config import (
+    AGENT_ENABLED,
     AGENT_MODEL,
-    AGENT_BACKEND,
+    AGENT_PROVIDER,
     AGENT_MODEL_SERVER,
     AGENT_API_KEY,
     AGENT_INTENT_SYSTEM_MESSAGE,
@@ -57,7 +58,7 @@ class AgentService:
             http_client=build_no_keepalive_http_client(AGENT_TIMEOUT),
         )
         self.model = AGENT_MODEL
-        self.backend = AGENT_BACKEND
+        self.provider = AGENT_PROVIDER
         self._available: Optional[bool] = None
         self._last_check_ts: float = 0.0
 

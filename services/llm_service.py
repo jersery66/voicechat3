@@ -11,7 +11,7 @@ from services._ollama_pool import get_ollama_client
 
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import OLLAMA_MODEL, OLLAMA_HOST, SYSTEM_PROMPT
+from config import DIALOGUE_MODEL, OLLAMA_HOST, SYSTEM_PROMPT
 
 try:
     # Optional: configurable timeout (seconds) for LLM requests
@@ -43,12 +43,12 @@ class LLMService:
         # Auto-detect model if not specified
         if model is None:
             available = self.get_available_models()
-            if OLLAMA_MODEL in available:
-                self.model = OLLAMA_MODEL
+            if DIALOGUE_MODEL in available:
+                self.model = DIALOGUE_MODEL
             elif available:
                 self.model = available[0]
             else:
-                self.model = OLLAMA_MODEL
+                self.model = DIALOGUE_MODEL
         else:
             self.model = model
         

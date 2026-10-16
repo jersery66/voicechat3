@@ -61,13 +61,12 @@ def test_renamed_immutable_profile_pins_compatibility_llm_factory(monkeypatch):
     assert captured["base_url"] == profile.dialogue_base_url
 
 
-def test_check_config_uses_profile_owned_strict_preflight(monkeypatch):
+def test_check_config_uses_runtime_owned_strict_preflight(monkeypatch):
     monkeypatch.setattr(check_config, "_check_openai_compatible_model", lambda *_: False)
-    monkeypatch.setattr(check_config, "get_deployment_profile", lambda: SimpleNamespace(
-        name="future_strict_profile",
-        strict_preflight=True,
+    monkeypatch.setattr(check_config, "get_runtime_config", lambda: SimpleNamespace(
+        runtime=SimpleNamespace(strict_preflight=True),
     ))
-    monkeypatch.setattr("config.AGENT_BACKEND", "vllm")
+    monkeypatch.setattr("config.AGENT_PROVIDER", "openai_compatible")
     monkeypatch.setattr("config.AGENT_MODEL", "agent-model")
     monkeypatch.setattr("config.AGENT_MODEL_SERVER", "http://agent:8001/v1")
 

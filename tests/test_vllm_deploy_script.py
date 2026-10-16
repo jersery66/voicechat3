@@ -38,5 +38,5 @@ def test_vllm_health_check_uses_models_endpoint_not_ollama():
     source = Path("scripts/check_config.py").read_text(encoding="utf-8")
 
     assert "def check_dialogue_backend" in source
-    assert "DIALOGUE_BACKEND" in source
+    assert "DIALOGUE_PROVIDER" in source
     assert '"models"' in source

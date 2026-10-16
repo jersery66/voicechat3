@@ -1,4 +1,6 @@
-"""vLLM auxiliary models are diagnosed without blocking safe deterministic fallback."""
+"""Auxiliary model services are diagnosed without blocking safe fallbacks."""
+
+from types import SimpleNamespace
 
 from scripts import check_config
 
@@ -26,27 +28,33 @@ def test_run_check_includes_runtime_dependencies_but_not_legacy_guard(monkeypatc
     assert calls == list(checks)
 
 
-def test_unavailable_vllm_agent_is_non_critical(monkeypatch):
+def test_unavailable_agent_is_non_critical_for_lenient_runtimes(monkeypatch):
     monkeypatch.setattr(check_config, "_check_openai_compatible_model", lambda *_: False)
-    monkeypatch.setattr("config.AGENT_BACKEND", "vllm")
+    monkeypatch.setattr(check_config, "get_runtime_config", lambda: SimpleNamespace(
+        runtime=SimpleNamespace(strict_preflight=False),
+    ))
+    monkeypatch.setattr("config.AGENT_PROVIDER", "openai_compatible")
     monkeypatch.setattr("config.AGENT_MODEL", "agent-model")
     monkeypatch.setattr("config.AGENT_MODEL_SERVER", "http://agent:8001/v1")
 
     assert check_config.check_agent_backend() is True
 
 
-def test_unavailable_a100_vllm_agent_blocks_production_readiness(monkeypatch):
+def test_unavailable_agent_blocks_strict_runtime_readiness(monkeypatch):
     monkeypatch.setattr(check_config, "_check_openai_compatible_model", lambda *_: False)
-    monkeypatch.setattr("config.AGENT_BACKEND", "vllm")
+    monkeypatch.setattr(check_config, "get_runtime_config", lambda: SimpleNamespace(
+        runtime=SimpleNamespace(strict_preflight=True),
+    ))
+    monkeypatch.setattr("config.AGENT_PROVIDER", "openai_compatible")
     monkeypatch.setattr("config.AGENT_MODEL", "agent-model")
     monkeypatch.setattr("config.AGENT_MODEL_SERVER", "http://agent:8001/v1")
-    monkeypatch.setattr(
-        check_config,
-        "get_deployment_profile",
-        lambda: type("Profile", (), {
-            "name": "a100_80g",
-            "strict_preflight": True,
-        })(),
-    )
 
     assert check_config.check_agent_backend() is False
+
+
+def test_disabled_agent_is_reported_and_non_critical(monkeypatch):
+    monkeypatch.setattr("config.AGENT_ENABLED", False)
+    monkeypatch.setattr(check_config, "_check_openai_compatible_model",
+                        lambda *_: (_ for _ in ()).throw(AssertionError("must not probe")))
+
+    assert check_config.check_agent_backend() is True

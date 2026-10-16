@@ -290,21 +290,75 @@ except Exception:
     _OLLAMA_DETECTED = None
 
 
-# ============== Paths (auto-detected with fallbacks) ==============
-# FunASR STT Model
-FUNASR_MODEL_PATH = _FUNASR_DETECTED or os.path.join(
-    OFFLINE_MODELS_ROOT, "funasr", "Fun-ASR-Nano-2512")
+# ============== Runtime Configuration ==============
+# Runtime selection is config-driven.  deployment/runtime_config.py loads one
+# YAML file (default config/runtime.yaml, override the path with the
+# VOICECHAT_RUNTIME_CONFIG environment variable) that names every model,
+# engine, endpoint, and generation parameter.  The application never inspects
+# the GPU to choose a model: switching hardware, the dialogue model, the
+# Agent, or the inference engine (llama.cpp / vLLM / Ollama) is a config
+# edit, not a code change.  Guard/crisis controls are intentionally not
+# exported here.
+from deployment.runtime_config import get_runtime_config
 
-# CosyVoice3 Model (legacy, kept for backward compat)
+_RUNTIME_CONFIG = get_runtime_config()
+RUNTIME_CONFIG = _RUNTIME_CONFIG
+
+# --- Dialogue (main model) ---
+DIALOGUE_PROVIDER = _RUNTIME_CONFIG.dialogue.provider
+DIALOGUE_BASE_URL = _RUNTIME_CONFIG.dialogue.base_url
+DIALOGUE_MODEL = _RUNTIME_CONFIG.dialogue.model
+
+# --- Agent (routing model, configured independently of the dialogue model) ---
+AGENT_ENABLED = _RUNTIME_CONFIG.agent.enabled
+AGENT_PROVIDER = _RUNTIME_CONFIG.agent.provider
+AGENT_MODEL = _RUNTIME_CONFIG.agent.model
+AGENT_MODEL_SERVER = _RUNTIME_CONFIG.agent.base_url
+AGENT_API_KEY = _RUNTIME_CONFIG.agent.api_key
+
+# --- Speech engines ---
+ASR_PROVIDER = _RUNTIME_CONFIG.asr.provider
+TTS_PROVIDER = _RUNTIME_CONFIG.tts.provider
+
+# --- Runtime policy ---
+RUNTIME_STRICT_PREFLIGHT = _RUNTIME_CONFIG.runtime.strict_preflight
+RUNTIME_IMMUTABLE_CONTRACT = _RUNTIME_CONFIG.runtime.immutable_contract
+MANAGE_MODEL_SERVERS = _RUNTIME_CONFIG.runtime.manage_model_servers
+ENABLE_STREAMING_TTS = _RUNTIME_CONFIG.runtime.enable_streaming_tts
+
+
+def _resolve_runtime_model_path(raw):
+    """Resolve a configured model path: absolute as-is, else models-root relative."""
+    if not raw:
+        return None
+    if os.path.isabs(raw):
+        return raw
+    return os.path.join(OFFLINE_MODELS_ROOT, raw)
+
+
+# ============== Paths (runtime config overrides auto-detection) ==============
+# FunASR STT Model
+FUNASR_MODEL_PATH = (
+    _resolve_runtime_model_path(_RUNTIME_CONFIG.asr.model_path)
+    or _FUNASR_DETECTED
+    or os.path.join(OFFLINE_MODELS_ROOT, "funasr", "Fun-ASR-Nano-2512")
+)
+
+# CosyVoice3 Model (alternative TTS engine, selected by runtime config)
 COSYVOICE_BASE_DIR = _COSYVOICE_BASE_DETECTED or os.path.join(OFFLINE_MODELS_ROOT, "CosyVoice")
 COSYVOICE_MODEL_PATH = _COSYVOICE_MODEL_DETECTED or os.path.join(
     COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B")
 
 # VoxCPM2 Model (current TTS backend)
-VOXCPM_MODEL_PATH = _VOXCPM_DETECTED
+VOXCPM_MODEL_PATH = (
+    _resolve_runtime_model_path(_RUNTIME_CONFIG.tts.model_path) or _VOXCPM_DETECTED
+)
 
 # Voice prompt audio for TTS voice cloning
-VOICE_PROMPT_PATH = _VOICE_PROMPT_DETECTED
+VOICE_PROMPT_PATH = (
+    _resolve_runtime_model_path(_RUNTIME_CONFIG.tts.voice_prompt_path)
+    or _VOICE_PROMPT_DETECTED
+)
 
 # Voice prompt transcript text (auto-detected from S1.txt)
 VOICE_PROMPT_TEXT = _VOICE_PROMPT_TEXT_DETECTED
@@ -315,29 +369,6 @@ DATA_ROOT = os.environ.get(
     "VOICECHAT_DATA_DIR",
     r"D:\program\voice_chat_data",
 )
-
-# ============== Deployment Profile / Ollama ==============
-# The profile is an explicit deployment decision, never an automatic hardware
-# guess.  A100 production stays pinned to the user's verified Qwen2.5 72B
-# dialogue baseline; local 6GB machines default to the light development model.
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-
-_DEPLOYMENT_PROFILE = get_deployment_profile()
-_RUNTIME_MODELS = resolve_runtime_models(_DEPLOYMENT_PROFILE)
-# Public compatibility aliases for callers that still inspect the selected
-# deployment.  Guard/crisis controls are intentionally not exported here.
-DEPLOYMENT_PROFILE = _DEPLOYMENT_PROFILE
-RUNTIME_MODELS = _RUNTIME_MODELS
-# Dialogue transport is profile-owned. ``OLLAMA_MODEL`` is retained as the
-# existing application-wide model-name variable for compatibility; under the
-# A100 profile it names the vLLM-served model rather than an Ollama tag.
-DIALOGUE_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
-DIALOGUE_BASE_URL = (
-    _DEPLOYMENT_PROFILE.dialogue_base_url
-    if _DEPLOYMENT_PROFILE.immutable_runtime_contract
-    else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", _DEPLOYMENT_PROFILE.dialogue_base_url)
-)
-OLLAMA_MODEL = _RUNTIME_MODELS.dialogue
 
 
 def print_model_status():
@@ -355,7 +386,7 @@ def print_model_status():
     _status(COSYVOICE_MODEL_PATH, "CosyVoice3 (legacy)")
     _status(VOXCPM_MODEL_PATH, "VoxCPM2")
     _status(VOICE_PROMPT_PATH, "Voice Prompt")
-    print(f"  [{'OK' if _OLLAMA_DETECTED else 'FALLBACK'}] Ollama Model: {OLLAMA_MODEL}")
+    print(f"  [{'OK' if _OLLAMA_DETECTED else 'FALLBACK'}] Ollama Model: {DIALOGUE_MODEL}")
     print("=" * 50)
 
 # Phase 6 live prompt: TurnPolicy has already selected the expression task.
@@ -565,15 +596,9 @@ MAX_CONVERSATION_MINUTES = 45       # Maximum session duration in minutes
 TIME_WARNING_MINUTES = 40           # Show warning at this point (5 min before limit)
 
 # ============== Agent (qwen-agent) ==============
-AGENT_ENABLED = True
-AGENT_MODEL = _RUNTIME_MODELS.router
-AGENT_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
-AGENT_MODEL_SERVER = (
-    _DEPLOYMENT_PROFILE.agent_base_url
-    if _DEPLOYMENT_PROFILE.immutable_runtime_contract
-    else os.environ.get("VOICECHAT_AGENT_BASE_URL", _DEPLOYMENT_PROFILE.agent_base_url)
-)
-AGENT_API_KEY = 'EMPTY'
+# Agent enablement, provider, model, endpoint, and API key come from the
+# runtime configuration (see the Runtime Configuration section above); the
+# prompts and timeouts below remain application policy.
 
 AGENT_INTENT_SYSTEM_MESSAGE = """你是心理咨询系统的意图分类器。系统有以下功能模块：
 1. 咨询对话（counseling）：核心功能，咨询师通过对话建立关系、共情、引导
