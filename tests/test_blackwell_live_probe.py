@@ -1,8 +1,8 @@
-"""Deterministic tests for the real Blackwell acceptance probe.
+"""Deterministic tests for the real acceptance probe.
 
-These tests exercise command construction, profile ownership, response
-inspection, timing, and artifact failure semantics without contacting WSL,
-GPU drivers, vLLM, or external services.
+These tests exercise command construction, runtime configuration ownership,
+response inspection, timing, and artifact failure semantics without contacting
+WSL, GPU drivers, an inference server, or external services.
 """
 
 from __future__ import annotations
@@ -15,37 +15,104 @@ from types import SimpleNamespace
 
 import pytest
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    RuntimeConfig,
+    load_runtime_config,
+)
 from scripts.acceptance import blackwell_live_probe as probe
 from scripts.acceptance import probe_support as support
 
 
-def test_probe_01_only_blackwell_profiles_are_supported():
-    assert support.SUPPORTED_PROFILES == {
-        "rtxpro6000_96g",
-        "rtxpro6000_96g_qwen38_candidate",
-        "rtx5090_32g",
-    }
-    for name in support.SUPPORTED_PROFILES:
-        profile, models = support.validate_profile(name)
-        assert profile.name == name
-        assert profile.expected_gpu_memory_gb in (32, 96)
-        assert models.dialogue == profile.dialogue_model
-
-    for name in ("dev_6g", "dev_vllm_6g", "a100_80g", "a100_80g_qwen38_candidate"):
-        with pytest.raises(support.ProbeError):
-            support.validate_profile(name)
+def _config(**dialogue_changes) -> RuntimeConfig:
+    base = load_runtime_config()
+    return replace(base, dialogue=replace(base.dialogue, **dialogue_changes))
 
 
-def test_probe_02_profile_is_explicit_and_not_hardware_selected():
+def test_probe_01_runtime_deployment_contract_accepts_shipped_config():
+    config = support.validate_runtime_deployment()
+    assert config.dialogue.provider == PROVIDER_OPENAI_COMPATIBLE
+    assert config.dialogue.base_url.startswith("http://127.0.0.1:")
+    assert config.dialogue.model
+    assert config.agent.model
+
+
+def test_probe_01b_runtime_deployment_contract_rejects_bad_config(tmp_path, monkeypatch):
+    tail = """
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+runtime:
+  strict_preflight: false
+  immutable_contract: false
+"""
+
+    def _write(text, name="runtime.yaml"):
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    bad_model = _write("""
+dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: ""
+agent:
+  enabled: false
+""" + tail)
+    with pytest.raises(support.ProbeError, match="RUNTIME_CONFIG_INVALID"):
+        support.validate_runtime_deployment(str(bad_model))
+
+    remote = _write("""
+dialogue:
+  provider: openai_compatible
+  base_url: http://192.168.1.10:8000/v1
+  model: test-model
+agent:
+  enabled: false
+""" + tail)
+    with pytest.raises(support.ProbeError, match="RUNTIME_CONFIG_CONTRACT"):
+        support.validate_runtime_deployment(str(remote))
+
+    malformed = _write("dialogue: [broken")
+    with pytest.raises(support.ProbeError, match="RUNTIME_CONFIG_INVALID"):
+        support.validate_runtime_deployment(str(malformed))
+
+    unsupported = _write("""
+dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: test-model
+agent:
+  enabled: true
+  provider: tensorrt_llm
+  base_url: http://127.0.0.1:8001/v1
+  model: test-agent
+""" + tail)
+    # The loader already rejects unknown providers; the probe's own provider
+    # check guards programmatically built configurations as well.
+    shipped = load_runtime_config()
+    smuggled = replace(shipped, agent=replace(shipped.agent, provider="tensorrt_llm"))
+    monkeypatch.setattr(support, "load_runtime_config", lambda path=None: smuggled)
+    with pytest.raises(support.ProbeError, match="RUNTIME_CONFIG_CONTRACT"):
+        support.validate_runtime_deployment(str(unsupported))
+
+
+def test_probe_02_deployment_is_config_driven_and_not_hardware_selected():
     signature = inspect.signature(probe.run_probe)
-    assert "profile_name" in signature.parameters
+    assert "config_path" in signature.parameters
     source = Path(probe.__file__).read_text(encoding="utf-8")
     support_source = Path(support.__file__).read_text(encoding="utf-8")
-    assert "validate_profile(profile_name)" in source
-    assert "get_deployment_profile(name)" in support_source
+    assert "validate_runtime_deployment(config_path)" in source
     assert "nvidia-smi" in support_source
-    assert "get_deployment_profile(gpu" not in source
+    assert "gpu_expectations" not in source
+    assert "gpu_expectations" not in support_source
+    for text in (source, support_source):
+        assert "Blackwell" not in text
+        assert "blackwell" not in text
+        assert "rtxpro6000" not in text
+        assert "SUPPORTED_PROFILES" not in text
 
 
 def test_probe_03_windows_nvidia_smi_query_is_structured(monkeypatch):
@@ -92,16 +159,20 @@ def test_probe_05_single_gpu_contract_rejects_multiple_devices():
         support.validate_gpu_observation(observations, source="windows")
 
 
-def test_probe_06_wrong_gpu_family_fails():
-    observation = support.GPUObservation(0, "NVIDIA A100 80GB", 81920, 0, 81920, "d", "u")
-    with pytest.raises(support.ProbeError, match="HARDWARE_PROFILE_MISMATCH"):
-        support.validate_gpu_observation([observation], source="windows")
+def test_probe_06_gpu_identity_is_reported_not_enforced():
+    # A GPU the configuration never named is observed and accepted; hardware
+    # identity is a fact for the operator, not a code-level rejection.
+    observation = support.GPUObservation(0, "NVIDIA GeForce RTX 5090", 32607, 0, 32607, "d", "u")
+    validated = support.validate_gpu_observation([observation], source="windows")
+    assert validated.name == "NVIDIA GeForce RTX 5090"
 
 
-def test_probe_07_insufficient_memory_fails():
-    observation = support.GPUObservation(0, "NVIDIA RTX PRO 6000 Blackwell", 81920, 0, 81920, "d", "u")
-    with pytest.raises(support.ProbeError, match="HARDWARE_PROFILE_MISMATCH"):
-        support.validate_gpu_observation([observation], source="windows")
+def test_probe_07_small_gpu_memory_is_not_a_startup_rejection():
+    # No fixed VRAM threshold decides whether the deployment may run; a small
+    # card is reported, and real out-of-memory errors surface from inference.
+    observation = support.GPUObservation(0, "NVIDIA RTX A2000", 6144, 0, 6144, "d", "u")
+    validated = support.validate_gpu_observation([observation], source="windows")
+    assert validated.memory_total_mib == 6144
 
 
 def test_probe_08_windows_wsl_gpu_consistency_is_checked():
@@ -155,24 +226,47 @@ def test_probe_12_invalid_agent_json_fails():
 
 
 def test_probe_13_dialogue_client_uses_runtime_config_factory(monkeypatch):
-    from deployment.runtime_config import get_runtime_config
-
-    config = get_runtime_config()
+    config = load_runtime_config()
     calls = []
 
     class FakeClient:
         model = config.dialogue.model
-        dialogue_enable_thinking = None
+        dialogue_enable_thinking = config.dialogue.enable_thinking
 
     def fake_factory(received_config, *, timeout):
         calls.append((received_config, timeout))
         return FakeClient()
 
-    monkeypatch.setattr(probe, "get_runtime_config", lambda: config)
     monkeypatch.setattr(probe, "build_dialogue_client", fake_factory)
-    client = probe.build_profile_dialogue_client(timeout_seconds=7)
+    client = probe.build_probe_dialogue_client(timeout_seconds=7, config=config)
     assert isinstance(client, FakeClient)
     assert calls == [(config, 7.0)]
+
+
+def test_probe_13b_dialogue_client_defaults_to_shipped_runtime_config(monkeypatch):
+    config = load_runtime_config()
+
+    class FakeClient:
+        model = config.dialogue.model
+        dialogue_enable_thinking = config.dialogue.enable_thinking
+
+    calls = []
+
+    def fake_factory(received_config, *, timeout):
+        calls.append(received_config)
+        return FakeClient()
+
+    monkeypatch.setattr(probe, "get_runtime_config", lambda: config)
+    monkeypatch.setattr(probe, "build_dialogue_client", fake_factory)
+    client = probe.build_probe_dialogue_client(timeout_seconds=3)
+    assert isinstance(client, FakeClient)
+    assert calls == [config]
+
+
+def test_probe_13c_dialogue_client_build_failure_is_a_probe_error(monkeypatch):
+    monkeypatch.setattr(probe, "build_dialogue_client", lambda *args, **kwargs: None)
+    with pytest.raises(support.ProbeError, match="DIALOGUE_CLIENT_BUILD_FAILED"):
+        probe.build_probe_dialogue_client(timeout_seconds=3)
 
 
 def test_probe_14_nonstream_empty_response_fails():
@@ -207,8 +301,8 @@ def test_probe_16_streaming_ttft_is_measured_from_first_content():
     assert result["content"] == "第一句第二句"
 
 
-def test_probe_17_qwen38_candidate_requires_non_thinking():
-    profile = get_deployment_profile("rtxpro6000_96g_qwen38_candidate")
+def test_probe_17_non_thinking_configuration_rejects_thinking_client():
+    config = _config(enable_thinking=False)
 
     class Client:
         dialogue_enable_thinking = True
@@ -217,14 +311,13 @@ def test_probe_17_qwen38_candidate_requires_non_thinking():
             return {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
 
     with pytest.raises(support.ProbeError, match="THINKING_CONFIG_MISSING"):
-        probe.validate_thinking_contract(profile, Client())
+        probe.validate_thinking_contract(config, Client())
 
 
-def test_probe_17b_thinking_contract_is_profile_owned_after_profile_rename():
-    profile = replace(
-        get_deployment_profile("rtxpro6000_96g_qwen38_candidate"),
-        name="future_blackwell_dialogue_candidate",
-    )
+def test_probe_17b_thinking_contract_follows_the_configuration_not_its_name():
+    # The configuration file, not any historical profile name, owns the
+    # thinking contract: renaming the source of the config cannot change it.
+    config = _config(enable_thinking=False)
 
     class Client:
         dialogue_enable_thinking = False
@@ -232,11 +325,24 @@ def test_probe_17b_thinking_contract_is_profile_owned_after_profile_rename():
         def _generation_options(self):
             return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
 
-    probe.validate_thinking_contract(profile, Client())
+    probe.validate_thinking_contract(config, Client())
 
 
-def test_probe_18_qwen25_baseline_does_not_receive_thinking_kwargs():
-    profile = get_deployment_profile("rtxpro6000_96g")
+def test_probe_17c_thinking_configuration_requires_matching_client():
+    config = _config(enable_thinking=True)
+
+    class Client:
+        dialogue_enable_thinking = False
+
+        def _generation_options(self):
+            return {"temperature": 0.35}
+
+    with pytest.raises(support.ProbeError, match="THINKING_CONFIG_MISMATCH"):
+        probe.validate_thinking_contract(config, Client())
+
+
+def test_probe_18_unset_thinking_configuration_does_not_receive_thinking_kwargs():
+    config = _config(enable_thinking=None)
 
     class Client:
         dialogue_enable_thinking = None
@@ -244,7 +350,20 @@ def test_probe_18_qwen25_baseline_does_not_receive_thinking_kwargs():
         def _generation_options(self):
             return {"temperature": 0.35}
 
-    probe.validate_thinking_contract(profile, Client())
+    probe.validate_thinking_contract(config, Client())
+
+
+def test_probe_18b_unset_thinking_configuration_rejects_thinking_kwargs():
+    config = _config(enable_thinking=None)
+
+    class Client:
+        dialogue_enable_thinking = False
+
+        def _generation_options(self):
+            return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+
+    with pytest.raises(support.ProbeError, match="THINKING_CONFIG_UNEXPECTED"):
+        probe.validate_thinking_contract(config, Client())
 
 
 def test_probe_19_visible_think_markup_is_detected():
@@ -459,7 +578,7 @@ def _summary_raw_stream_evidence(leakage):
 
 
 def test_probe_summary_records_clean_raw_stream_as_pass():
-    summary = probe._summary_template("rtxpro6000_96g")
+    summary = probe._summary_template("runtime.yaml")
     raw_stream = _summary_raw_stream_evidence(
         {"thinking_markup": [], "reasoning_fields": {}, "control_tags": []}
     )
@@ -483,7 +602,7 @@ def test_probe_summary_records_clean_raw_stream_as_pass():
     ],
 )
 def test_probe_summary_preserves_failed_raw_stream_evidence(leakage, error_code, flag):
-    summary = probe._summary_template("rtxpro6000_96g")
+    summary = probe._summary_template("runtime.yaml")
     raw_stream = _summary_raw_stream_evidence(leakage)
     if error_code == "REASONING_FIELD_LEAK":
         raw_stream["raw_chunks"] = [{"reasoning_content": "hidden reasoning"}]
@@ -502,7 +621,7 @@ def test_probe_summary_preserves_failed_raw_stream_evidence(leakage, error_code,
 
 
 def test_probe_summary_and_detail_use_same_raw_stream_failure_state():
-    summary = probe._summary_template("rtxpro6000_96g")
+    summary = probe._summary_template("runtime.yaml")
     raw_stream = _summary_raw_stream_evidence(
         {"thinking_markup": [], "reasoning_fields": {"reasoning_content": 15}, "control_tags": []}
     )
@@ -516,7 +635,7 @@ def test_probe_summary_and_detail_use_same_raw_stream_failure_state():
 
 
 def test_probe_summary_marks_raw_nonstream_leak_as_ran_and_failed():
-    summary = probe._summary_template("rtxpro6000_96g")
+    summary = probe._summary_template("runtime.yaml")
 
     with pytest.raises(support.ProbeError, match="REASONING_FIELD_LEAK"):
         probe._record_raw_nonstream_evidence(

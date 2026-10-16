@@ -1,9 +1,15 @@
-"""Compatibility contract for the opt-in Qwen3.8 dialogue configuration."""
+"""Compatibility contract for the opt-in Qwen3.8 dialogue configuration.
+
+The candidate is a runtime configuration file, not a hardware profile: the
+same application serves any model the configuration names explicitly, and
+an immutable contract keeps environment overrides out of experiments.
+"""
 
 from types import SimpleNamespace
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-from deployment.runtime_config import load_runtime_config
+import pytest
+
+from deployment.runtime_config import RuntimeConfigError, load_runtime_config
 from inference.factory import build_dialogue_client
 from inference.openai_client import OpenAICompatibleClient
 
@@ -35,44 +41,36 @@ def _write_config(tmp_path):
     return path
 
 
-def test_q38_01_production_a100_profile_remains_qwen25_72b():
-    profile = get_deployment_profile("a100_80g")
-    assert profile.dialogue_model == "Qwen/Qwen2.5-72B-Instruct-AWQ"
-    assert resolve_runtime_models(profile, environment={}).dialogue == profile.dialogue_model
+def test_q38_01_production_configuration_names_its_dialogue_model_explicitly():
+    config = load_runtime_config()
+    assert config.dialogue.model
+    assert config.dialogue.provider == "openai_compatible"
 
 
-def test_q38_02_candidate_profile_selects_qwen38_fp8():
-    profile = get_deployment_profile("a100_80g_qwen38_candidate")
-    assert profile.dialogue_model == "Qwen/Qwen3.8-27B-FP8"
-    assert profile.expected_gpu_memory_gb == 80
-    assert profile.runtime_backend == "vllm"
+def test_q38_02_candidate_configuration_selects_qwen38_fp8(tmp_path):
+    config = load_runtime_config(_write_config(tmp_path))
+    assert config.dialogue.model == "Qwen/Qwen3.8-27B-FP8"
+    assert config.dialogue.enable_thinking is False
 
 
-def test_q38_03_candidate_keeps_qwen25_router_and_agent():
-    profile = get_deployment_profile("a100_80g_qwen38_candidate")
-    models = resolve_runtime_models(profile, environment={})
-    assert profile.router_model == "Qwen/Qwen2.5-3B-Instruct-AWQ"
-    assert profile.agent_model == "Qwen/Qwen2.5-3B-Instruct-AWQ"
-    assert models.router == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+def test_q38_03_candidate_configures_its_agent_independently(tmp_path):
+    config = load_runtime_config(_write_config(tmp_path))
+    assert config.agent.enabled is False
+    assert config.dialogue.model == "Qwen/Qwen3.8-27B-FP8"
 
 
-def test_q38_04_candidate_is_explicit_and_never_default():
-    assert get_deployment_profile().name == "dev_6g"
-    assert get_deployment_profile("a100_80g").name == "a100_80g"
+def test_q38_04_configuration_is_explicit_and_never_defaulted(tmp_path):
+    with pytest.raises(RuntimeConfigError):
+        load_runtime_config(tmp_path / "missing.yaml")
 
 
-def test_q38_05_candidate_ignores_unauthorized_model_override():
-    profile = get_deployment_profile("a100_80g_qwen38_candidate")
-    models = resolve_runtime_models(
-        profile,
-        environment={
-            "VOICECHAT_DIALOGUE_MODEL": "unauthorized-model",
-            "OLLAMA_MODEL": "stale-model",
-            "AGENT_MODEL": "unauthorized-agent",
-        },
-    )
-    assert models.dialogue == "Qwen/Qwen3.8-27B-FP8"
-    assert models.router == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+def test_q38_05_candidate_ignores_unauthorized_model_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICECHAT_DIALOGUE_MODEL", "unauthorized-model")
+    monkeypatch.setenv("OLLAMA_MODEL", "stale-model")
+    monkeypatch.setenv("AGENT_MODEL", "unauthorized-agent")
+    config = load_runtime_config(_write_config(tmp_path))
+    assert config.dialogue.model == "Qwen/Qwen3.8-27B-FP8"
+    assert config.agent.enabled is False
 
 
 def _fake_chat_client(calls, chunks=None, completion_text="reply"):
@@ -177,10 +175,9 @@ def test_q38_14_candidate_consumes_delta_content_not_reasoning_fields():
     assert list(client.stream_messages(messages=[{"role": "user", "content": "hello"}])) == ["visible"]
 
 
-def test_q38_15_candidate_keeps_dialogue_and_router_ports():
-    profile = get_deployment_profile("a100_80g_qwen38_candidate")
-    assert profile.dialogue_base_url == "http://127.0.0.1:8000/v1"
-    assert profile.agent_base_url == "http://127.0.0.1:8001/v1"
+def test_q38_15_candidate_keeps_dialogue_and_agent_ports(tmp_path):
+    config = load_runtime_config(_write_config(tmp_path))
+    assert config.dialogue.base_url == "http://127.0.0.1:8000/v1"
 
 
 def test_q38_16_candidate_factory_transfers_generation_contract(tmp_path):
@@ -193,13 +190,13 @@ def test_q38_16_candidate_factory_transfers_generation_contract(tmp_path):
     assert client.dialogue_enable_thinking is False
 
 
-def test_q38_17_candidate_keeps_streaming_tts_enabled_without_changing_provider():
-    profile = get_deployment_profile("a100_80g_qwen38_candidate")
-    assert profile.enable_streaming_tts is True
+def test_q38_17_candidate_keeps_streaming_tts_enabled_without_changing_provider(tmp_path):
+    config = load_runtime_config(_write_config(tmp_path))
+    assert config.runtime.enable_streaming_tts is True
+    assert config.tts.provider == "voxcpm"
 
 
-def test_q38_18_prompt_contract_remains_external_to_candidate_profile():
+def test_q38_18_prompt_contract_remains_external_to_the_configuration():
     from config import SYSTEM_PROMPT
 
     assert "本轮动作已经由系统确定" in SYSTEM_PROMPT
-    assert get_deployment_profile("a100_80g").dialogue_model == "Qwen/Qwen2.5-72B-Instruct-AWQ"

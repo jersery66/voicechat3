@@ -8,7 +8,28 @@ from pathlib import Path
 
 import pytest
 
+from deployment.runtime_config import PROVIDER_OPENAI_COMPATIBLE
 from scripts.acceptance import qwen_dialogue_ab as harness
+
+
+BASELINE_MODEL = "Qwen/Qwen2.5-72B-Instruct-AWQ"
+CANDIDATE_MODEL = "Qwen/Qwen3.8-27B-FP8"
+
+CONFIG_TEMPLATE = """
+dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: {model}
+{extra}agent:
+  enabled: false
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+runtime:
+  strict_preflight: true
+  immutable_contract: true
+"""
 
 
 class FakeDialogueClient:
@@ -23,18 +44,16 @@ class FakeDialogueClient:
         return [self.model]
 
     def _generation_options(self, requested_max_tokens=None):
+        extra_body: dict = {}
+        if self._config.dialogue.top_k is not None:
+            extra_body["top_k"] = self._config.dialogue.top_k
+        if self._config.dialogue.enable_thinking is False:
+            extra_body["chat_template_kwargs"] = {"enable_thinking": False}
         return {
             "temperature": self._config.dialogue.temperature,
             "top_p": self._config.dialogue.top_p,
             "max_tokens": requested_max_tokens or self._config.dialogue.max_tokens,
-            "extra_body": (
-                {
-                    "top_k": self._config.dialogue.top_k,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                }
-                if self._config.dialogue.top_k is not None
-                else {}
-            ),
+            "extra_body": extra_body,
         }
 
     def complete_messages(self, *, messages, max_tokens):
@@ -60,17 +79,38 @@ def _fake_factory(monkeypatch):
     return clients
 
 
-def _write_live_probe_summary(tmp_path: Path, profile_name: str, **overrides) -> Path:
+def _write_config(tmp_path: Path, name: str, *, model: str, extra: str = "") -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    profile, models = harness.validate_ab_profile(profile_name)
+    path = tmp_path / name
+    path.write_text(CONFIG_TEMPLATE.format(model=model, extra=extra), encoding="utf-8")
+    return path
+
+
+def _baseline_config(tmp_path: Path) -> Path:
+    return _write_config(tmp_path, "runtime_baseline.yaml", model=BASELINE_MODEL)
+
+
+def _candidate_config(tmp_path: Path) -> Path:
+    return _write_config(
+        tmp_path,
+        "runtime_candidate.yaml",
+        model=CANDIDATE_MODEL,
+        extra="  enable_thinking: false\n",
+    )
+
+
+def _write_live_probe_summary(
+    tmp_path: Path, runtime_config: str = "runtime_baseline.yaml", dialogue_model: str = BASELINE_MODEL, **overrides
+) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     payload = {
         "overall_status": "PASS",
-        "profile": profile_name,
-        "dialogue_model": models.dialogue,
+        "runtime_config": runtime_config,
+        "dialogue_model": dialogue_model,
         "hardware_status": "PASS",
         "dialogue_identity_status": "PASS",
-        "agent_identity_status": "PASS",
-        "agent_inference_status": "PASS",
+        "agent_identity_status": "SKIPPED",
+        "agent_inference_status": "SKIPPED",
         "dialogue_stream_status": "PASS",
         "raw_stream_acceptance_status": "PASS",
         "thinking_leak": False,
@@ -79,17 +119,17 @@ def _write_live_probe_summary(tmp_path: Path, profile_name: str, **overrides) ->
         "git_commit": "phase5-test-commit",
     }
     payload.update(overrides)
-    path = tmp_path / f"{profile_name}_acceptance_summary.json"
+    path = tmp_path / f"{runtime_config}_acceptance_summary.json"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return path
 
 
-def _run_artifact(tmp_path: Path, profile_name: str, monkeypatch) -> Path:
+def _run_artifact(tmp_path: Path, config_path: Path, dialogue_model: str, monkeypatch) -> Path:
     _fake_factory(monkeypatch)
-    summary = _write_live_probe_summary(tmp_path, profile_name)
-    root = tmp_path / profile_name
-    assert harness.run_profile(
-        profile_name,
+    summary = _write_live_probe_summary(tmp_path, config_path.name, dialogue_model)
+    root = tmp_path / config_path.stem
+    assert harness.run_config(
+        config_path,
         output_root=root,
         timeout_seconds=1,
         live_probe_summary=summary,
@@ -97,18 +137,29 @@ def _run_artifact(tmp_path: Path, profile_name: str, monkeypatch) -> Path:
     return next(root.rglob("run.json"))
 
 
-def test_ab_01_only_explicit_blackwell_profiles_are_supported():
-    assert harness.SUPPORTED_PROFILES == {
-        "rtxpro6000_96g",
-        "rtxpro6000_96g_qwen38_candidate",
-    }
-    for name in harness.SUPPORTED_PROFILES:
-        profile, models = harness.validate_ab_profile(name)
-        assert profile.name == name
-        assert models.dialogue == profile.dialogue_model
-    for name in ("dev_6g", "dev_vllm_6g", "a100_80g", "a100_80g_qwen38_candidate"):
-        with pytest.raises(harness.ABError):
-            harness.validate_ab_profile(name)
+def test_ab_01_runtime_configuration_is_the_only_ab_selection():
+    config = harness.load_ab_config(None)
+    assert config.dialogue.provider == PROVIDER_OPENAI_COMPATIBLE
+    assert config.runtime.immutable_contract is True
+    assert config.runtime.strict_preflight is True
+
+
+def test_ab_01b_non_immutable_configuration_is_rejected(tmp_path):
+    path = _write_config(tmp_path, "mutable.yaml", model=BASELINE_MODEL)
+    text = path.read_text(encoding="utf-8").replace("immutable_contract: true", "immutable_contract: false")
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(harness.ABError):
+        harness.load_ab_config(path)
+
+
+def test_ab_01c_remote_endpoint_configuration_is_rejected(tmp_path):
+    path = _write_config(tmp_path, "remote.yaml", model=BASELINE_MODEL)
+    text = path.read_text(encoding="utf-8").replace(
+        "base_url: http://127.0.0.1:8000/v1", "base_url: http://192.168.1.10:8000/v1"
+    )
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(harness.ABError):
+        harness.load_ab_config(path)
 
 
 def test_ab_02_expanded_matrix_has_required_categories_and_metadata():
@@ -169,7 +220,8 @@ def test_ab_03_scenario_matrix_and_prompt_hash_are_stable(monkeypatch):
 
 def test_ab_04_phase5_pass_is_required_before_dialogue_requests(tmp_path, monkeypatch):
     clients = _fake_factory(monkeypatch)
-    result = harness.run_profile("rtxpro6000_96g", output_root=tmp_path, timeout_seconds=1)
+    config_path = _baseline_config(tmp_path)
+    result = harness.run_config(config_path, output_root=tmp_path, timeout_seconds=1)
     assert result == 1
     assert clients == {}
     artifact = json.loads(next(tmp_path.rglob("run.json")).read_text(encoding="utf-8"))
@@ -181,7 +233,7 @@ def test_ab_04_phase5_pass_is_required_before_dialogue_requests(tmp_path, monkey
     "overrides,expected",
     [
         ({"overall_status": "FAIL"}, "overall_status"),
-        ({"profile": "rtxpro6000_96g_qwen38_candidate"}, "profile"),
+        ({"runtime_config": "runtime_candidate.yaml"}, "runtime_config"),
         ({"dialogue_model": "wrong-model"}, "dialogue_model"),
         ({"hardware_status": "FAIL"}, "hardware_status"),
         ({"thinking_leak": True}, "thinking_leak"),
@@ -193,9 +245,10 @@ def test_ab_05_phase5_failures_are_rejected_before_dialogue_requests(
     tmp_path, monkeypatch, overrides, expected
 ):
     clients = _fake_factory(monkeypatch)
-    summary = _write_live_probe_summary(tmp_path, "rtxpro6000_96g", **overrides)
-    result = harness.run_profile(
-        "rtxpro6000_96g", output_root=tmp_path / "run", timeout_seconds=1, live_probe_summary=summary
+    config_path = _baseline_config(tmp_path)
+    summary = _write_live_probe_summary(tmp_path, **overrides)
+    result = harness.run_config(
+        config_path, output_root=tmp_path / "run", timeout_seconds=1, live_probe_summary=summary
     )
     assert result == 1
     assert clients == {}
@@ -203,24 +256,27 @@ def test_ab_05_phase5_failures_are_rejected_before_dialogue_requests(
     assert expected in artifact["errors"][0]
 
 
-def test_ab_06_run_records_phase5_evidence_and_profile_options(tmp_path, monkeypatch):
+def test_ab_06_run_records_phase5_evidence_and_configuration_options(tmp_path, monkeypatch):
     clients = _fake_factory(monkeypatch)
-    summary = _write_live_probe_summary(tmp_path, "rtxpro6000_96g")
-    result = harness.run_profile(
-        "rtxpro6000_96g",
+    config_path = _baseline_config(tmp_path)
+    summary = _write_live_probe_summary(tmp_path, config_path.name, BASELINE_MODEL)
+    result = harness.run_config(
+        config_path,
         output_root=tmp_path,
         timeout_seconds=1,
         live_probe_summary=summary,
     )
     assert result == 0
-    assert clients["profile:rtxpro6000_96g"].calls
+    client = next(iter(clients.values()))
+    assert client.calls
     artifact = json.loads(next(tmp_path.rglob("run.json")).read_text(encoding="utf-8"))
     assert artifact["status"] == "PASS"
-    assert artifact["dialogue_model"] == "Qwen/Qwen2.5-72B-Instruct-AWQ"
+    assert artifact["runtime_config"] == "runtime_baseline.yaml"
+    assert artifact["dialogue_model"] == BASELINE_MODEL
     assert artifact["scenario_matrix_hash"] == harness.scenario_matrix_hash()
     assert artifact["system_prompt_hash"]
     assert artifact["prompt_hashes"]
-    assert artifact["live_probe_profile"] == "rtxpro6000_96g"
+    assert artifact["live_probe_runtime_config"] == "runtime_baseline.yaml"
     assert artifact["live_probe_dialogue_model"] == artifact["dialogue_model"]
     assert artifact["live_probe_summary_sha256"]
     assert artifact["hardware_validation"] == "PHASE5_PASS_REFERENCED"
@@ -229,28 +285,32 @@ def test_ab_06_run_records_phase5_evidence_and_profile_options(tmp_path, monkeyp
     assert set(artifact["human_review_dimensions"]) == set(harness.REVIEW_DIMENSIONS)
 
 
-def test_ab_07_candidate_keeps_thinking_contract_profile_owned(tmp_path, monkeypatch):
+def test_ab_07_candidate_keeps_thinking_contract_configuration_owned(tmp_path, monkeypatch):
     _fake_factory(monkeypatch)
-    summary = _write_live_probe_summary(tmp_path, "rtxpro6000_96g_qwen38_candidate")
-    result = harness.run_profile(
-        "rtxpro6000_96g_qwen38_candidate",
+    config_path = _candidate_config(tmp_path)
+    summary = _write_live_probe_summary(tmp_path, config_path.name, CANDIDATE_MODEL)
+    result = harness.run_config(
+        config_path,
         output_root=tmp_path,
         timeout_seconds=1,
         live_probe_summary=summary,
     )
     assert result == 0
     artifact = json.loads(next(tmp_path.rglob("run.json")).read_text(encoding="utf-8"))
+    assert artifact["runtime_config"] == "runtime_candidate.yaml"
     assert artifact["dialogue_enable_thinking"] is False
     assert artifact["generation_options"]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
 
 
 def test_ab_08_repeatability_and_performance_are_recorded(tmp_path, monkeypatch):
     clients = _fake_factory(monkeypatch)
-    summary = _write_live_probe_summary(tmp_path, "rtxpro6000_96g")
-    assert harness.run_profile(
-        "rtxpro6000_96g", output_root=tmp_path, timeout_seconds=1, live_probe_summary=summary
+    config_path = _baseline_config(tmp_path)
+    summary = _write_live_probe_summary(tmp_path, config_path.name, BASELINE_MODEL)
+    assert harness.run_config(
+        config_path, output_root=tmp_path, timeout_seconds=1, live_probe_summary=summary
     ) == 0
-    assert len(clients["profile:rtxpro6000_96g"].calls) == len(harness.SCENARIOS) * 2 + len(
+    client = next(iter(clients.values()))
+    assert len(client.calls) == len(harness.SCENARIOS) * 2 + len(
         harness.REPEATABILITY_SCENARIO_IDS
     ) * harness.REPEAT_COUNT
     artifact = json.loads(next(tmp_path.rglob("run.json")).read_text(encoding="utf-8"))
@@ -262,7 +322,8 @@ def test_ab_08_repeatability_and_performance_are_recorded(tmp_path, monkeypatch)
 
 def test_ab_09_output_leak_fails_without_stripping(tmp_path, monkeypatch):
     _fake_factory(monkeypatch)
-    summary = _write_live_probe_summary(tmp_path, "rtxpro6000_96g")
+    config_path = _baseline_config(tmp_path)
+    summary = _write_live_probe_summary(tmp_path, config_path.name, BASELINE_MODEL)
 
     class LeakingClient(FakeDialogueClient):
         def complete_messages(self, *, messages, max_tokens):
@@ -276,8 +337,8 @@ def test_ab_09_output_leak_fails_without_stripping(tmp_path, monkeypatch):
         "build_dialogue_client",
         lambda config=None, *, timeout=None: LeakingClient(config),
     )
-    result = harness.run_profile(
-        "rtxpro6000_96g", output_root=tmp_path / "run", timeout_seconds=1, live_probe_summary=summary
+    result = harness.run_config(
+        config_path, output_root=tmp_path / "run", timeout_seconds=1, live_probe_summary=summary
     )
     assert result == 1
     artifact = json.loads(next((tmp_path / "run").rglob("run.json")).read_text(encoding="utf-8"))
@@ -287,13 +348,15 @@ def test_ab_09_output_leak_fails_without_stripping(tmp_path, monkeypatch):
 
 
 def test_ab_10_compare_requires_all_input_parity_and_never_promotes(tmp_path, monkeypatch):
-    baseline = _run_artifact(tmp_path / "runs", "rtxpro6000_96g", monkeypatch)
-    candidate = _run_artifact(tmp_path / "runs", "rtxpro6000_96g_qwen38_candidate", monkeypatch)
+    baseline = _run_artifact(tmp_path / "runs", _baseline_config(tmp_path / "runs"), BASELINE_MODEL, monkeypatch)
+    candidate = _run_artifact(tmp_path / "runs", _candidate_config(tmp_path / "runs"), CANDIDATE_MODEL, monkeypatch)
     comparison_path = tmp_path / "comparison" / "comparison.json"
     comparison = harness.compare_runs(baseline, candidate, output_path=comparison_path)
     assert comparison["status"] == "READY_FOR_HUMAN_REVIEW"
     assert comparison["promotion_status"] == "NOT APPROVED"
     assert comparison["latency_thresholds"] == "NOT DEFINED"
+    assert comparison["baseline_runtime_config"] == "runtime_baseline.yaml"
+    assert comparison["candidate_runtime_config"] == "runtime_candidate.yaml"
     assert len(comparison["paired_scenarios"]) == len(harness.SCENARIOS)
     assert set(comparison["human_review_rubric"]) == set(harness.REVIEW_DIMENSIONS)
     assert comparison["hardware_validation"] == "PHASE5_PASS_REFERENCED"
@@ -308,7 +371,7 @@ def test_ab_10_compare_requires_all_input_parity_and_never_promotes(tmp_path, mo
     packet_text = (comparison_path.parent / "review_packet_A.csv").read_text(encoding="utf-8").lower()
     assert not any(word in packet_text for word in forbidden)
     private_map = json.loads((comparison_path.parent / "private_blind_map.json").read_text(encoding="utf-8"))
-    assert private_map and {"profile", "model", "scenario_id", "repeat_index"} <= set(private_map[0])
+    assert private_map and {"runtime_config", "model", "scenario_id", "repeat_index"} <= set(private_map[0])
 
     def mutated(name, mutation):
         path = tmp_path / f"{name}.json"
@@ -330,7 +393,22 @@ def test_ab_10_compare_requires_all_input_parity_and_never_promotes(tmp_path, mo
         )
 
 
-def test_ab_11_harness_has_no_service_lifecycle_or_audio_ownership():
+def test_ab_11_same_configuration_or_same_model_is_not_comparable(tmp_path, monkeypatch):
+    baseline = _run_artifact(tmp_path / "runs", _baseline_config(tmp_path / "runs"), BASELINE_MODEL, monkeypatch)
+    same_config = _run_artifact(tmp_path / "runs", _baseline_config(tmp_path / "runs"), BASELINE_MODEL, monkeypatch)
+    with pytest.raises(harness.ABError, match="NOT_COMPARABLE"):
+        harness.compare_runs(baseline, same_config)
+
+    candidate = _run_artifact(tmp_path / "runs", _candidate_config(tmp_path / "runs"), CANDIDATE_MODEL, monkeypatch)
+    same_model_path = tmp_path / "same_model.json"
+    payload = json.loads(Path(candidate).read_text(encoding="utf-8"))
+    payload.update(dialogue_model=BASELINE_MODEL)
+    same_model_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(harness.ABError, match="NOT_COMPARABLE"):
+        harness.compare_runs(baseline, same_model_path)
+
+
+def test_ab_12_harness_has_no_service_lifecycle_or_audio_ownership():
     source = Path(harness.__file__).read_text(encoding="utf-8")
     assert "start_blackwell_stack" not in source
     assert "stop_blackwell_stack" not in source
