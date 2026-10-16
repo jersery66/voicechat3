@@ -78,7 +78,7 @@ def test_required_docs_and_tools_are_declared():
 def test_env_template_exists_without_obvious_secret_or_personal_path():
     path = final_readiness.PROJECT_ROOT / ".env.example"
     text = path.read_text(encoding="utf-8")
-    assert "VOICECHAT_DEPLOYMENT_PROFILE=" in text
+    assert "VOICECHAT_RUNTIME_CONFIG=" in text
     assert "password=" not in text.lower()
     assert "api_key=" not in text.lower()
     assert "sk-" not in text
