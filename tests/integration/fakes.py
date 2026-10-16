@@ -50,7 +50,7 @@ class FakeLLM:
 
 
 class FakeAgent:
-    """Scripted 3B agent. Defaults answer 'chat' with neutral emotion."""
+    """Scripted agent. Defaults answer 'chat' with neutral emotion."""
 
     def __init__(self):
         self.available = True

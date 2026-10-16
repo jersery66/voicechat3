@@ -326,7 +326,7 @@ class LLMService:
         ])
 
     def _maybe_summarize(self):
-        """Compress conversation history using the 3B agent when it grows too long."""
+        """Compress conversation history using the agent model when it grows too long."""
         if len(self.conversation_history) < self.MAX_HISTORY_TURNS * 2:
             return  # Not long enough yet
 

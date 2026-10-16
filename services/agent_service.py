@@ -44,7 +44,11 @@ _RELAXATION_KEYWORDS = [
 ]
 
 class AgentService:
-    """3B 模型 Agent 服务，负责意图分类和报告生成。"""
+    """Agent 模型服务，负责意图分类和报告生成。
+
+    模型、端点与 provider 由运行配置（config/runtime.yaml 的 agent 段）
+    指定，与主模型相互独立。
+    """
 
     # Re-check availability at most once per RECHECK_INTERVAL seconds
     RECHECK_INTERVAL = 60.0
@@ -63,11 +67,15 @@ class AgentService:
         self._last_check_ts: float = 0.0
 
     def is_available(self) -> bool:
-        """检测 3B 模型是否可达。
+        """检测 Agent 模型是否可达。
 
-        结果缓存 ``RECHECK_INTERVAL`` 秒；超期后会重新探测，避免临时故障
-        后永久在 fallback 模式运行。
+        运行配置禁用 Agent（``agent.enabled: false``）时直接返回 False，
+        不发起任何网络探测。结果缓存 ``RECHECK_INTERVAL`` 秒；超期后会
+        重新探测，避免临时故障后永久在 fallback 模式运行。
         """
+        if not AGENT_ENABLED:
+            self._available = False
+            return False
         now = time.time()
         if (
             self._available is not None
@@ -103,7 +111,7 @@ class AgentService:
         temperature: float = 0.1,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Call the 3B agent and parse a JSON response.
+        """Call the agent model and parse a JSON response.
 
         Centralizes the request boilerplate for the various JSON-mode calls
         (intent, RAG routing, relaxation and emotion). Raises on failure
@@ -150,7 +158,7 @@ class AgentService:
          "reason": "简短理由"}
 
         先用关键词快速判断，高置信度直接返回；
-        关键词不确定时才调用3B模型。
+        关键词不确定时才调用 Agent 模型。
         """
         keyword_result = self._keyword_classify(user_text)
         if keyword_result["confidence"] >= 0.85:
@@ -206,7 +214,7 @@ class AgentService:
     def generate_report(self, prompt: str, system_msg: str = None, timeout: float = None) -> str:
         """
         非流式报告生成。返回完整文本。
-        失败时抛出异常，由调用方 fallback 到 72B。
+        失败时抛出异常，由调用方 fallback 到主模型。
         """
         timeout = timeout or AGENT_REPORT_TIMEOUT
         system_msg = system_msg or AGENT_REPORT_SYSTEM_MESSAGE
@@ -225,7 +233,7 @@ class AgentService:
     def generate_report_stream(self, prompt: str, system_msg: str = None, timeout: float = None) -> Generator[str, None, None]:
         """
         流式报告生成。逐 chunk yield。
-        失败时抛出异常，由调用方 fallback 到 72B。
+        失败时抛出异常，由调用方 fallback 到主模型。
         """
         timeout = timeout or AGENT_REPORT_TIMEOUT
         system_msg = system_msg or AGENT_REPORT_SYSTEM_MESSAGE
@@ -508,7 +516,7 @@ class AgentService:
 
         Uses direct API call WITHOUT response_format=json_object. We
         deliberately avoid json_object mode here so the routing model remains
-        compatible with every profile-selected OpenAI-compatible server. The loose JSON parser
+        compatible with every configured OpenAI-compatible server. The loose JSON parser
         (`_parse_json_loose`) handles undecorated JSON output robustly.
         """
         # Build context for the agent
@@ -574,7 +582,7 @@ class AgentService:
 
         timeout = timeout or AGENT_TIMEOUT
         try:
-            # Direct call without response_format for Ollama compatibility
+            # Direct call without response_format for broader server compatibility
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -692,8 +700,16 @@ class AgentService:
 _agent_service = None
 
 
-def get_agent_service() -> AgentService:
+def get_agent_service() -> Optional[AgentService]:
+    """Return the shared agent service singleton.
+
+    Returns ``None`` when the runtime configuration disables the agent
+    (``agent.enabled: false``); callers already treat a missing agent as
+    "fall back to the dialogue model / keyword routing".
+    """
     global _agent_service
+    if not AGENT_ENABLED:
+        return None
     if _agent_service is None:
         _agent_service = AgentService()
     return _agent_service

@@ -69,3 +69,37 @@ def test_agent_readiness_accepts_openai_model_inventory_dicts():
     agent.client = SimpleNamespace(models=Models())
 
     assert agent.is_available() is True
+
+
+def test_disabled_agent_singleton_returns_none(monkeypatch):
+    """agent.enabled: false 时不构造 Agent，调用方走主模型/关键词回退。"""
+    monkeypatch.setattr("services.agent_service.AGENT_ENABLED", False)
+    monkeypatch.setattr("services.agent_service._agent_service", None)
+
+    from services.agent_service import get_agent_service
+
+    assert get_agent_service() is None
+
+
+def test_enabled_agent_singleton_is_shared(monkeypatch):
+    monkeypatch.setattr("services.agent_service.AGENT_ENABLED", True)
+    monkeypatch.setattr("services.agent_service._agent_service", None)
+
+    from services.agent_service import get_agent_service
+
+    agent = get_agent_service()
+    assert isinstance(agent, AgentService)
+    assert get_agent_service() is agent
+
+
+def test_disabled_agent_is_unavailable_without_probing(monkeypatch):
+    monkeypatch.setattr("services.agent_service.AGENT_ENABLED", False)
+    agent = AgentService()
+
+    class ExplodingModels:
+        def list(self):
+            raise AssertionError("disabled agent must not probe the network")
+
+    agent.client = SimpleNamespace(models=ExplodingModels())
+
+    assert agent.is_available() is False

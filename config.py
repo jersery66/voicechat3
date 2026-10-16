@@ -245,8 +245,9 @@ def _detect_ollama_model():
         if not names:
             return None
         # This inventory is reported by print_model_status() only. Runtime
-        # model selection comes from deployment.profiles and explicit operator
-        # environment overrides, never from whatever happens to be installed.
+        # model selection comes from the runtime configuration and explicit
+        # operator environment overrides, never from whatever happens to be
+        # installed.
         for exact in ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:8b", "qwen2.5:14b", "qwen2.5:72b"]:
             for n in names:
                 if exact.lower() in n.lower():
@@ -703,7 +704,7 @@ EMOTION_SCENE_MAP = {
 INTENT_SCENE_MAP = {
     "relaxation":     ["breathing_exercise", "muscle_relaxation", "meditation"],
     "entertainment":  ["entertainment"],  # 仅主动提出时
-    "counseling":     [],  # 不推荐影音，由 72B 决定是否建议放松训练
+    "counseling":     [],  # 不推荐影音，由主模型决定是否建议放松训练
     "chitchat":       [],
 }
 

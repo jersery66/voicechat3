@@ -1052,14 +1052,14 @@ class MainWindow(QMainWindow):
             self.llm_service.warmup()
             self.processing_queue.put(("loading_progress", 90))
 
-            # Step 2.5: Agent (3B routing model)
+            # Step 2.5: Agent (routing model)
             try:
                 from services.agent_service import get_agent_service
                 self.agent_service = get_agent_service()
-                if self.agent_service.is_available():
-                    logger.info("Agent service (3B) ready")
+                if self.agent_service is not None and self.agent_service.is_available():
+                    logger.info("Agent service ready")
                 else:
-                    logger.warning("3B agent model not available, using keyword fallback")
+                    logger.warning("Agent model not available, using keyword fallback")
             except Exception as e:
                 logger.warning(f"Agent service init failed: {e}")
                 self.agent_service = None

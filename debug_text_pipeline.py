@@ -5,18 +5,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import DIALOGUE_MODEL
 print(f"DIALOGUE_MODEL = {DIALOGUE_MODEL}")
 
-from services.llm_service import LLMService
-print(f"\nLLMService model: {LLMService().model}")
-assert LLMService().model == DIALOGUE_MODEL, "LLM should use DIALOGUE_MODEL!"
+from services.llm_factory import build_llm_service
+llm = build_llm_service()
+print(f"\nDialogue service model: {llm.model}")
+assert llm.model == DIALOGUE_MODEL, "Dialogue service should use DIALOGUE_MODEL!"
 
 from services.pipeline import ConversationPipeline, PipelineConfig
-from services.llm_service import LLMService
-from services.agent_service import AgentService
+from services.agent_service import get_agent_service
 from services.report_service import ReportService
 from data.data_manager import DataManager
 
-llm = LLMService()
-agent = AgentService()
+agent = get_agent_service()
+if agent is None:
+    print("Agent disabled by runtime configuration (agent.enabled: false); exiting.")
+    sys.exit(1)
 report = ReportService(llm, agent_service=agent)
 data = DataManager()
 
