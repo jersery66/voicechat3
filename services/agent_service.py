@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, Generator
 
 from openai import OpenAI
 
+from inference.vllm_client import build_no_keepalive_http_client
 from services.logger import get_logger
 from config import (
     AGENT_MODEL,
@@ -53,6 +54,7 @@ class AgentService:
             api_key=AGENT_API_KEY,
             timeout=AGENT_TIMEOUT,
             max_retries=0,
+            http_client=build_no_keepalive_http_client(AGENT_TIMEOUT),
         )
         self.model = AGENT_MODEL
         self.backend = AGENT_BACKEND

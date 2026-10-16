@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from deployment.profiles import DeploymentProfile, RuntimeModels
 from inference.factory import build_dialogue_client
+from inference.vllm_client import build_no_keepalive_http_client
 try:
     from . import probe_support as support
 except ImportError:  # Direct ``python scripts/acceptance/blackwell_live_probe.py`` execution.
@@ -411,7 +412,13 @@ def _query_metrics(base_url: str, timeout_seconds: float) -> dict[str, Any]:
 
 
 def _probe_agent_direct(profile: DeploymentProfile, *, timeout_seconds: float) -> dict[str, Any]:
-    client = OpenAI(base_url=profile.agent_base_url, api_key="EMPTY", timeout=timeout_seconds, max_retries=0)
+    client = OpenAI(
+        base_url=profile.agent_base_url,
+        api_key="EMPTY",
+        timeout=timeout_seconds,
+        max_retries=0,
+        http_client=build_no_keepalive_http_client(timeout_seconds),
+    )
 
     def call_json(**request: Any) -> Any:
         return client.chat.completions.create(**request)
@@ -498,15 +505,18 @@ def run_probe(profile_name: str, *, distro: str | None = None,
         summary["dialogue_model"] = models.dialogue
         summary["agent_model"] = profile.agent_model
 
+        gpu_fragments, gpu_min_mib = support.gpu_expectations(profile_name)
         windows = support.validate_gpu_observation(
-            support.query_windows_gpu(timeout_seconds=timeout_seconds), source="windows"
+            support.query_windows_gpu(timeout_seconds=timeout_seconds), source="windows",
+            expected=(gpu_fragments, gpu_min_mib),
         )
         summary["windows_gpu"] = windows.to_dict()
         _write_artifact(directory, "hardware.json", {"windows": windows.to_dict()})
         wsl = support.validate_gpu_observation(
-            support.query_wsl_gpu(distro, timeout_seconds=timeout_seconds), source="wsl"
+            support.query_wsl_gpu(distro, timeout_seconds=timeout_seconds), source="wsl",
+            expected=(gpu_fragments, gpu_min_mib),
         )
-        support.compare_gpu_observations(windows, wsl)
+        support.compare_gpu_observations(windows, wsl, expected_fragments=gpu_fragments)
         summary["hardware_status"] = "PASS"
         summary["wsl_gpu"] = wsl.to_dict()
         _write_artifact(directory, "hardware.json", {"windows": windows.to_dict(), "wsl": wsl.to_dict()})
@@ -520,7 +530,8 @@ def run_probe(profile_name: str, *, distro: str | None = None,
         _write_artifact(directory, "server_identity.json", {"dialogue": dialogue_ids, "agent": agent_ids})
 
         before = support.validate_gpu_observation(
-            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows"
+            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows",
+            expected=(gpu_fragments, gpu_min_mib),
         )
         summary["gpu_memory_before_mib"] = before.memory_used_mib
         _write_artifact(directory, "gpu_before.json", before.to_dict())
@@ -591,7 +602,8 @@ def run_probe(profile_name: str, *, distro: str | None = None,
         _write_artifact(directory, "server_metrics.json", _query_metrics(profile.dialogue_base_url, timeout_seconds))
 
         after = support.validate_gpu_observation(
-            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows"
+            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows",
+            expected=(gpu_fragments, gpu_min_mib),
         )
         summary["gpu_memory_after_mib"] = after.memory_used_mib
         summary["gpu_memory_delta_mib"] = after.memory_used_mib - before.memory_used_mib

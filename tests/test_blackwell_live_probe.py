@@ -24,11 +24,12 @@ def test_probe_01_only_blackwell_profiles_are_supported():
     assert support.SUPPORTED_PROFILES == {
         "rtxpro6000_96g",
         "rtxpro6000_96g_qwen38_candidate",
+        "rtx5090_32g",
     }
     for name in support.SUPPORTED_PROFILES:
         profile, models = support.validate_profile(name)
         assert profile.name == name
-        assert profile.expected_gpu_memory_gb == 96
+        assert profile.expected_gpu_memory_gb in (32, 96)
         assert models.dialogue == profile.dialogue_model
 
     for name in ("dev_6g", "dev_vllm_6g", "a100_80g", "a100_80g_qwen38_candidate"):

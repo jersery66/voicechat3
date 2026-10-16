@@ -4,7 +4,23 @@ from __future__ import annotations
 
 from typing import Any, Iterator, Sequence
 
+import httpx
 from openai import OpenAI
+
+
+def build_no_keepalive_http_client(timeout: float) -> httpx.Client:
+    """Return an httpx client that never reuses pooled connections.
+
+    The WSL2 Windows-to-localhost relay silently drops idle keep-alive
+    connections. A reused connection then answers with a spurious HTTP 404
+    instead of a connection error, which defeats OpenAI-SDK retries. Opening
+    one fresh connection per request avoids the relay defect entirely; the
+    extra loopback handshake cost is negligible.
+    """
+    return httpx.Client(
+        timeout=timeout,
+        limits=httpx.Limits(max_keepalive_connections=0),
+    )
 
 
 class VLLMOpenAIClient:
@@ -56,6 +72,7 @@ class VLLMOpenAIClient:
             api_key=api_key,
             timeout=timeout,
             max_retries=0,
+            http_client=build_no_keepalive_http_client(timeout),
         )
 
     @staticmethod

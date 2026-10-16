@@ -20,7 +20,14 @@ from deployment.profiles import DeploymentProfile, RuntimeModels, get_deployment
 SUPPORTED_PROFILES = {
     "rtxpro6000_96g",
     "rtxpro6000_96g_qwen38_candidate",
+    "rtx5090_32g",
 }
+_GPU_EXPECTATIONS = {
+    "rtxpro6000_96g": (("rtx pro 6000", "blackwell"), 90 * 1024),
+    "rtxpro6000_96g_qwen38_candidate": (("rtx pro 6000", "blackwell"), 90 * 1024),
+    "rtx5090_32g": (("rtx 5090",), 30 * 1024),
+}
+DEFAULT_GPU_EXPECTATION = (("rtx pro 6000", "blackwell"), 90 * 1024)
 GPU_QUERY_FIELDS = (
     "index",
     "name",
@@ -59,16 +66,24 @@ class GPUObservation:
         return asdict(self)
 
 
+def gpu_expectations(profile_name: str) -> tuple[tuple[str, ...], int]:
+    """Return (name fragments, minimum MiB) for the profile's target GPU."""
+    return _GPU_EXPECTATIONS.get(profile_name, DEFAULT_GPU_EXPECTATION)
+
+
 def validate_profile(name: str) -> tuple[DeploymentProfile, RuntimeModels]:
-    """Resolve one explicitly selected, strict 96GB vLLM profile."""
+    """Resolve one explicitly selected, strict Blackwell profile."""
     if name not in SUPPORTED_PROFILES:
         raise ProbeError("UNSUPPORTED_PROFILE", f"profile {name!r} is outside Blackwell acceptance")
     profile = get_deployment_profile(name)
     models = resolve_runtime_models(profile, environment={})
     if profile.runtime_backend != "vllm":
         raise ProbeError("PROFILE_CONTRACT", "Blackwell probe requires runtime_backend='vllm'")
-    if profile.expected_gpu_memory_gb != 96:
-        raise ProbeError("PROFILE_CONTRACT", "Blackwell probe requires expected_gpu_memory_gb=96")
+    if profile.expected_gpu_memory_gb not in (32, 96):
+        raise ProbeError(
+            "PROFILE_CONTRACT",
+            f"unsupported GPU memory class: {profile.expected_gpu_memory_gb}",
+        )
     if not profile.immutable_runtime_contract or not profile.strict_preflight:
         raise ProbeError("PROFILE_CONTRACT", "Blackwell profile must be immutable and strict")
     return profile, models
@@ -198,8 +213,14 @@ def _normalized_gpu_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
-def validate_gpu_observation(observations: Sequence[GPUObservation], *, source: str) -> GPUObservation:
-    """Enforce the current single-GPU RTX PRO 6000 Blackwell target."""
+def validate_gpu_observation(
+    observations: Sequence[GPUObservation],
+    *,
+    source: str,
+    expected: tuple[tuple[str, ...], int] | None = None,
+) -> GPUObservation:
+    """Enforce the current single-GPU Blackwell target for one profile class."""
+    fragments, min_mib = expected if expected is not None else DEFAULT_GPU_EXPECTATION
     if len(observations) != 1:
         raise ProbeError(
             "UNSUPPORTED_MULTI_GPU_CURRENT_CONTRACT",
@@ -207,21 +228,25 @@ def validate_gpu_observation(observations: Sequence[GPUObservation], *, source: 
         )
     observation = observations[0]
     normalized = _normalized_gpu_name(observation.name)
-    if "rtx pro 6000" not in normalized or "blackwell" not in normalized:
+    if not all(fragment in normalized for fragment in fragments):
         raise ProbeError("HARDWARE_PROFILE_MISMATCH", f"{source} GPU is {observation.name!r}")
-    if observation.memory_total_mib < 90 * 1024:
+    if observation.memory_total_mib < min_mib:
         raise ProbeError(
             "HARDWARE_PROFILE_MISMATCH",
-            f"{source} GPU reports only {observation.memory_total_mib} MiB; expected approximately 96 GiB",
+            f"{source} GPU reports only {observation.memory_total_mib} MiB; expected at least {min_mib} MiB",
         )
     return observation
 
 
-def compare_gpu_observations(windows: GPUObservation, wsl: GPUObservation) -> None:
-    if (
-        "rtx pro 6000" not in _normalized_gpu_name(wsl.name)
-        or "blackwell" not in _normalized_gpu_name(wsl.name)
-    ):
+def compare_gpu_observations(
+    windows: GPUObservation,
+    wsl: GPUObservation,
+    *,
+    expected_fragments: tuple[str, ...] | None = None,
+) -> None:
+    fragments = expected_fragments if expected_fragments is not None else DEFAULT_GPU_EXPECTATION[0]
+    normalized = _normalized_gpu_name(wsl.name)
+    if not all(fragment in normalized for fragment in fragments):
         raise ProbeError("GPU_CONSISTENCY_MISMATCH", "WSL GPU family differs from the Windows target")
     tolerance = max(4096, int(max(windows.memory_total_mib, wsl.memory_total_mib) * 0.10))
     if abs(windows.memory_total_mib - wsl.memory_total_mib) > tolerance:
