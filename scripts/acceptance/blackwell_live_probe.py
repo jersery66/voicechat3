@@ -630,6 +630,11 @@ def run_probe(config_path: str | None = None, *, distro: str | None = None,
         summary["errors"].append(f"UNEXPECTED_PROBE_ERROR: {exc}")
     finally:
         write_summary_artifact(directory, summary)
+    print(f"live probe: {summary['overall_status']}")
+    print(f"runtime config: {summary.get('runtime_config')}")
+    print(f"artifacts: {directory}")
+    for error in summary["errors"]:
+        print(f"error: {error}", file=sys.stderr)
     return exit_code_for_status(summary["overall_status"])
 
 

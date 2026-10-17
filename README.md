@@ -509,7 +509,7 @@ Phase 1 当前运行时不执行 `END_SAFETY`；历史枚举与旧报告数据�
 ### 🧪 9. 旧版开发脚本（已弃用）
 
 `scripts/test_conversation.py` 是仅面向 Ollama 的历史对话冒烟脚本，已标记
-为 **legacy / deprecated**。它不验证当前 vLLM、Blackwell profile、
+为 **legacy / deprecated**。它不验证当前 `config/runtime.yaml` 指定的部署、
 `RouterProposal → TurnPolicy → TurnDecision` authority chain、实时交付或
 `scripts/acceptance/blackwell_live_probe.py` 的验收结果。不要用它验收
 Qwen3.8 或正式部署。
@@ -517,6 +517,29 @@ Qwen3.8 或正式部署。
 ---
 
 ### ⚙️ 10. 配置说明
+
+部署相关的一切（主模型、Agent、ASR、TTS、端点、采样参数、严格校验开关）都在
+`config/runtime.yaml` 中，详见 `docs/deployment/runtime_config.md`：
+
+```yaml
+dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen3.8-27B-Q4_K_S   # 必须与服务端公布的模型名完全一致
+agent:
+  enabled: true
+  base_url: http://127.0.0.1:8001/v1
+  model: Qwen3-4B-Instruct-2507
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+```
+
+换显卡、换模型、换推理引擎只改这个文件；应用不会根据检测到的显卡自动选模型，
+以保证心理访谈实验可复现。用另一份配置启动：
+`VOICECHAT_RUNTIME_CONFIG=config/runtime_b.yaml`。推理服务本身由
+`scripts/engines/` 下的引擎脚本启停（见 `docs/deployment/engine_services.md`）。
 
 ```python
 MIN_ROUNDS_BEFORE_SCALE = 5    # 🔢 前几轮不启动新量表
@@ -1043,7 +1066,7 @@ The Phase 1 runtime does not execute `END_SAFETY`; the historical enum and legac
 
 `scripts/test_conversation.py` is a historical Ollama-only conversation smoke
 script and is explicitly **legacy / deprecated**. It does not validate the
-current vLLM or Blackwell profile, the
+deployment described by `config/runtime.yaml`, the
 `RouterProposal → TurnPolicy → TurnDecision` authority chain, sentence
 delivery, or the live probe. Do not use it to accept Qwen3.8 or a production
 deployment.
@@ -1051,6 +1074,32 @@ deployment.
 ---
 
 ### ⚙️ 10. Configuration
+
+Everything deployment-related — dialogue model, Agent, ASR, TTS, endpoints,
+sampling parameters, strict-check switches — lives in `config/runtime.yaml`;
+see `docs/deployment/runtime_config.md`:
+
+```yaml
+dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen3.8-27B-Q4_K_S   # must match the model id the server publishes
+agent:
+  enabled: true
+  base_url: http://127.0.0.1:8001/v1
+  model: Qwen3-4B-Instruct-2507
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+```
+
+Changing the GPU, the model, or the inference engine is an edit to this file
+only; the application never picks a model from detected hardware, so interview
+experiments stay reproducible. Start with another configuration via
+`VOICECHAT_RUNTIME_CONFIG=config/runtime_b.yaml`. The inference servers
+themselves are started and stopped by the engine scripts under
+`scripts/engines/` (see `docs/deployment/engine_services.md`).
 
 ```python
 MIN_ROUNDS_BEFORE_SCALE = 5    # 🔢 Don't start new scales in early rounds
