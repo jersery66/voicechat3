@@ -1,5 +1,9 @@
 # Pre-Hardware Deployment Readiness Audit
 
+> Historical audit. References below to `deployment/profiles.py` and to the
+> `DeploymentProfile` contract describe the state at audit time; that module is
+> now retired in favour of `config/runtime.yaml` (see `runtime_config.md`).
+
 Status: Batch 2 implemented; pre-hardware audit remains open for later batches
 
 This audit records what can be completed without the target Windows 11

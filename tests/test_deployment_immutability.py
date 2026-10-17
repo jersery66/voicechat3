@@ -2,7 +2,6 @@
 
 from types import SimpleNamespace
 
-from deployment.profiles import get_deployment_profile
 from deployment.runtime_config import load_runtime_config
 from scripts import check_config
 from services import llm_factory
@@ -29,19 +28,24 @@ def _write_config(tmp_path):
     return path
 
 
-def test_current_profiles_declare_immutability_and_preflight_policy():
-    assert (
-        get_deployment_profile("dev_6g").immutable_runtime_contract,
-        get_deployment_profile("dev_6g").strict_preflight,
-    ) == (False, False)
-    assert (
-        get_deployment_profile("dev_vllm_6g").immutable_runtime_contract,
-        get_deployment_profile("dev_vllm_6g").strict_preflight,
-    ) == (False, False)
-    for name in ("a100_80g", "a100_80g_qwen38_candidate"):
-        profile = get_deployment_profile(name)
-        assert profile.immutable_runtime_contract is True
-        assert profile.strict_preflight is True
+def test_shipped_runtime_config_pins_immutability_and_preflight():
+    config = load_runtime_config()
+
+    assert config.runtime.immutable_contract is True
+    assert config.runtime.strict_preflight is True
+
+
+def test_configuration_may_explicitly_relax_the_policy(tmp_path):
+    path = tmp_path / "runtime.yaml"
+    path.write_text(
+        CONFIG_YAML.replace("strict_preflight: true", "strict_preflight: false")
+        .replace("immutable_contract: true", "immutable_contract: false"),
+        encoding="utf-8",
+    )
+    config = load_runtime_config(path)
+
+    assert config.runtime.immutable_contract is False
+    assert config.runtime.strict_preflight is False
 
 
 def test_immutable_runtime_config_pins_the_compatibility_service(tmp_path, monkeypatch):

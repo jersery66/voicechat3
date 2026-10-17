@@ -2,7 +2,7 @@
 
 This change starts from
 `6790495682fcd71249a7923380df3f77dae622e7` and makes the application entry
-point honor the profile-owned `strict_preflight` policy.
+point honor the configured `strict_preflight` policy.
 
 ## Startup policy
 
@@ -12,31 +12,32 @@ point honor the profile-owned `strict_preflight` policy.
   operator message, returns status `2`, and does not construct `QApplication`
   or `MainWindow`.
 
-The policy is read from `get_deployment_profile()` and does not inspect
-hardware or profile-name substrings.
+The policy is read from the `runtime` section of the runtime configuration
+(`deployment.runtime_config.RuntimeConfig`) and does not inspect hardware or
+configuration file names.
 
-Current strict profiles:
+The shipped `config/runtime.yaml` sets:
 
-```text
-a100_80g
-a100_80g_qwen38_candidate
-rtxpro6000_96g
-rtxpro6000_96g_qwen38_candidate
+```yaml
+runtime:
+  strict_preflight: true
+  immutable_contract: true
 ```
 
-`dev_6g` and `dev_vllm_6g` remain warning-only profiles. The standalone
-`scripts/check_config.py` contract remains reusable and continues to return a
-boolean; `main.py` owns the desktop application's reaction to that result.
+A development configuration can opt out by setting both flags to `false`.
+The standalone `scripts/check_config.py` contract remains reusable and
+continues to return a boolean; `main.py` owns the desktop application's
+reaction to that result.
 
 ## Verification
 
 The focused startup suite covers strict false/exception paths, successful
 strict startup, development warning/exception paths, and a renamed synthetic
-strict profile:
+strict configuration:
 
 ```text
-tests/test_strict_preflight_startup.py: 9 passed
-full regression: 771 passed / 0 failed
+tests/test_strict_preflight_startup.py: passing
+full regression: passing
 ```
 
 Real deployment validation remains intentionally unperformed:

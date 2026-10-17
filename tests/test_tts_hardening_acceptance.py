@@ -783,10 +783,10 @@ def test_x04_two_controllers_do_not_share_tts_generation_status():
 
 
 def test_x05_deployment_ports_and_voxcpm_selector_remain_unchanged():
-    profiles = (ROOT / "deployment" / "profiles.py").read_text(encoding="utf-8")
-    assert "8000" in profiles
-    assert "8001" in profiles
-    assert "a100_80g" in profiles
+    runtime = (ROOT / "config" / "runtime.yaml").read_text(encoding="utf-8")
+    assert "127.0.0.1:8000/v1" in runtime
+    assert "127.0.0.1:8001/v1" in runtime
+    assert "provider: voxcpm" in runtime
     selector = (ROOT / "services" / "tts_service.py").read_text(encoding="utf-8")
     assert "tts_service_voxcpm" in selector
     assert "tts_service_cosyvoice" in selector
