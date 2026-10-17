@@ -100,7 +100,7 @@ awk -v value="$gpu_memory_utilization" 'BEGIN { exit !(value > 0 && value < 1) }
 }
 
 # shellcheck source=/dev/null
-source "$(dirname "$0")/vllm_service_identity.sh"
+source "$(dirname "$0")/service_identity.sh"
 set_service_context "$service_name"
 inspect_service_slot
 case "$service_state" in

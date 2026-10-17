@@ -11,65 +11,67 @@ HUMAN REVIEW NOT RUN
 PROMOTION NOT APPROVED
 ```
 
-This acceptance-only harness compares the two explicit RTX PRO 6000 profiles
-without changing the application authority chain or promoting a model:
+This acceptance-only harness compares two runtime configurations — two
+dialogue models, however they are served — without changing the application
+authority chain or promoting a model:
 
 ```text
 RouterProposal -> TurnPolicy -> exactly one TurnDecision
 ScaleRuntime   -> questionnaire state
 SessionEngine  -> session lifecycle
-72B            -> participant-facing language realization only
+dialogue model -> participant-facing language realization only
 ```
 
 The harness does not replace or re-run Router, TurnPolicy, ScaleRuntime,
 SessionEngine, STT, TTS, or RAG. It sends fixed synthetic Chinese prompts to
-the profile-built dialogue client and records descriptive output and timing.
+the configured dialogue client and records descriptive output and timing.
 
 ## Required run sequence
 
-Each arm must consume a matching **Phase 5 live-probe PASS artifact before any
-dialogue request**. The harness validates the summary's overall status,
-profile-owned dialogue model, hardware and server identity, Agent inference,
-stream acceptance, and the three leakage flags. A failed, mismatched, or
-missing summary stops the arm before the client is called.
+Each arm must consume a matching **live-probe PASS artifact before any
+dialogue request**. The harness validates the summary's overall status, the
+`runtime_config` it was produced from, the dialogue model, hardware and server
+identity, Agent inference, stream acceptance, and the three leakage flags. A
+failed, mismatched, or missing summary stops the arm before the client is
+called.
 
 The real deployment sequence is:
 
 ```text
-baseline launcher
-    -> Phase 5 PASS
-    -> baseline A/B arm
-    -> switch model externally
-    -> candidate launcher
-    -> Phase 5 PASS
-    -> candidate A/B arm
+start the first configuration's services
+    -> live probe PASS
+    -> first A/B arm
+    -> switch the model externally
+    -> start the second configuration's services
+    -> live probe PASS
+    -> second A/B arm
     -> compare
     -> blind review A/B
     -> unblind
     -> human decision
 ```
 
-Only these profiles are accepted:
+An arm is identified by its runtime configuration file, so the two arms are
+simply two YAML files. They must differ in both file identity and served
+dialogue model; the harness does not name a baseline or a candidate.
 
-| Role | Profile | Dialogue model |
-| --- | --- | --- |
-| Baseline | `rtxpro6000_96g` | `Qwen/Qwen2.5-72B-Instruct-AWQ` |
-| Candidate | `rtxpro6000_96g_qwen38_candidate` | `Qwen/Qwen3.8-27B-FP8` |
-
-The candidate remains explicit opt-in. Run the profiles separately against
-the same already-running workstation stack; the harness never starts, stops,
-restarts, or reconfigures vLLM services.
+Run each configuration separately against the same already-running
+workstation stack; the harness never starts, stops, restarts, or reconfigures
+inference services.
 
 ```powershell
 .venv\Scripts\python.exe scripts\acceptance\qwen_dialogue_ab.py run `
-  --profile rtxpro6000_96g `
-  --live-probe-summary test_output\blackwell_acceptance\<baseline>\acceptance_summary.json
+  --config config\runtime.yaml `
+  --live-probe-summary test_output\live_acceptance\<first>\acceptance_summary.json
 
-# Switch the already-running stack deliberately, then run the candidate.
+# Switch the already-running stack deliberately, then run the second arm.
 .venv\Scripts\python.exe scripts\acceptance\qwen_dialogue_ab.py run `
-  --profile rtxpro6000_96g_qwen38_candidate `
-  --live-probe-summary test_output\blackwell_acceptance\<candidate>\acceptance_summary.json
+  --config config\runtime_candidate.yaml `
+  --live-probe-summary test_output\live_acceptance\<second>\acceptance_summary.json
 ```
+
+`--config` defaults to `VOICECHAT_RUNTIME_CONFIG`, then to
+`config/runtime.yaml`.
 
 ## Matrix and repeatability
 
@@ -91,7 +93,9 @@ same repetition.
 
 ## Comparability and performance
 
-The comparison fails closed unless both arms are `PASS` and have matching:
+The comparison fails closed unless the two arms ran different runtime
+configurations serving different dialogue models, both are `PASS`, and they
+have matching:
 
 - scenario matrix hash;
 - system prompt hash;
@@ -136,11 +140,11 @@ human; no automatic score or LLM judge is introduced.
 
 Run artifacts are written only under the ignored
 `test_output/qwen_dialogue_ab/` directory. Each run stores a reference and
-SHA-256 for the consumed Phase 5 `acceptance_summary.json`, its probe commit,
-profile, and dialogue model. A successful arm records
-`hardware_validation: PHASE5_PASS_REFERENCED`; the paired A/B run itself is
-still `real_ab_run_status: NOT RUN` until an operator runs it on the target
-workstation.
+SHA-256 for the consumed live-probe `acceptance_summary.json`, its probe
+commit, the runtime configuration it ran, and the dialogue model. A successful
+arm records `hardware_validation: PHASE5_PASS_REFERENCED`; the paired A/B run
+itself is still `real_ab_run_status: NOT RUN` until an operator runs it on the
+target workstation.
 
 The harness uses fixed synthetic prompts only. It does not load participant
 history, DataManager records, reports, audio, or clinical scores. It does not

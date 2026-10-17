@@ -35,7 +35,8 @@ REQUIRED_DOCUMENTS = (
     "docs/deployment/pre_hardware_freeze.md",
     "docs/deployment/pre_hardware_readiness_audit.md",
     "docs/deployment/measurement_observability_contract.md",
-    "docs/deployment/windows_wsl2_blackwell_launcher.md",
+    "docs/deployment/engine_services.md",
+    "docs/deployment/runtime_config.md",
     "docs/deployment/blackwell_live_probe.md",
     "docs/deployment/qwen_dialogue_ab_harness.md",
 )
@@ -50,8 +51,12 @@ REQUIRED_TOOLS = (
     "scripts/acceptance/offline_integration.py",
     "scripts/acceptance/blackwell_live_probe.py",
     "scripts/acceptance/qwen_dialogue_ab.py",
-    "scripts/windows/start_blackwell_stack.ps1",
-    "scripts/windows/stop_blackwell_stack.ps1",
+    "scripts/engines/llama_cpp/start_service.sh",
+    "scripts/engines/llama_cpp/stop_service.sh",
+    "scripts/engines/llama_cpp/status_service.sh",
+    "scripts/engines/vllm/start_service.sh",
+    "scripts/engines/vllm/stop_service.sh",
+    "scripts/engines/vllm/status_service.sh",
 )
 
 REQUIRED_ENVIRONMENT_TEMPLATES = (".env.example",)

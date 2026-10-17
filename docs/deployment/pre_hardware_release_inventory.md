@@ -26,8 +26,14 @@ acceptance. It is not a hardware result.
 
 ## Entrypoints and documents
 
-- Windows start/verify: `scripts/windows/start_blackwell_stack.ps1`
-- Windows stop: `scripts/windows/stop_blackwell_stack.ps1`
+> Historical record of the frozen package. The Windows `start_blackwell_stack.ps1`
+> / `stop_blackwell_stack.ps1` launchers listed below have since been archived
+> under `archive/`; current entry points are `config/runtime.yaml` plus the
+> engine service scripts (`scripts/engines/llama_cpp/`, `scripts/engines/vllm/`).
+> See `engine_services.md` and `runtime_config.md`.
+
+- Windows start/verify: `scripts/windows/start_blackwell_stack.ps1` (archived)
+- Windows stop: `scripts/windows/stop_blackwell_stack.ps1` (archived)
 - Deployment doctor: `scripts/deployment/doctor.py`
 - Manifest generator: `scripts/deployment/manifest.py`
 - Offline gate: `scripts/acceptance/offline_integration.py`

@@ -310,24 +310,28 @@ ollama serve
 
 #### 🖥️ A100 80GB 生产部署：vLLM 双服务
 
-当前 A100 生产 profile 仍是两个 vLLM 服务：72B 对话模型位于 127.0.0.1:8000，3B Router 位于 127.0.0.1:8001。Phase 1 未修改模型、端口或启动预算；危机/Guard 链路已暂时从生产运行时拆除，相关源代码仅保留在 safety/ 供后续重新设计。
+启动方式与显卡型号无关：模型、端点、执行参数全部写在 `config/runtime.yaml`，推理引擎脚本只负责按参数起停服务。
 
-在 A100 主机安装 vLLM，并确保 `vllm` 命令可用后，运行：
+在 A100 主机安装 vLLM，并确保 `vllm` 命令可用后，在 WSL 内按服务逐个启动：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_a100_vllm_stack.ps1
+```bash
+scripts/engines/vllm/start_service.sh --service-name dialogue \
+  --model Qwen/Qwen2.5-72B-Instruct-AWQ --port 8000 \
+  --gpu-memory-utilization 0.82 --max-model-len 32768
+
+scripts/engines/vllm/start_service.sh --service-name agent \
+  --model Qwen/Qwen2.5-3B-Instruct-AWQ --port 8001 \
+  --gpu-memory-utilization 0.08 --max-model-len 16384
 ```
 
-该脚本会：
+`scripts/engines/vllm/status_service.sh --service-name dialogue` 查看状态，
+`scripts/engines/vllm/stop_service.sh --service-name dialogue` 停止。脚本只认自己写下的
+pid 与模型/端口元数据，遇到无法证明归属的进程会拒绝接管。两个 `/v1/models` 就绪后，
+用 `python scripts/deployment/doctor.py` 核对配置与真实模型身份，再启动桌面程序。
 
-1. 设置 `VOICECHAT_DEPLOYMENT_PROFILE=a100_80g`；
-2. 仅在 `127.0.0.1` 启动 `8000` 的 `Qwen/Qwen2.5-72B-Instruct-AWQ`；
-3. 仅在 `127.0.0.1` 启动 `8001` 的 `Qwen/Qwen2.5-3B-Instruct-AWQ`；
-4. 使用 `0.82 + 0.08 = 0.90` 的显存上限，并在两个 `/v1/models` 端点就绪后启动桌面程序。
+不要把推理端口直接暴露到局域网；若需要远程桌面或远程服务，请在受控网络中通过具备认证和 TLS 的反向代理访问。
 
-不要把 vLLM 端口直接暴露到局域网；若需要远程桌面或远程服务，请在受控网络中通过具备认证和 TLS 的反向代理访问。
-
-`run_local.ps1` 和 `start_voicechat.ps1` 仍只服务于 6GB 开发机的 Ollama 调试，不是 A100 生产入口。
+`run_local.ps1` 和 `start_voicechat.ps1` 仍只服务于 6GB 开发机的 Ollama 调试，不是生产入口。
 
 ---
 
@@ -835,22 +839,29 @@ Default: listens on `http://localhost:11434`.
 
 #### 🖥️ A100 80GB production deployment: two vLLM services (legacy)
 
-> Current RTX PRO 6000 Blackwell deployment work is documented in
-> `docs/deployment/rtxpro6000_operator_runbook.md`. The A100 launcher and the
-> provisional budget below are legacy compatibility material; do not use them
-> as the current Blackwell acceptance procedure.
+> Current deployment entry points are `config/runtime.yaml` plus the engine
+> service scripts; see `docs/deployment/engine_services.md`. The A100 numbers
+> below are one historical worked example, not a required budget.
 
-The current A100 production profile remains two vLLM services: the 72B dialogue model at 127.0.0.1:8000 and the 3B Router at 127.0.0.1:8001. Phase 1 does not change the models, ports, or launch budget; the crisis/Guard path is temporarily detached from the production runtime, with the related source retained only under `safety/` for future redesign.
+Launch parameters are independent of the GPU model: models, endpoints, and
+runtime options live in `config/runtime.yaml`, and the engine scripts only
+start and stop services from explicit arguments.
 
-After installing vLLM on the A100 host and making the `vllm` command available, run:
+After installing vLLM on the A100 host and making the `vllm` command available, start each service inside WSL:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_a100_vllm_stack.ps1
+```bash
+scripts/engines/vllm/start_service.sh --service-name dialogue \
+  --model Qwen/Qwen2.5-72B-Instruct-AWQ --port 8000 \
+  --gpu-memory-utilization 0.82 --max-model-len 32768
+
+scripts/engines/vllm/start_service.sh --service-name agent \
+  --model Qwen/Qwen2.5-3B-Instruct-AWQ --port 8001 \
+  --gpu-memory-utilization 0.08 --max-model-len 16384
 ```
 
-The launcher sets `VOICECHAT_DEPLOYMENT_PROFILE=a100_80g`, starts loopback-only endpoints for the 72B dialogue model on `8000` and the 3B Agent on `8001`, budgets GPU memory at `0.82 + 0.08 = 0.90`, verifies both `/v1/models` endpoints, then opens the desktop application.
+Use `status_service.sh --service-name <name>` and `stop_service.sh --service-name <name>` for the same slot. The scripts only act on processes they can prove they own through their pid and model/port metadata, and refuse to adopt or replace anything else. Once both `/v1/models` endpoints answer, run `python scripts/deployment/doctor.py` to verify the configuration against the real model identity, then start the desktop application.
 
-Do not expose vLLM ports directly to a LAN. Remote access requires a controlled network with an authenticated TLS reverse proxy. `run_local.ps1` and `start_voicechat.ps1` remain Ollama-only development entry points for the 6GB machine.
+Do not expose inference ports directly to a LAN. Remote access requires a controlled network with an authenticated TLS reverse proxy. `run_local.ps1` and `start_voicechat.ps1` remain Ollama-only development entry points for the 6GB machine.
 
 ---
 

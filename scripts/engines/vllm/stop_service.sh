@@ -24,7 +24,7 @@ done
 }
 
 # shellcheck source=/dev/null
-source "$(dirname "$0")/vllm_service_identity.sh"
+source "$(dirname "$0")/service_identity.sh"
 # The helper resolves the owned $runtime_dir/$service_name.pid and matching
 # metadata file before any signal is permitted.
 set_service_context "$service_name"
