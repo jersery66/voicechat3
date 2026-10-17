@@ -67,7 +67,7 @@ def build_gate_summary(*, returncode: int, git_commit: str | None = None) -> dic
         "real_stt": "NOT RUN",
         "real_tts": "NOT RUN",
         "real_e2e": "NOT RUN",
-        "real_vllm": "NOT RUN",
+        "real_inference_engine": "NOT RUN",
         "real_blackwell": "NOT RUN",
         "checks": {target: status for target in OFFLINE_TEST_TARGETS},
         "promotion": "NOT APPROVED",

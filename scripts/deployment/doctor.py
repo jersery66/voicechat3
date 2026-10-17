@@ -394,6 +394,7 @@ def check_wsl() -> dict[str, Any]:
         python_result = _wsl_command(["--", "python", "--version"])
         torch_result = _wsl_command(["--", "python", "-c", "import torch; print(torch.__version__); print(torch.cuda.is_available())"])
         vllm_result = _wsl_command(["--", "vllm", "--version"])
+        llama_cpp_result = _wsl_command(["--", "llama-server", "--version"])
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
         return _check("wsl", "NOT AVAILABLE", f"WSL observation failed: {exc}")
     linux_ok = uname.returncode == 0 and uname.stdout.strip().lower() == "linux"
@@ -406,6 +407,7 @@ def check_wsl() -> dict[str, Any]:
         "python": _normalise_output(python_result),
         "torch": _normalise_output(torch_result),
         "vllm": _normalise_output(vllm_result),
+        "llama_cpp": _normalise_output(llama_cpp_result),
     }
     if not linux_ok or not gpu_ok:
         return _check("wsl", "NOT AVAILABLE", "WSL is present but Linux/GPU visibility is unavailable", **command_checks)
@@ -489,9 +491,19 @@ def run_doctor(
     wsl_data = wsl.get("data", {})
     torch_output = str(wsl_data.get("torch", ""))
     vllm_output = str(wsl_data.get("vllm", ""))
+    llama_cpp_output = str(wsl_data.get("llama_cpp", ""))
     cuda_status = "PASS" if wsl["status"] == "PASS" and "true" in torch_output.lower() else "NOT AVAILABLE"
     torch_status = "PASS" if wsl["status"] == "PASS" and torch_output.strip() else "NOT AVAILABLE"
-    vllm_status = "PASS" if wsl["status"] == "PASS" and vllm_output.strip() else "NOT AVAILABLE"
+    # Any supported engine counts: the deployment shape comes from the runtime
+    # configuration, not from this probe.
+    detected_engines = [
+        name for name, output in (("vLLM", vllm_output), ("llama.cpp", llama_cpp_output)) if output.strip()
+    ]
+    if wsl["status"] == "PASS" and detected_engines:
+        engine_status = "PASS"
+    else:
+        engine_status = "NOT AVAILABLE"
+    engine_detail = ", ".join(detected_engines) if detected_engines else "none detected"
     dependency_checks = dependencies.get("data", {}).get("checks", {})
     summary = {
         "schema_version": 1,
@@ -505,7 +517,8 @@ def run_doctor(
         "python_status": python_check["status"],
         "torch_status": torch_status,
         "cuda_status": cuda_status,
-        "vllm_status": vllm_status,
+        "inference_engine_status": engine_status,
+        "inference_engine": engine_detail,
         "dialogue_endpoint_status": endpoints.get("data", {}).get("dialogue", {}).get("status", "NOT RUN"),
         "agent_endpoint_status": endpoints.get("data", {}).get("agent", {}).get("status", "NOT RUN"),
         "stt_dependency_status": dependencies.get("data", {}).get("checks", {}).get("stt_dependency_status", {}).get("status", "NOT RUN"),

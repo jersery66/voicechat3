@@ -25,7 +25,7 @@ def test_final_gate_pass_is_offline_only_and_hardware_not_run():
     assert summary["offline_evidence"] == "SIMULATED / CONTRACT"
     assert summary["hardware_validation"] == "NOT RUN"
     assert summary["real_gpu"] == "NOT RUN"
-    assert summary["real_vllm"] == "NOT RUN"
+    assert summary["real_inference_engine"] == "NOT RUN"
     assert summary["real_phase5"] == "NOT RUN"
     assert summary["real_ab"] == "NOT RUN"
     assert summary["real_stt"] == "NOT RUN"

@@ -167,7 +167,7 @@ def build_final_summary(
         "hardware_validation": "NOT RUN",
         "real_gpu": "NOT RUN",
         "real_cuda": "NOT RUN",
-        "real_vllm": "NOT RUN",
+        "real_inference_engine": "NOT RUN",
         "real_phase5": "NOT RUN",
         "real_ab": "NOT RUN",
         "real_stt": "NOT RUN",

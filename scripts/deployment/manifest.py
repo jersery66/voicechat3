@@ -135,7 +135,7 @@ ACCEPTANCE_STATES = {
     "windows_gpu_identity": "NOT RUN",
     "wsl_gpu_visibility": "NOT RUN",
     "cuda": "NOT RUN",
-    "vllm": "NOT RUN",
+    "inference_engine": "NOT RUN",
     "agent_identity": "NOT RUN",
     "dialogue_identity": "NOT RUN",
     "phase5": "NOT RUN",
