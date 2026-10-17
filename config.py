@@ -6,8 +6,11 @@ import fnmatch as _fnmatch
 # Application root (this file's directory)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Parent directory (for sibling model folders)
-PROGRAM_ROOT = os.path.dirname(os.path.dirname(APP_ROOT))
+# Parent directory (for sibling model folders).
+# The bundle layout is <bundle>/app plus <bundle>/models, so the parent of the
+# application directory is the bundle; a plain checkout is treated the same way
+# (e.g. <root>/voicechat3 plus <root>/models).
+PROGRAM_ROOT = os.path.dirname(APP_ROOT)
 
 # _BASE_DIR alias for backward compatibility
 _BASE_DIR = PROGRAM_ROOT

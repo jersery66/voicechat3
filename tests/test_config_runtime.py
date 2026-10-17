@@ -130,3 +130,19 @@ def test_runtime_relative_model_path_resolves_against_models_root(monkeypatch, t
 
     assert "funasr" in config.FUNASR_MODEL_PATH
     assert "nano" in config.FUNASR_MODEL_PATH
+
+
+def test_models_root_sits_beside_the_application_directory(monkeypatch, tmp_path):
+    """The bundle layout is <bundle>/app plus <bundle>/models.
+
+    A plain checkout must be treated the same way, so the default models root
+    is the parent of the application directory, not its grandparent. Reading
+    the grandparent silently missed every model and disabled STT.
+    """
+    import os
+
+    monkeypatch.delenv("VOICECHAT_MODELS_DIR", raising=False)
+    config = _load_config_with(monkeypatch, tmp_path, MINIMAL_YAML)
+
+    assert config.PROGRAM_ROOT == os.path.dirname(config.APP_ROOT)
+    assert config.OFFLINE_MODELS_ROOT == os.path.join(config.PROGRAM_ROOT, "models")
