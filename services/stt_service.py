@@ -1,6 +1,7 @@
 # STT Service - FunASR Integration
 
 import os
+import re
 import sys
 import gc
 from dataclasses import dataclass, field
@@ -57,6 +58,61 @@ logger = get_logger(__name__)
 
 
 _RECORDING_SENTINEL = object()
+
+
+# Device names that capture the sound card's own output rather than a room
+# microphone.  They must never win over a real capture endpoint: on a Windows
+# machine whose default input device is unset, "立体声混音" (Stereo Mix) is
+# often the only device carrying the audio vendor's name, so a plain keyword
+# scan records the speakers instead of the participant.
+_LOOPBACK_DEVICE_MARKERS = (
+    "stereo mix", "立体声混音", "what u hear", "loopback", "wave out mix",
+    "cable output", "virtual", "线路输入", "line input",
+)
+_MICROPHONE_PATTERN = re.compile(
+    r"(microphone|\bmic\b|麦克风|话筒|headset|\barray\b)", re.IGNORECASE
+)
+_VENDOR_MARKERS = ("realtek", "nvidia", "amd", "intel", "usb audio")
+
+
+def select_input_device(devices, *, default_index=None):
+    """Return ``(index, reason)`` for the most plausible microphone.
+
+    Order: a real microphone name, then a vendor capture endpoint, then the
+    system default, then any remaining capture endpoint.  Loopback devices are
+    only used when nothing else exists, because they record playback rather
+    than the participant's voice.
+    """
+    inputs = [
+        (index, device)
+        for index, device in enumerate(devices)
+        if device.get("max_input_channels", 0) > 0
+    ]
+
+    def name_of(device):
+        return str(device.get("name", "")).lower()
+
+    def is_loopback(name):
+        return any(marker in name for marker in _LOOPBACK_DEVICE_MARKERS)
+
+    capture = [(index, device) for index, device in inputs if not is_loopback(name_of(device))]
+    loopback = [(index, device) for index, device in inputs if is_loopback(name_of(device))]
+
+    for index, device in capture:
+        if _MICROPHONE_PATTERN.search(name_of(device)):
+            return index, f"microphone: {device.get('name')}"
+    for index, device in capture:
+        if any(marker in name_of(device) for marker in _VENDOR_MARKERS):
+            return index, f"vendor capture: {device.get('name')}"
+
+    if default_index is not None and default_index >= 0:
+        return default_index, f"system default input (index {default_index})"
+
+    for index, device in capture:
+        return index, f"first capture input: {device.get('name')}"
+    for index, device in loopback:
+        return index, f"loopback input: {device.get('name')}"
+    return None, "no input device"
 
 
 class RecordingStartError(RuntimeError):
@@ -316,53 +372,18 @@ class STTService:
         
         try:
             device_id = None
-            # Find the best input device
+            # Find the best input device without ever preferring a loopback
+            # endpoint that records playback instead of the participant.
             devices = sd.query_devices()
-            best_device_id = None
+            try:
+                default_index = sd.query_devices(kind="input")["index"]
+            except Exception:
+                default_index = None
 
-            # Default: prefer real microphone
-            mic_keywords = ["mic", "microphone", "麦克风", "array", "realtek"]
-            virtual_keywords = ["cable", "virtual", "stereo mix"]
-
-            # Priority 1: Real microphone
-            for i, dev in enumerate(devices):
-                if dev['max_input_channels'] > 0:
-                    name = dev['name'].lower()
-                    if any(k in name for k in mic_keywords):
-                        best_device_id = i
-                        logger.info(f"[ASRDebug] Selected microphone: {dev['name']} (Index {i})")
-                        break
-
-            # Priority 2: Virtual/cable (only if no mic found)
-            if best_device_id is None:
-                for i, dev in enumerate(devices):
-                    if dev['max_input_channels'] > 0:
-                        name = dev['name'].lower()
-                        if any(k in name for k in virtual_keywords):
-                            best_device_id = i
-                            logger.info(f"[ASRDebug] Selected virtual input: {dev['name']} (Index {i})")
-                            break
-
-            # Priority 3: Default input device
-            if best_device_id is None:
-                try:
-                    default_device = sd.query_devices(kind='input')
-                    best_device_id = default_device['index']
-                    logger.info(f"[ASRDebug] Using default input: {default_device['name']}")
-                except Exception:
-                    pass
-
-            # Priority 4: ANY input device
-            if best_device_id is None:
-                for i, dev in enumerate(devices):
-                    if dev['max_input_channels'] > 0:
-                        best_device_id = i
-                        logger.info(f"[ASRDebug] Fallback device: {dev.get('name')} (Index {i})")
-                        break
-            
+            best_device_id, reason = select_input_device(devices, default_index=default_index)
             if best_device_id is None:
                 raise RuntimeError("No microphone found! Please check your audio settings.")
-            
+            logger.info(f"[ASRDebug] Selected input device: {reason} (Index {best_device_id})")
             device_id = best_device_id
 
             # Keep a newly constructed stream local until the complete startup
