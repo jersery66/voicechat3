@@ -2,7 +2,8 @@
 
 This historical development helper exercises the old Ollama + ``|||``
 response path only. It is not a production acceptance tool and must not be
-used to validate vLLM, Blackwell profiles, Qwen3.8, or the current
+used to validate the deployment described by ``config/runtime.yaml``,
+Qwen3.8, or the current
 ``RouterProposal -> TurnPolicy -> TurnDecision`` authority chain.
 
 Usage (development diagnostics only): ``python scripts/test_conversation.py``
