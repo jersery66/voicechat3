@@ -1,9 +1,12 @@
-"""Profile-owned Qwen dialogue comparison harness.
+"""Configuration-driven Qwen dialogue comparison harness.
 
 This acceptance-only tool runs a fixed synthetic scenario matrix against one
-already-running dialogue profile at a time, then structurally compares two
-saved runs.  It never starts or stops services, loads participant data, or
-decides whether a model should be promoted.
+already-running deployment described by a runtime configuration, then
+structurally compares two saved runs.  The two compared runs come from two
+different runtime configuration files (for example a baseline and a candidate
+model), never from a hardware profile name.  It never starts or stops
+services, loads participant data, or decides whether a model should be
+promoted.
 """
 
 from __future__ import annotations
@@ -25,21 +28,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from deployment.profiles import DeploymentProfile, RuntimeModels, get_deployment_profile, resolve_runtime_models
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    RuntimeConfig,
+)
 from inference.factory import build_dialogue_client
 
 try:
     from . import probe_support as support
-except ImportError:  # Direct ``python scripts/acceptance/qwen_dialogue_ab.py`` execution.
+except ImportError:  # Direct execution as a script instead of a package module.
     import probe_support as support
 
 
-SUPPORTED_PROFILES = {
-    "rtxpro6000_96g",
-    "rtxpro6000_96g_qwen38_candidate",
-}
-BASELINE_PROFILE = "rtxpro6000_96g"
-CANDIDATE_PROFILE = "rtxpro6000_96g_qwen38_candidate"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "test_output" / "qwen_dialogue_ab"
 REPEAT_COUNT = 3
 REPEATABILITY_SCENARIO_IDS = (
@@ -247,24 +247,32 @@ def scenario_matrix_hash() -> str:
     return prompt_hash(({"content": json.dumps(matrix, ensure_ascii=False, sort_keys=True)},))
 
 
-def validate_ab_profile(name: str) -> tuple[DeploymentProfile, RuntimeModels]:
-    if name not in SUPPORTED_PROFILES:
-        raise ABError(f"unsupported A/B profile: {name!r}")
-    profile = get_deployment_profile(name)
-    models = resolve_runtime_models(profile, environment={})
-    if profile.runtime_backend != "vllm":
-        raise ABError("A/B harness requires a vLLM profile")
-    if profile.expected_gpu_memory_gb != 96:
-        raise ABError("A/B harness requires the RTX PRO 6000 96GB profiles")
-    if not profile.immutable_runtime_contract or not profile.strict_preflight:
-        raise ABError("A/B profile must be immutable and strict")
-    return profile, models
+def load_ab_config(config_path: str | Path | None) -> RuntimeConfig:
+    """Load the runtime configuration one A/B arm runs against.
+
+    The configuration is the single source of truth for the deployment: it
+    must be an explicit, immutable, strict, loopback-only deployment so the
+    comparison stays reproducible.
+    """
+    try:
+        config = support.validate_runtime_deployment(str(config_path) if config_path else None)
+    except support.ProbeError as exc:
+        raise ABError(f"runtime configuration is not a valid A/B deployment: {exc}") from exc
+    if config.dialogue.provider != PROVIDER_OPENAI_COMPATIBLE:
+        raise ABError("A/B harness requires an OpenAI-compatible dialogue provider")
+    if not config.runtime.immutable_contract or not config.runtime.strict_preflight:
+        raise ABError("A/B runtime configuration must be immutable and strict")
+    return config
+
+
+def _config_label(config_path: str | Path | None) -> str:
+    return Path(config_path).name if config_path else "runtime.yaml"
 
 
 def _validate_live_probe_summary(
     path_value: str | Path | None,
     *,
-    profile_name: str,
+    runtime_config: str,
     dialogue_model: str,
 ) -> dict[str, Any]:
     if path_value is None:
@@ -278,9 +286,13 @@ def _validate_live_probe_summary(
         raise ABError(f"could not read live probe summary {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ABError("live probe summary must be a JSON object")
-    checks = {"overall_status": "PASS", "profile": profile_name, "dialogue_model": dialogue_model}
+    checks = {"overall_status": "PASS", "runtime_config": runtime_config, "dialogue_model": dialogue_model}
     checks.update({field: "PASS" for field in LIVE_PROBE_STATUS_FIELDS})
     for field, expected in checks.items():
+        if field in ("agent_identity_status", "agent_inference_status"):
+            if payload.get(field) not in ("PASS", "SKIPPED"):
+                raise ABError(f"live probe summary {field} is neither PASS nor SKIPPED")
+            continue
         if payload.get(field) != expected:
             raise ABError(f"live probe summary {field} is not {expected!r}")
     for field in ("thinking_leak", "reasoning_field_leak", "control_tag_leak"):
@@ -290,21 +302,21 @@ def _validate_live_probe_summary(
         "live_probe_summary_reference": str(path.resolve()),
         "live_probe_summary_sha256": _sha256_file(path),
         "live_probe_git_commit": payload.get("git_commit"),
-        "live_probe_profile": payload["profile"],
+        "live_probe_runtime_config": payload["runtime_config"],
         "live_probe_dialogue_model": payload["dialogue_model"],
     }
 
 
-def _new_run_directory(output_root: str | Path | None, profile_name: str) -> Path:
+def _new_run_directory(output_root: str | Path | None, config_label: str) -> Path:
     root = Path(output_root) if output_root is not None else DEFAULT_OUTPUT_ROOT
     if not root.is_absolute():
         root = PROJECT_ROOT / root
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    directory = root / f"{stamp}_{profile_name}"
+    directory = root / f"{stamp}_{config_label}"
     suffix = 1
     while directory.exists():
-        directory = root / f"{stamp}_{profile_name}_{suffix}"
+        directory = root / f"{stamp}_{config_label}_{suffix}"
         suffix += 1
     directory.mkdir()
     return directory
@@ -318,19 +330,19 @@ def _write_json(path: Path, payload: Any) -> None:
 def _generation_options(client: Any) -> dict[str, Any]:
     options = getattr(client, "_generation_options", None)
     if not callable(options):
-        raise ABError("profile-built dialogue client does not expose generation options")
+        raise ABError("config-built dialogue client does not expose generation options")
     return _json_safe(options())
 
 
-def _validate_thinking_contract(profile: DeploymentProfile, client: Any, options: Mapping[str, Any]) -> None:
+def _validate_thinking_contract(config: RuntimeConfig, client: Any, options: Mapping[str, Any]) -> None:
     extra_body = options.get("extra_body", {})
     template_kwargs = extra_body.get("chat_template_kwargs", {}) if isinstance(extra_body, Mapping) else {}
     configured = getattr(client, "dialogue_enable_thinking", None)
-    if profile.dialogue_enable_thinking is False:
+    if config.dialogue.enable_thinking is False:
         if configured is not False or template_kwargs.get("enable_thinking") is not False:
-            raise ABError("candidate profile is missing profile-owned enable_thinking=False")
+            raise ABError("runtime configuration is missing enable_thinking=False")
     elif "enable_thinking" in template_kwargs:
-        raise ABError("baseline profile unexpectedly sends enable_thinking")
+        raise ABError("runtime configuration unexpectedly sends enable_thinking")
 
 
 def _measure_nonstream(client: Any, messages: Sequence[Mapping[str, str]], *, max_tokens: int) -> dict[str, Any]:
@@ -389,12 +401,12 @@ def _leakage_failures(content: str, scenario_id: str, phase: str) -> list[str]:
     return failures
 
 
-def _summary_template(profile_name: str) -> dict[str, Any]:
+def _summary_template(config_label: str) -> dict[str, Any]:
     return {
         "schema_version": 2,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
-        "profile": profile_name,
+        "runtime_config": config_label,
         "dialogue_model": None,
         "dialogue_base_url": None,
         "dialogue_enable_thinking": None,
@@ -422,7 +434,7 @@ def _summary_template(profile_name: str) -> dict[str, Any]:
         "live_probe_summary_reference": None,
         "live_probe_summary_sha256": None,
         "live_probe_git_commit": None,
-        "live_probe_profile": None,
+        "live_probe_runtime_config": None,
         "live_probe_dialogue_model": None,
         "errors": [],
         "warnings": [
@@ -481,44 +493,45 @@ def _record_request_error(artifact: dict[str, Any], scenario_id: str, phase: str
         artifact["empty_responses_count"] += 1
 
 
-def run_profile(
-    profile_name: str,
+def run_config(
+    config_path: str | Path | None,
     *,
     output_root: str | Path | None = None,
     timeout_seconds: float = 120.0,
     max_tokens: int = 128,
     live_probe_summary: str | Path | None = None,
 ) -> int:
-    """Run the fixed matrix against one already-running profile."""
-    directory = _new_run_directory(output_root, profile_name)
-    artifact = _summary_template(profile_name)
+    """Run the fixed matrix against one already-running deployment."""
+    config_label = _config_label(config_path)
+    directory = _new_run_directory(output_root, config_label)
+    artifact = _summary_template(config_label)
     try:
-        profile, models = validate_ab_profile(profile_name)
+        config = load_ab_config(config_path)
         artifact.update(
             {
-                "dialogue_model": models.dialogue,
-                "dialogue_base_url": profile.dialogue_base_url,
-                "dialogue_enable_thinking": profile.dialogue_enable_thinking,
+                "dialogue_model": config.dialogue.model,
+                "dialogue_base_url": config.dialogue.base_url,
+                "dialogue_enable_thinking": config.dialogue.enable_thinking,
             }
         )
         # This validation intentionally precedes client construction and all
-        # dialogue calls.  Phase 5 is the hardware/inference authority.
+        # dialogue calls.  The live probe is the deployment authority.
         artifact.update(
             _validate_live_probe_summary(
                 live_probe_summary,
-                profile_name=profile_name,
-                dialogue_model=models.dialogue,
+                runtime_config=config_label,
+                dialogue_model=config.dialogue.model,
             )
         )
         artifact["live_probe_summary_path"] = artifact["live_probe_summary_reference"]
         artifact["hardware_validation"] = "PHASE5_PASS_REFERENCED"
         system_prompt = _system_prompt()
         artifact["system_prompt_hash"] = _text_hash(system_prompt)
-        client = build_dialogue_client(profile, models, timeout=float(timeout_seconds))
+        client = build_dialogue_client(config, timeout=float(timeout_seconds))
         if client is None:
-            raise ABError("profile factory returned no dialogue client")
+            raise ABError("runtime configuration factory returned no dialogue client")
         options = _generation_options(client)
-        _validate_thinking_contract(profile, client, options)
+        _validate_thinking_contract(config, client, options)
         artifact["generation_options"] = options
 
         try:
@@ -526,9 +539,9 @@ def run_profile(
         except Exception as exc:
             raise ABError(f"model identity query failed: {exc}") from exc
         artifact["server_model_ids"] = model_ids
-        if models.dialogue not in model_ids:
+        if config.dialogue.model not in model_ids:
             raise ABError(
-                f"dialogue model identity mismatch: expected {models.dialogue!r}, got {model_ids!r}"
+                f"dialogue model identity mismatch: expected {config.dialogue.model!r}, got {model_ids!r}"
             )
 
         for scenario in SCENARIOS:
@@ -682,7 +695,7 @@ def _write_blind_packets(
                 {
                     "blind_response_id": blind_id,
                     "packet": packet,
-                    "profile": run.get("profile"),
+                    "runtime_config": run.get("runtime_config"),
                     "model": run.get("dialogue_model"),
                     "scenario_id": scenario.scenario_id,
                     "repeat_index": 0,
@@ -715,10 +728,14 @@ def compare_runs(
     """Build a paired, review-only comparison without a promotion verdict."""
     baseline = _load_run(baseline_path)
     candidate = _load_run(candidate_path)
-    if baseline.get("profile") != BASELINE_PROFILE:
-        raise ABError(f"baseline artifact must use {BASELINE_PROFILE!r}")
-    if candidate.get("profile") != CANDIDATE_PROFILE:
-        raise ABError(f"candidate artifact must use {CANDIDATE_PROFILE!r}")
+    baseline_label = baseline.get("runtime_config")
+    candidate_label = candidate.get("runtime_config")
+    if not baseline_label or not candidate_label:
+        raise ABError("both A/B artifacts must record the runtime configuration they ran")
+    if baseline_label == candidate_label:
+        raise ABError("NOT_COMPARABLE: both arms used the same runtime configuration")
+    if baseline.get("dialogue_model") == candidate.get("dialogue_model"):
+        raise ABError("NOT_COMPARABLE: both arms served the same dialogue model")
     if baseline.get("status") != "PASS" or candidate.get("status") != "PASS":
         raise ABError("INCOMPLETE: both A/B arms must have status PASS")
     for field in ("hardware_validation",):
@@ -771,8 +788,8 @@ def compare_runs(
         "schema_version": 2,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
-        "baseline_profile": baseline["profile"],
-        "candidate_profile": candidate["profile"],
+        "baseline_runtime_config": baseline_label,
+        "candidate_runtime_config": candidate_label,
         "baseline_model": baseline.get("dialogue_model"),
         "candidate_model": candidate.get("dialogue_model"),
         "scenario_matrix_hash": baseline["scenario_matrix_hash"],
@@ -812,15 +829,16 @@ def compare_runs(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Profile-owned Qwen dialogue A/B harness")
+    parser = argparse.ArgumentParser(description="Configuration-driven Qwen dialogue A/B harness")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    run = subparsers.add_parser("run", help="run one profile against the fixed synthetic matrix")
-    run.add_argument("--profile", required=True, choices=sorted(SUPPORTED_PROFILES))
+    run = subparsers.add_parser("run", help="run one runtime configuration against the fixed synthetic matrix")
+    run.add_argument("--config", default=None,
+                     help="runtime configuration to run; otherwise use VOICECHAT_RUNTIME_CONFIG")
     run.add_argument("--live-probe-summary", required=True)
     run.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     run.add_argument("--timeout-seconds", type=float, default=120.0)
     run.add_argument("--max-tokens", type=int, default=128)
-    compare = subparsers.add_parser("compare", help="compare two previously saved profile runs")
+    compare = subparsers.add_parser("compare", help="compare two previously saved configuration runs")
     compare.add_argument("--baseline", required=True)
     compare.add_argument("--candidate", required=True)
     compare.add_argument("--output", required=True)
@@ -831,8 +849,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "run":
-            return run_profile(
-                args.profile,
+            return run_config(
+                args.config,
                 output_root=args.output_root,
                 timeout_seconds=args.timeout_seconds,
                 max_tokens=args.max_tokens,

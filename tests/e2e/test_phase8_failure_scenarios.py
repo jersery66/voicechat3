@@ -246,10 +246,7 @@ def test_phase8_legacy_model_tags_have_no_live_action_authority(harness):
 
 def test_phase8_deployment_provider_contracts_remain_unchanged():
     root = Path(__file__).resolve().parents[2]
-    config = (root / "deployment" / "profiles.py").read_text(encoding="utf-8")
-    launcher = (root / "scripts" / "start_a100_vllm_stack.ps1").read_text(encoding="utf-8")
+    runtime = (root / "config" / "runtime.yaml").read_text(encoding="utf-8")
 
-    assert "8000" in config
-    assert "8001" in config
-    assert "8000" in launcher
-    assert "8001" in launcher
+    assert "8000" in runtime
+    assert "8001" in runtime

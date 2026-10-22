@@ -18,7 +18,7 @@ done
 
 [[ -n "$service_name" ]] || { echo "--service-name is required" >&2; exit 2; }
 # shellcheck source=/dev/null
-source "$(dirname "$0")/vllm_service_identity.sh"
+source "$(dirname "$0")/service_identity.sh"
 set_service_context "$service_name"
 inspect_service_slot
 

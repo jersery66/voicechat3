@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from deployment.profiles import get_deployment_profile
+from deployment.runtime_config import get_runtime_config
 from scripts.acceptance import offline_integration
 
 FREEZE_TAG = "pre-hardware-freeze-20260817"
@@ -35,7 +35,8 @@ REQUIRED_DOCUMENTS = (
     "docs/deployment/pre_hardware_freeze.md",
     "docs/deployment/pre_hardware_readiness_audit.md",
     "docs/deployment/measurement_observability_contract.md",
-    "docs/deployment/windows_wsl2_blackwell_launcher.md",
+    "docs/deployment/engine_services.md",
+    "docs/deployment/runtime_config.md",
     "docs/deployment/blackwell_live_probe.md",
     "docs/deployment/qwen_dialogue_ab_harness.md",
 )
@@ -50,8 +51,12 @@ REQUIRED_TOOLS = (
     "scripts/acceptance/offline_integration.py",
     "scripts/acceptance/blackwell_live_probe.py",
     "scripts/acceptance/qwen_dialogue_ab.py",
-    "scripts/windows/start_blackwell_stack.ps1",
-    "scripts/windows/stop_blackwell_stack.ps1",
+    "scripts/engines/llama_cpp/start_service.sh",
+    "scripts/engines/llama_cpp/stop_service.sh",
+    "scripts/engines/llama_cpp/status_service.sh",
+    "scripts/engines/vllm/start_service.sh",
+    "scripts/engines/vllm/stop_service.sh",
+    "scripts/engines/vllm/status_service.sh",
 )
 
 REQUIRED_ENVIRONMENT_TEMPLATES = (".env.example",)
@@ -141,8 +146,7 @@ def build_final_summary(
     offline_ok = _offline_summary_valid(offline_summary, current_commit)
     passed = test_returncode == 0 and documentation_ok and offline_ok and freeze_tag_ok
     status = "PASS" if passed else "FAIL"
-    baseline_model = get_deployment_profile("rtxpro6000_96g").dialogue_model
-    candidate_model = get_deployment_profile("rtxpro6000_96g_qwen38_candidate").dialogue_model
+    config = get_runtime_config()
     return {
         "schema_version": 1,
         "artifact_type": "PRE_HARDWARE_FINAL_READINESS",
@@ -163,14 +167,14 @@ def build_final_summary(
         "hardware_validation": "NOT RUN",
         "real_gpu": "NOT RUN",
         "real_cuda": "NOT RUN",
-        "real_vllm": "NOT RUN",
+        "real_inference_engine": "NOT RUN",
         "real_phase5": "NOT RUN",
         "real_ab": "NOT RUN",
         "real_stt": "NOT RUN",
         "real_tts": "NOT RUN",
         "real_e2e": "NOT RUN",
-        "baseline_model": baseline_model,
-        "candidate_model": candidate_model,
+        "dialogue_model": config.dialogue.model,
+        "agent_model": config.agent.model,
         "candidate_promotion": "NOT APPROVED",
         "evidence_type": "SIMULATED / CONTRACT",
     }

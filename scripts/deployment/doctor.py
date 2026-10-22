@@ -5,6 +5,11 @@ local endpoints, and importable dependencies.  It never installs packages,
 starts or stops services, edits configuration, or kills processes.  Missing
 hardware or unavailable developer dependencies are reported explicitly as
 ``NOT AVAILABLE`` rather than being converted into a false PASS.
+
+The deployment under observation is described by one runtime configuration
+(``config/runtime.yaml`` by default, overridable with
+``VOICECHAT_RUNTIME_CONFIG``); the doctor never selects a model from the
+hardware it detects.
 """
 
 from __future__ import annotations
@@ -25,13 +30,20 @@ from urllib.request import Request, urlopen
 # Support both ``python -m scripts.deployment.doctor`` and the operator-facing
 # ``python scripts/deployment/doctor.py`` form.  The latter puts ``scripts/``
 # ahead of the project root on ``sys.path``; add only this repository root so
-# the profile package remains importable without changing the caller's
-# environment.
+# the runtime configuration module remains importable without changing the
+# caller's environment.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from deployment.profiles import DeploymentProfile, RuntimeModels, get_deployment_profile, resolve_runtime_models
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    PROVIDER_OLLAMA,
+    RUNTIME_CONFIG_ENV_VAR,
+    RuntimeConfig,
+    get_runtime_config,
+    load_runtime_config,
+)
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "test_output" / "deployment_readiness"
 ALLOWED_STATUSES = {"PASS", "FAIL", "NOT AVAILABLE", "NOT RUN", "SKIPPED"}
@@ -45,15 +57,18 @@ ENDPOINT_STATUSES = {
 REQUIRED_FILES = (
     "main.py",
     "config.py",
-    "deployment/profiles.py",
+    "config/runtime.yaml",
+    "deployment/runtime_config.py",
     "scripts/deployment/doctor.py",
     "scripts/check_config.py",
-    "scripts/windows/start_blackwell_stack.ps1",
-    "scripts/windows/stop_blackwell_stack.ps1",
-    "scripts/wsl/start_vllm_service.sh",
-    "scripts/wsl/stop_vllm_service.sh",
-    "scripts/wsl/status_vllm_service.sh",
-    "scripts/wsl/vllm_service_identity.sh",
+    "scripts/engines/llama_cpp/start_service.sh",
+    "scripts/engines/llama_cpp/stop_service.sh",
+    "scripts/engines/llama_cpp/status_service.sh",
+    "scripts/engines/llama_cpp/service_identity.sh",
+    "scripts/engines/vllm/start_service.sh",
+    "scripts/engines/vllm/stop_service.sh",
+    "scripts/engines/vllm/status_service.sh",
+    "scripts/engines/vllm/service_identity.sh",
     "scripts/acceptance/blackwell_live_probe.py",
     "scripts/acceptance/qwen_dialogue_ab.py",
     "scripts/deployment/manifest.py",
@@ -121,96 +136,95 @@ def _normalise_output(result: subprocess.CompletedProcess[str]) -> str:
     )
 
 
-def resolve_profile_name(profile_name: str | None = None) -> tuple[str, str]:
-    """Resolve the requested profile and expose whether it came from env/default."""
-    if profile_name:
-        return profile_name.strip().lower(), "argument"
-    configured = os.environ.get("VOICECHAT_DEPLOYMENT_PROFILE", "").strip().lower()
+def resolve_runtime_config_source(config_path: str | None = None) -> tuple[str, str]:
+    """Resolve the runtime configuration to inspect and where it came from."""
+    if config_path:
+        return config_path, "argument"
+    configured = os.environ.get(RUNTIME_CONFIG_ENV_VAR, "").strip()
     if configured:
-        return configured, "VOICECHAT_DEPLOYMENT_PROFILE"
-    return "dev_6g", "repository default"
+        return configured, RUNTIME_CONFIG_ENV_VAR
+    return str(get_runtime_config().source_path), "repository default"
 
 
-def _profile_contract(profile: DeploymentProfile) -> dict[str, Any]:
+def _runtime_contract(config: RuntimeConfig) -> dict[str, Any]:
+    dialogue = config.dialogue
+    agent = config.agent
     return {
-        "name": profile.name,
-        "runtime_backend": profile.runtime_backend,
-        "dialogue_model": profile.dialogue_model,
-        "dialogue_base_url": profile.dialogue_base_url,
-        "router_model": profile.router_model,
-        "agent_model": profile.agent_model,
-        "agent_base_url": profile.agent_base_url,
-        "enable_streaming_tts": profile.enable_streaming_tts,
-        "vllm_request_mode": profile.vllm_request_mode,
-        "vllm_system_role_mode": profile.vllm_system_role_mode,
-        "expected_gpu_memory_gb": profile.expected_gpu_memory_gb,
-        "strict_preflight": profile.strict_preflight,
-        "immutable_runtime_contract": profile.immutable_runtime_contract,
-        "dialogue_max_tokens": profile.dialogue_max_tokens,
-        "dialogue_temperature": profile.dialogue_temperature,
-        "dialogue_top_p": profile.dialogue_top_p,
-        "dialogue_top_k": profile.dialogue_top_k,
-        "dialogue_presence_penalty": profile.dialogue_presence_penalty,
-        "dialogue_enable_thinking": profile.dialogue_enable_thinking,
+        "source_path": str(config.source_path),
+        "dialogue_provider": dialogue.provider,
+        "dialogue_model": dialogue.model,
+        "dialogue_base_url": dialogue.base_url,
+        "agent_enabled": agent.enabled,
+        "agent_provider": agent.provider,
+        "agent_model": agent.model,
+        "agent_base_url": agent.base_url,
+        "asr_provider": config.asr.provider,
+        "tts_provider": config.tts.provider,
+        "enable_streaming_tts": config.runtime.enable_streaming_tts,
+        "request_mode": dialogue.request_mode,
+        "system_role_mode": dialogue.system_role_mode,
+        "strict_preflight": config.runtime.strict_preflight,
+        "immutable_contract": config.runtime.immutable_contract,
+        "dialogue_max_tokens": dialogue.max_tokens,
+        "dialogue_temperature": dialogue.temperature,
+        "dialogue_top_p": dialogue.top_p,
+        "dialogue_top_k": dialogue.top_k,
+        "dialogue_presence_penalty": dialogue.presence_penalty,
+        "dialogue_enable_thinking": dialogue.enable_thinking,
     }
 
 
-def validate_profile_contract(profile_name: str) -> dict[str, Any]:
-    """Validate one profile statically without probing or mutating services."""
-    try:
-        profile = get_deployment_profile(profile_name)
-    except (TypeError, ValueError) as exc:
-        return {"status": "FAIL", "detail": f"unknown deployment profile: {exc}", "errors": [str(exc)]}
-
+def validate_runtime_contract(config: RuntimeConfig) -> dict[str, Any]:
+    """Validate one runtime configuration statically without probing services."""
     errors: list[str] = []
-    if profile.runtime_backend not in {"ollama", "vllm"}:
-        errors.append(f"unsupported runtime_backend: {profile.runtime_backend!r}")
+    dialogue = config.dialogue
+    agent = config.agent
+    for label, provider in (("dialogue", dialogue.provider), ("agent", agent.provider)):
+        if provider not in {PROVIDER_OPENAI_COMPATIBLE, PROVIDER_OLLAMA}:
+            errors.append(f"unsupported {label} provider: {provider!r}")
     for label, value in (
-        ("dialogue_model", profile.dialogue_model),
-        ("router_model", profile.router_model),
-        ("agent_model", profile.agent_model),
-        ("dialogue_base_url", profile.dialogue_base_url),
-        ("agent_base_url", profile.agent_base_url),
+        ("dialogue_model", dialogue.model),
+        ("dialogue_base_url", dialogue.base_url),
+        ("agent_model", agent.model),
+        ("agent_base_url", agent.base_url),
     ):
         if not isinstance(value, str) or not value.strip():
             errors.append(f"{label} is empty")
-    if isinstance(profile.expected_gpu_memory_gb, bool) or not isinstance(profile.expected_gpu_memory_gb, int) or profile.expected_gpu_memory_gb <= 0:
-        errors.append("expected_gpu_memory_gb must be a positive integer")
-    if not isinstance(profile.enable_streaming_tts, bool):
+    if not isinstance(config.runtime.enable_streaming_tts, bool):
         errors.append("enable_streaming_tts must be boolean")
-    if not isinstance(profile.vllm_request_mode, str) or not profile.vllm_request_mode.strip():
-        errors.append("vllm_request_mode must be non-empty")
-    if not isinstance(profile.vllm_system_role_mode, str) or not profile.vllm_system_role_mode.strip():
-        errors.append("vllm_system_role_mode must be non-empty")
-    if not isinstance(profile.strict_preflight, bool):
+    if not isinstance(dialogue.request_mode, str) or not dialogue.request_mode.strip():
+        errors.append("request_mode must be non-empty")
+    if not isinstance(dialogue.system_role_mode, str) or not dialogue.system_role_mode.strip():
+        errors.append("system_role_mode must be non-empty")
+    if not isinstance(config.runtime.strict_preflight, bool):
         errors.append("strict_preflight must be boolean")
-    if not isinstance(profile.immutable_runtime_contract, bool):
-        errors.append("immutable_runtime_contract must be boolean")
-    if isinstance(profile.dialogue_max_tokens, bool) or not isinstance(profile.dialogue_max_tokens, int) or profile.dialogue_max_tokens <= 0:
+    if not isinstance(config.runtime.immutable_contract, bool):
+        errors.append("immutable_contract must be boolean")
+    if isinstance(dialogue.max_tokens, bool) or not isinstance(dialogue.max_tokens, int) or dialogue.max_tokens <= 0:
         errors.append("dialogue_max_tokens must be a positive integer")
     for label, value in (
-        ("dialogue_temperature", profile.dialogue_temperature),
-        ("dialogue_top_p", profile.dialogue_top_p),
+        ("dialogue_temperature", dialogue.temperature),
+        ("dialogue_top_p", dialogue.top_p),
     ):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             errors.append(f"{label} must be positive")
-    if profile.dialogue_top_p > 1:
+    if dialogue.top_p > 1:
         errors.append("dialogue_top_p must be <= 1")
-    if profile.dialogue_top_k is not None and (
-        isinstance(profile.dialogue_top_k, bool)
-        or not isinstance(profile.dialogue_top_k, int)
-        or profile.dialogue_top_k <= 0
+    if dialogue.top_k is not None and (
+        isinstance(dialogue.top_k, bool)
+        or not isinstance(dialogue.top_k, int)
+        or dialogue.top_k <= 0
     ):
         errors.append("dialogue_top_k must be a positive integer when configured")
-    if profile.dialogue_presence_penalty is not None and not isinstance(
-        profile.dialogue_presence_penalty, (int, float)
+    if dialogue.presence_penalty is not None and not isinstance(
+        dialogue.presence_penalty, (int, float)
     ):
         errors.append("dialogue_presence_penalty must be numeric when configured")
-    if isinstance(profile.dialogue_presence_penalty, bool):
+    if isinstance(dialogue.presence_penalty, bool):
         errors.append("dialogue_presence_penalty must be numeric when configured")
-    if profile.dialogue_enable_thinking is not None and not isinstance(profile.dialogue_enable_thinking, bool):
+    if dialogue.enable_thinking is not None and not isinstance(dialogue.enable_thinking, bool):
         errors.append("dialogue_enable_thinking must be boolean when configured")
-    for label, value in (("dialogue_base_url", profile.dialogue_base_url), ("agent_base_url", profile.agent_base_url)):
+    for label, value in (("dialogue_base_url", dialogue.base_url), ("agent_base_url", agent.base_url)):
         try:
             parsed = urlparse(value)
             port = parsed.port
@@ -223,9 +237,9 @@ def validate_profile_contract(profile_name: str) -> dict[str, Any]:
     status = "PASS" if not errors else "FAIL"
     return {
         "status": status,
-        "detail": "profile contract is internally consistent" if not errors else "; ".join(errors),
+        "detail": "runtime configuration is internally consistent" if not errors else "; ".join(errors),
         "errors": errors,
-        "contract": _profile_contract(profile),
+        "contract": _runtime_contract(config),
     }
 
 
@@ -253,16 +267,15 @@ def check_required_files() -> dict[str, Any]:
     return _check("required_files", "PASS", "deployment entrypoints and frozen acceptance tools exist")
 
 
-def check_environment(profile_name: str, source: str) -> dict[str, Any]:
+def check_environment(config_source: str, source: str) -> dict[str, Any]:
     observed = {
         name: bool(os.environ.get(name, "").strip())
         for name in (
-            "VOICECHAT_DEPLOYMENT_PROFILE",
+            RUNTIME_CONFIG_ENV_VAR,
             "NO_PROXY",
             "OLLAMA_MODEL",
             "AGENT_MODEL",
             "VOICECHAT_DIALOGUE_MODEL",
-            "VOICECHAT_VLLM_MODEL",
             "VOICECHAT_DIALOGUE_BASE_URL",
             "VOICECHAT_AGENT_BASE_URL",
         )
@@ -270,8 +283,8 @@ def check_environment(profile_name: str, source: str) -> dict[str, Any]:
     return _check(
         "environment",
         "PASS",
-        f"profile selected from {source}",
-        profile=profile_name,
+        f"runtime configuration selected from {source}",
+        runtime_config=config_source,
         project_root=str(PROJECT_ROOT),
         observed_variables=observed,
         no_secret_values_recorded=True,
@@ -289,7 +302,7 @@ def _tcp_connect(host: str, port: int, timeout: float) -> bool:
 def _fetch_model_ids(url: str, timeout: float) -> list[str]:
     endpoint = urljoin(url.rstrip("/") + "/", "models")
     request = Request(endpoint, headers={"Accept": "application/json"})
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - loopback/profile-owned endpoint only
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - loopback endpoint from the runtime configuration only
         payload = json.loads(response.read().decode("utf-8"))
     data = payload.get("data", []) if isinstance(payload, Mapping) else []
     return [str(item["id"]) for item in data if isinstance(item, Mapping) and item.get("id")]
@@ -321,20 +334,23 @@ def inspect_endpoint(base_url: str, expected_model: str, *, timeout: float = 1.0
     return {"status": status, "url": base_url, "port": port, "model_ids": model_ids, "detail": detail}
 
 
-def check_endpoints(profile: DeploymentProfile, models: RuntimeModels) -> dict[str, Any]:
-    dialogue = inspect_endpoint(profile.dialogue_base_url, models.dialogue)
-    agent = inspect_endpoint(profile.agent_base_url, models.router)
+def check_endpoints(config: RuntimeConfig) -> dict[str, Any]:
+    dialogue = inspect_endpoint(config.dialogue.base_url, config.dialogue.model)
+    if config.agent.enabled:
+        agent = inspect_endpoint(config.agent.base_url, config.agent.model)
+    else:
+        agent = {"status": "ENDPOINT HEALTHY", "url": config.agent.base_url, "model_ids": [], "detail": "agent disabled by runtime configuration"}
     endpoint_results = {"dialogue": dialogue, "agent": agent}
     statuses = {dialogue["status"], agent["status"]}
     if "ENDPOINT WRONG MODEL" in statuses:
         status = "FAIL"
-        detail = "one or more profile-owned endpoints expose the wrong model"
+        detail = "one or more configured endpoints expose the wrong model"
     elif statuses <= {"ENDPOINT HEALTHY"}:
         status = "PASS"
-        detail = "dialogue and Agent endpoints expose exact profile models"
+        detail = "dialogue and Agent endpoints expose exact configured models"
     else:
         status = "NOT AVAILABLE"
-        detail = "one or more profile-owned endpoints are not reachable"
+        detail = "one or more configured endpoints are not reachable"
     return _check("endpoints", status, detail, **endpoint_results)
 
 
@@ -378,6 +394,7 @@ def check_wsl() -> dict[str, Any]:
         python_result = _wsl_command(["--", "python", "--version"])
         torch_result = _wsl_command(["--", "python", "-c", "import torch; print(torch.__version__); print(torch.cuda.is_available())"])
         vllm_result = _wsl_command(["--", "vllm", "--version"])
+        llama_cpp_result = _wsl_command(["--", "llama-server", "--version"])
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
         return _check("wsl", "NOT AVAILABLE", f"WSL observation failed: {exc}")
     linux_ok = uname.returncode == 0 and uname.stdout.strip().lower() == "linux"
@@ -390,6 +407,7 @@ def check_wsl() -> dict[str, Any]:
         "python": _normalise_output(python_result),
         "torch": _normalise_output(torch_result),
         "vllm": _normalise_output(vllm_result),
+        "llama_cpp": _normalise_output(llama_cpp_result),
     }
     if not linux_ok or not gpu_ok:
         return _check("wsl", "NOT AVAILABLE", "WSL is present but Linux/GPU visibility is unavailable", **command_checks)
@@ -423,36 +441,45 @@ def _overall_status(checks: Sequence[Mapping[str, Any]]) -> str:
 
 def run_doctor(
     *,
-    profile_name: str | None = None,
+    config_path: str | None = None,
     output_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run all read-only observations and write the two readiness artifacts."""
-    selected_profile, source = resolve_profile_name(profile_name)
-    contract = validate_profile_contract(selected_profile)
+    config_source, source = resolve_runtime_config_source(config_path)
+    config: RuntimeConfig | None = None
+    load_error: str | None = None
+    try:
+        config = load_runtime_config(config_source) if config_path else get_runtime_config()
+    except (OSError, ValueError, TypeError) as exc:
+        load_error = str(exc)
+
+    contract = (
+        validate_runtime_contract(config)
+        if config is not None
+        else {"status": "FAIL", "detail": f"runtime configuration could not be loaded: {load_error}", "errors": [load_error or ""]}
+    )
     host = check_host()
     python_check = check_python()
     required = check_required_files()
-    environment = check_environment(selected_profile, source)
+    environment = check_environment(config_source, source)
     host_gpu = check_host_gpu()
     dependencies = check_dependencies()
     wsl = check_wsl()
-    profile = get_deployment_profile(selected_profile) if contract["status"] == "PASS" else None
-    models = resolve_runtime_models(profile, environment={}) if profile is not None else None
-    endpoints = check_endpoints(profile, models) if profile is not None and models is not None else _check(
-        "endpoints", "FAIL", "endpoint checks skipped because profile validation failed"
+    endpoints = check_endpoints(config) if config is not None and contract["status"] == "PASS" else _check(
+        "endpoints", "FAIL", "endpoint checks skipped because runtime configuration validation failed"
     )
     checks = [
         host,
         python_check,
         required,
         environment,
-        {"name": "profile", **{key: value for key, value in contract.items() if key != "contract"}},
+        {"name": "runtime_config", **{key: value for key, value in contract.items() if key != "contract"}},
         host_gpu,
         dependencies,
         wsl,
         endpoints,
     ]
-    profile_status = contract["status"]
+    contract_status = contract["status"]
     host_gpu_status = host_gpu["status"]
     wsl_gpu_status = "PASS" if wsl["status"] == "PASS" else wsl["status"]
     if host_gpu_status == "FAIL" or wsl_gpu_status == "FAIL":
@@ -464,23 +491,34 @@ def run_doctor(
     wsl_data = wsl.get("data", {})
     torch_output = str(wsl_data.get("torch", ""))
     vllm_output = str(wsl_data.get("vllm", ""))
+    llama_cpp_output = str(wsl_data.get("llama_cpp", ""))
     cuda_status = "PASS" if wsl["status"] == "PASS" and "true" in torch_output.lower() else "NOT AVAILABLE"
     torch_status = "PASS" if wsl["status"] == "PASS" and torch_output.strip() else "NOT AVAILABLE"
-    vllm_status = "PASS" if wsl["status"] == "PASS" and vllm_output.strip() else "NOT AVAILABLE"
+    # Any supported engine counts: the deployment shape comes from the runtime
+    # configuration, not from this probe.
+    detected_engines = [
+        name for name, output in (("vLLM", vllm_output), ("llama.cpp", llama_cpp_output)) if output.strip()
+    ]
+    if wsl["status"] == "PASS" and detected_engines:
+        engine_status = "PASS"
+    else:
+        engine_status = "NOT AVAILABLE"
+    engine_detail = ", ".join(detected_engines) if detected_engines else "none detected"
     dependency_checks = dependencies.get("data", {}).get("checks", {})
     summary = {
         "schema_version": 1,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
-        "profile": selected_profile,
-        "profile_source": source,
+        "runtime_config": config_source,
+        "runtime_config_source": source,
         "host_status": host["status"],
         "wsl_status": wsl["status"],
         "gpu_status": gpu_status,
         "python_status": python_check["status"],
         "torch_status": torch_status,
         "cuda_status": cuda_status,
-        "vllm_status": vllm_status,
+        "inference_engine_status": engine_status,
+        "inference_engine": engine_detail,
         "dialogue_endpoint_status": endpoints.get("data", {}).get("dialogue", {}).get("status", "NOT RUN"),
         "agent_endpoint_status": endpoints.get("data", {}).get("agent", {}).get("status", "NOT RUN"),
         "stt_dependency_status": dependencies.get("data", {}).get("checks", {}).get("stt_dependency_status", {}).get("status", "NOT RUN"),
@@ -489,7 +527,7 @@ def run_doctor(
         "ui_dependency_status": dependencies.get("data", {}).get("checks", {}).get("ui_dependency_status", {}).get("status", "NOT RUN"),
         "rag_dependency_status": dependency_checks.get("rag_dependency_status", {}).get("status", "NOT RUN"),
         "report_dependency_status": dependency_checks.get("report_dependency_status", {}).get("status", "NOT RUN"),
-        "profile_validation_status": profile_status,
+        "runtime_config_validation_status": contract_status,
         "overall_status": _overall_status(checks),
         "hardware_evidence": "NOT RUN",
         "evidence_type": "OBSERVED",
@@ -502,9 +540,9 @@ def run_doctor(
         "schema_version": 1,
         "timestamp": summary["timestamp"],
         "git_commit": summary["git_commit"],
-        "profile": selected_profile,
+        "runtime_config": config_source,
         "checks": checks,
-        "profile_contract": contract.get("contract"),
+        "runtime_config_contract": contract.get("contract"),
         "wsl_and_host_observations": {"host_gpu": host_gpu, "wsl": wsl},
         "endpoint_observations": endpoints.get("data", {}),
     }
@@ -521,10 +559,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Read-only voicechat deployment doctor")
-    parser.add_argument("--profile", default=None, help="profile to inspect; otherwise use VOICECHAT_DEPLOYMENT_PROFILE")
+    parser.add_argument("--config", default=None, help="runtime configuration to inspect; otherwise use VOICECHAT_RUNTIME_CONFIG")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     args = parser.parse_args(argv)
-    summary = run_doctor(profile_name=args.profile, output_root=args.output_root)
+    summary = run_doctor(config_path=args.config, output_root=args.output_root)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 1 if summary["overall_status"] == "FAIL" else 0
 

@@ -1,39 +1,43 @@
-"""Choose an inference adapter from the explicit deployment profile."""
+"""Build the inference client from the runtime configuration."""
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
-from deployment.profiles import DeploymentProfile, RuntimeModels
-from inference.vllm_client import VLLMOpenAIClient
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    RuntimeConfig,
+    get_runtime_config,
+)
+from inference.openai_client import OpenAICompatibleClient
 
 
-def build_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
-                          *, timeout: float = 120.0) -> Optional[VLLMOpenAIClient]:
-    """Build the external dialogue client when the profile selects vLLM.
+def build_dialogue_client(config: Optional[RuntimeConfig] = None, *,
+                          timeout: Optional[float] = None) -> Optional[OpenAICompatibleClient]:
+    """Build the dialogue client for the configured OpenAI-compatible provider.
 
-    Ollama remains behind the legacy ``LLMService`` during the compatibility
-    migration, so this factory returns ``None`` for an Ollama profile rather
-    than constructing a duplicate client with different history semantics.
+    Any engine that serves an OpenAI-compatible ``/v1`` endpoint works
+    (llama.cpp, vLLM, ...); the engine is a runtime-config choice, not a
+    code path. The Ollama provider stays behind the legacy ``LLMService``
+    during the compatibility migration, so this factory returns ``None``
+    for it rather than constructing a duplicate client with different
+    history semantics.
     """
-    if profile.runtime_backend != "vllm":
+    config = config if config is not None else get_runtime_config()
+    dialogue = config.dialogue
+    if dialogue.provider != PROVIDER_OPENAI_COMPATIBLE:
         return None
-    base_url = (
-        profile.dialogue_base_url
-        if profile.immutable_runtime_contract
-        else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
-    )
-    return VLLMOpenAIClient(
-        model=models.dialogue,
-        base_url=base_url,
-        timeout=timeout,
-        request_mode=profile.vllm_request_mode,
-        system_role_mode=profile.vllm_system_role_mode,
-        max_tokens=profile.dialogue_max_tokens,
-        dialogue_temperature=profile.dialogue_temperature,
-        dialogue_top_p=profile.dialogue_top_p,
-        dialogue_top_k=profile.dialogue_top_k,
-        dialogue_presence_penalty=profile.dialogue_presence_penalty,
-        dialogue_enable_thinking=profile.dialogue_enable_thinking,
+    return OpenAICompatibleClient(
+        model=dialogue.model,
+        base_url=dialogue.base_url,
+        api_key=dialogue.api_key,
+        timeout=dialogue.timeout if timeout is None else timeout,
+        request_mode=dialogue.request_mode,
+        system_role_mode=dialogue.system_role_mode,
+        max_tokens=dialogue.max_tokens,
+        dialogue_temperature=dialogue.temperature,
+        dialogue_top_p=dialogue.top_p,
+        dialogue_top_k=dialogue.top_k,
+        dialogue_presence_penalty=dialogue.presence_penalty,
+        dialogue_enable_thinking=dialogue.enable_thinking,
     )

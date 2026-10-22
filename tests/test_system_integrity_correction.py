@@ -10,7 +10,7 @@ from conversation.coordinator import ConversationCoordinator
 from conversation.contracts import RouterAction
 from data.data_manager import DataManager
 from data.treatment_progress import TreatmentProgress
-from deployment.profiles import get_deployment_profile
+from deployment.runtime_config import load_runtime_config
 from research.event_journal import EventJournal
 from research.runtime_manifest import build_runtime_manifest
 from research.turn_trace import TurnTraceRecorder
@@ -147,37 +147,63 @@ def test_new_session_writes_runtime_manifest_without_absolute_model_paths(tmp_pa
     assert "D:\\" not in json.dumps(manifest, ensure_ascii=False)
 
 
-def test_runtime_manifest_is_reproducible_and_contains_no_secrets():
+def _write_runtime_yaml(tmp_path, *, immutable: bool, system_prompt_override: str | None = None):
+    """Write a minimal runtime configuration and return its path."""
+    override_line = (
+        f"  system_prompt_override: {system_prompt_override}\n"
+        if system_prompt_override
+        else "  system_prompt_override: null\n"
+    )
+    path = tmp_path / "runtime.yaml"
+    path.write_text(
+        "dialogue:\n"
+        "  provider: openai_compatible\n"
+        "  base_url: http://127.0.0.1:18000/v1\n"
+        "  model: test-dialogue\n"
+        + override_line
+        + "agent:\n"
+        "  enabled: true\n"
+        "  provider: openai_compatible\n"
+        "  base_url: http://127.0.0.1:18001/v1\n"
+        "  model: test-agent\n"
+        "asr:\n"
+        "  provider: funasr\n"
+        "tts:\n"
+        "  provider: voxcpm\n"
+        "runtime:\n"
+        f"  immutable_contract: {'true' if immutable else 'false'}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_runtime_manifest_records_effective_configuration_without_secrets(tmp_path):
     manifest = build_runtime_manifest(
-        profile=get_deployment_profile("rtxpro6000_96g"),
+        load_runtime_config(_write_runtime_yaml(tmp_path, immutable=True)),
         git_sha="abc123",
         started_at="2026-01-01T00:00:00Z",
     )
     encoded = json.dumps(manifest, ensure_ascii=False)
+    assert manifest["schema_version"] == 2
     assert manifest["git_sha"] == "abc123"
-    assert manifest["dialogue_model"] == "Qwen/Qwen2.5-72B-Instruct-AWQ"
+    assert manifest["runtime_config"] == "runtime.yaml"
+    assert manifest["dialogue_provider"] == "openai_compatible"
+    assert manifest["dialogue_model"] == "test-dialogue"
+    assert manifest["dialogue_base_url"] == "http://127.0.0.1:18000/v1"
+    assert manifest["agent_enabled"] is True
+    assert manifest["agent_model"] == "test-agent"
+    assert manifest["agent_base_url"] == "http://127.0.0.1:18001/v1"
+    assert manifest["asr_provider"] == "funasr"
+    assert manifest["tts_provider"] == "voxcpm"
+    assert "deployment_profile" not in manifest
     assert "api_key" not in encoded.lower()
     assert "password" not in encoded.lower()
-    assert "D:\\" not in encoded
+    assert str(tmp_path) not in encoded
 
 
-def test_runtime_manifest_uses_effective_dev_override_and_prompt_override():
-    from deployment.profiles import DeploymentProfile
-
-    profile = DeploymentProfile(
-        name="test-dev",
-        expected_gpu_memory_gb=6,
-        runtime_backend="ollama",
-        dialogue_model="default-dialogue",
-        dialogue_base_url="http://localhost:11434",
-        router_model="default-agent",
-        agent_model="default-agent",
-        agent_base_url="http://localhost:11434/v1",
-        enable_streaming_tts=False,
-        system_prompt_override="effective prompt override",
-    )
+def test_runtime_manifest_uses_effective_dev_override_and_prompt_override(tmp_path):
     manifest = build_runtime_manifest(
-        profile=profile,
+        load_runtime_config(_write_runtime_yaml(tmp_path, immutable=False)),
         git_sha="dev-sha",
         environment={
             "VOICECHAT_DIALOGUE_MODEL": "override-dialogue",
@@ -192,14 +218,14 @@ def test_runtime_manifest_uses_effective_dev_override_and_prompt_override():
     assert manifest["git_dirty"] in (True, False, None)
 
 
-def test_runtime_manifest_keeps_immutable_profile_frozen_despite_environment():
+def test_runtime_manifest_keeps_immutable_config_frozen_despite_environment(tmp_path):
     manifest = build_runtime_manifest(
-        profile=get_deployment_profile("rtxpro6000_96g"),
+        load_runtime_config(_write_runtime_yaml(tmp_path, immutable=True)),
         git_sha="prod-sha",
         environment={"VOICECHAT_DIALOGUE_MODEL": "wrong-model", "AGENT_MODEL": "wrong-agent"},
     )
-    assert manifest["dialogue_model"] == "Qwen/Qwen2.5-72B-Instruct-AWQ"
-    assert manifest["agent_model"] == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+    assert manifest["dialogue_model"] == "test-dialogue"
+    assert manifest["agent_model"] == "test-agent"
 
 
 def test_turn_trace_is_deidentified_and_stage_shaped(tmp_path):

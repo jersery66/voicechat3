@@ -17,9 +17,13 @@ before real RTX PRO 6000 validation.
   dialogue context as conclusions.
 - JSON, text, and treatment-progress writes use same-directory temporary files,
   flush/fsync, and atomic replace. New session artifacts carry a schema version.
-- Each new session receives a `runtime_manifest.json` with model/profile,
-  prompt/scale/RAG/catalog hashes, and Git provenance. No secrets or absolute
-  model paths are included.
+- Each new session receives a `runtime_manifest.json` with the runtime
+  configuration, provider and engine per service, prompt/scale/RAG/catalog
+  hashes, and Git provenance. No secrets, endpoint credentials, or absolute
+  model paths are included. Schema 2 replaces the retired
+  `deployment_profile` field; `research.runtime_manifest.read_runtime_manifest()`
+  reads either schema 1 or schema 2 and reports which fields an older file
+  never recorded, so pre-merge sessions stay readable and are never rewritten.
 - The optional `TurnTraceRecorder` writes de-identified stage/decision fields
   and never serializes participant text.
 

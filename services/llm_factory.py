@@ -1,24 +1,29 @@
-"""Build the compatibility LLM service selected by the deployment profile."""
+"""Build the compatibility LLM service selected by the runtime configuration."""
 
 from __future__ import annotations
 
-import os
 from typing import Generator, Optional
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-from inference.vllm_client import VLLMOpenAIClient
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    RuntimeConfig,
+    get_runtime_config,
+)
+from inference.factory import build_dialogue_client
+from inference.openai_client import OpenAICompatibleClient
 
 
-class VLLMCompatibleLLMService:
-    """Preserves the legacy LLMService surface over the vLLM HTTP backend.
+class OpenAICompatibleLLMService:
+    """Preserves the legacy LLMService surface over an OpenAI-compatible backend.
 
-    This lets the current report, UI, and pipeline code move to vLLM without
-    changing their conversation-history semantics in the same release.
+    This lets the current report, UI, and pipeline code talk to any
+    OpenAI-compatible model server (llama.cpp, vLLM, ...) without changing
+    their conversation-history semantics.
     """
 
     MAX_HISTORY_TURNS = 20
 
-    def __init__(self, backend: VLLMOpenAIClient, *, model: str,
+    def __init__(self, backend: OpenAICompatibleClient, *, model: str,
                  system_prompt: Optional[str] = None) -> None:
         from config import SYSTEM_PROMPT
 
@@ -101,12 +106,13 @@ class VLLMCompatibleLLMService:
         return LLMService._history_visible_text(text)
 
     def _maybe_summarize(self) -> None:
-        """Keep vLLM requests below a bounded recent-turn context window.
+        """Keep model-server requests below a bounded recent-turn context window.
 
         The previous Ollama-specific summarizer is intentionally not reused:
         it would introduce a hidden second model dependency.  Retaining only
-        complete recent dialogue turns gives the A100 profile a deterministic
-        bound that works when every language model is served by vLLM.
+        complete recent dialogue turns gives the runtime configuration a
+        deterministic bound that works when the dialogue service is any
+        OpenAI-compatible server.
         """
         max_messages = self.MAX_HISTORY_TURNS * 2
         if len(self.conversation_history) > max_messages:
@@ -143,33 +149,21 @@ class VLLMCompatibleLLMService:
             return False
 
 
-def build_llm_service(*, profile_name: str | None = None):
-    """Return Ollama LLMService for development or vLLM compatibility service."""
-    profile = get_deployment_profile(profile_name)
-    models = resolve_runtime_models(profile)
-    if profile.runtime_backend == "vllm":
-        backend = VLLMOpenAIClient(
-            model=models.dialogue,
-            base_url=(
-                profile.dialogue_base_url
-                if profile.immutable_runtime_contract
-                else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
-            ),
-            request_mode=profile.vllm_request_mode,
-            system_role_mode=profile.vllm_system_role_mode,
-            max_tokens=profile.dialogue_max_tokens,
-            dialogue_temperature=profile.dialogue_temperature,
-            dialogue_top_p=profile.dialogue_top_p,
-            dialogue_top_k=profile.dialogue_top_k,
-            dialogue_presence_penalty=profile.dialogue_presence_penalty,
-            dialogue_enable_thinking=profile.dialogue_enable_thinking,
-        )
-        return VLLMCompatibleLLMService(
-            backend,
-            model=models.dialogue,
-            system_prompt=profile.system_prompt_override,
-        )
+def build_llm_service(config: Optional[RuntimeConfig] = None):
+    """Return the dialogue service for the configured provider.
 
-    from services.llm_service import LLMService
+    OpenAI-compatible providers (llama.cpp, vLLM, ...) are served through
+    the compatibility service; the Ollama provider keeps its native
+    ``LLMService`` path.
+    """
+    config = config if config is not None else get_runtime_config()
+    if config.dialogue.provider != PROVIDER_OPENAI_COMPATIBLE:
+        from services.llm_service import LLMService
 
-    return LLMService(model=models.dialogue, host=profile.dialogue_base_url)
+        return LLMService(model=config.dialogue.model, host=config.dialogue.base_url)
+    backend = build_dialogue_client(config)
+    return OpenAICompatibleLLMService(
+        backend,
+        model=config.dialogue.model,
+        system_prompt=config.dialogue.system_prompt_override,
+    )

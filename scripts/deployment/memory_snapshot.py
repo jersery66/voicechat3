@@ -73,7 +73,7 @@ def parse_nvidia_smi_csv(output: str) -> list[dict[str, Any]]:
 
 def _base_snapshot(
     *,
-    profile: str | None,
+    runtime_config: str | None,
     git_commit: str | None,
     evidence_type: str,
     status: str,
@@ -84,7 +84,7 @@ def _base_snapshot(
         "evidence_type": evidence_type,
         "hardware_evidence": "NOT RUN",
         "git_commit": git_commit if git_commit is not None else _git_commit(),
-        "profile": profile,
+        "runtime_config": runtime_config,
         "status": status,
         "gpu_index": None,
         "gpu_name": None,
@@ -104,7 +104,7 @@ def _with_row(snapshot: dict[str, Any], row: Mapping[str, Any]) -> dict[str, Any
 
 def capture_memory_snapshot(
     *,
-    profile: str | None = None,
+    runtime_config: str | None = None,
     git_commit: str | None = None,
     runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
@@ -124,7 +124,7 @@ def capture_memory_snapshot(
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return _base_snapshot(
-            profile=profile,
+            runtime_config=runtime_config,
             git_commit=git_commit,
             evidence_type=EVIDENCE_NOT_AVAILABLE,
             status="NOT AVAILABLE",
@@ -133,13 +133,13 @@ def capture_memory_snapshot(
     rows = parse_nvidia_smi_csv(output) if result.returncode == 0 else []
     if result.returncode != 0 or not rows:
         return _base_snapshot(
-            profile=profile,
+            runtime_config=runtime_config,
             git_commit=git_commit,
             evidence_type=EVIDENCE_NOT_AVAILABLE,
             status="NOT AVAILABLE",
         )
     snapshot = _base_snapshot(
-        profile=profile,
+        runtime_config=runtime_config,
         git_commit=git_commit,
         evidence_type=EVIDENCE_MEASURED,
         status="PASS",
@@ -147,9 +147,9 @@ def capture_memory_snapshot(
     return _with_row(snapshot, rows[0])
 
 
-def simulated_memory_snapshot(row: Mapping[str, Any], *, profile: str | None = None) -> dict[str, Any]:
+def simulated_memory_snapshot(row: Mapping[str, Any], *, runtime_config: str | None = None) -> dict[str, Any]:
     snapshot = _base_snapshot(
-        profile=profile,
+        runtime_config=runtime_config,
         git_commit="SIMULATED",
         evidence_type=EVIDENCE_SIMULATED,
         status="PASS",
@@ -167,10 +167,10 @@ def append_snapshot(path: str | Path, snapshot: Mapping[str, Any]) -> Path:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Capture a read-only nvidia-smi memory snapshot")
-    parser.add_argument("--profile", default=os.environ.get("VOICECHAT_DEPLOYMENT_PROFILE"))
+    parser.add_argument("--config", default=os.environ.get("VOICECHAT_RUNTIME_CONFIG"))
     parser.add_argument("--output", default=None)
     args = parser.parse_args(argv)
-    snapshot = capture_memory_snapshot(profile=args.profile)
+    snapshot = capture_memory_snapshot(runtime_config=args.config)
     if args.output:
         append_snapshot(args.output, snapshot)
     print(json.dumps(snapshot, ensure_ascii=False, indent=2))

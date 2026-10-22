@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Pre-launch configuration health check (NON-BLOCKING DIAGNOSTIC).
+"""Pre-launch service health check (NON-BLOCKING DIAGNOSTIC).
 
-Validates the selected dialogue backend, model files, knowledge base, and
-relaxation media before the main UI starts.
+Validates the configured dialogue and Agent services, the configured
+ASR/TTS providers' model files, the knowledge base, and relaxation media
+before the main UI starts. Checks are engine agnostic: any
+OpenAI-compatible provider (llama.cpp, vLLM, ...) is probed through its
+``/v1/models`` endpoint, and the Ollama provider through the Ollama
+client API. Voice checks apply to the provider named by runtime.yaml;
+an unselected provider is reported as such instead of being probed.
 
-IMPORTANT: this is a *diagnostic*. Development profiles return False only when
-a critical dependency fails (dialogue backend unreachable, data root not
-writable); their launcher may still continue for troubleshooting. The
-Profiles with ``strict_preflight`` additionally require their configured 3B
-Agent endpoint, because their startup path treats a failed check as a hard stop.
+IMPORTANT: this is a *diagnostic*. When ``runtime.strict_preflight`` is
+false the launcher may still continue for troubleshooting; strict runtime
+configs additionally require their configured Agent endpoint, because their
+startup path treats a failed check as a hard stop.
 Offline-only converted knowledge corpora and relaxation videos remain warnings.
 
 Usage:
@@ -27,7 +31,7 @@ import requests
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, APP_ROOT)
 
-from deployment.profiles import get_deployment_profile
+from deployment.runtime_config import PROVIDER_OLLAMA, get_runtime_config
 
 
 def _ok(label: str) -> None:
@@ -67,35 +71,24 @@ def check_ollama() -> bool:
 
 
 def check_dialogue_backend() -> bool:
-    """Check the selected dialogue transport without assuming Ollama.
+    """Check the configured dialogue service without assuming an engine.
 
-    For vLLM this deliberately calls the OpenAI-compatible ``/v1/models``
-    endpoint. The desktop UI must never try to probe the A100 dialogue server
-    through the Ollama client API.
+    OpenAI-compatible providers (llama.cpp, vLLM, ...) are probed through
+    their ``/v1/models`` endpoint; the desktop UI must never try to probe
+    them through the Ollama client API.
     """
-    from config import DIALOGUE_BACKEND, DIALOGUE_BASE_URL, OLLAMA_MODEL
+    from config import DIALOGUE_PROVIDER, DIALOGUE_BASE_URL, DIALOGUE_MODEL
 
-    if DIALOGUE_BACKEND == "ollama":
+    if DIALOGUE_PROVIDER == PROVIDER_OLLAMA:
         return check_ollama()
-    if DIALOGUE_BACKEND != "vllm":
-        return _fail("Dialogue Backend", f"unsupported backend: {DIALOGUE_BACKEND}")
-    try:
-        url = urljoin(DIALOGUE_BASE_URL.rstrip("/") + "/", "models")
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        available = [item.get("id") for item in data.get("data", []) if item.get("id")]
-        if OLLAMA_MODEL not in available:
-            return _fail("vLLM", f"model '{OLLAMA_MODEL}' not served by {url}")
-        _ok(f"vLLM ({len(available)} models, using '{OLLAMA_MODEL}')")
-        return True
-    except Exception as exc:
-        return _fail("vLLM", f"cannot reach {DIALOGUE_BASE_URL}: {exc}")
+    return _check_openai_compatible_model(
+        f"Dialogue ({DIALOGUE_PROVIDER})", DIALOGUE_BASE_URL, DIALOGUE_MODEL
+    )
 
 
 def _check_openai_compatible_model(label: str, base_url: str,
                                    model: str | None) -> bool:
-    """Verify one profile-owned vLLM endpoint serves its configured model."""
+    """Verify one configured endpoint serves its configured model."""
     if not model:
         _ok(f"{label} (not configured)")
         return True
@@ -116,26 +109,32 @@ def _check_openai_compatible_model(label: str, base_url: str,
 
 
 def check_agent_backend() -> bool:
-    """Check the Agent endpoint, enforcing strict profiles."""
-    from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER
-    profile = get_deployment_profile()
+    """Check the Agent endpoint, enforcing strict runtime configurations."""
+    from config import AGENT_ENABLED, AGENT_PROVIDER, AGENT_MODEL, AGENT_MODEL_SERVER
 
-    if AGENT_BACKEND == "ollama":
-        available = _check_openai_compatible_model("Agent Ollama", AGENT_MODEL_SERVER, AGENT_MODEL)
-    elif AGENT_BACKEND == "vllm":
-        available = _check_openai_compatible_model("Agent vLLM", AGENT_MODEL_SERVER, AGENT_MODEL)
-    else:
-        available = _fail("Agent Backend", f"unsupported backend: {AGENT_BACKEND}")
+    if not AGENT_ENABLED:
+        _ok("Agent (disabled by runtime config)")
+        return True
+
+    runtime = get_runtime_config()
+    # Every supported provider exposes an OpenAI-compatible /v1/models
+    # endpoint (llama.cpp, vLLM, and Ollama's compatibility layer alike).
+    available = _check_openai_compatible_model(
+        f"Agent ({AGENT_PROVIDER})", AGENT_MODEL_SERVER, AGENT_MODEL
+    )
     if not available:
-        if profile.strict_preflight:
-            return _fail("Agent", f"required by the {profile.name} strict preflight profile")
+        if runtime.runtime.strict_preflight:
+            return _fail("Agent", "required by the strict preflight runtime configuration")
         _warn("Agent", "unavailable; deterministic keyword routing remains active")
     return True
 
 
 def check_funasr() -> bool:
-    """Verify FunASR model directory exists."""
-    from config import FUNASR_MODEL_PATH
+    """Verify the FunASR model directory when it is the configured ASR provider."""
+    from config import ASR_PROVIDER, FUNASR_MODEL_PATH
+    if ASR_PROVIDER != "funasr":
+        _ok(f"FunASR (not the configured ASR provider: {ASR_PROVIDER})")
+        return True
     if FUNASR_MODEL_PATH and os.path.isdir(FUNASR_MODEL_PATH):
         _ok(f"FunASR ({FUNASR_MODEL_PATH})")
         return True
@@ -144,18 +143,25 @@ def check_funasr() -> bool:
 
 
 def check_cosyvoice() -> bool:
-    """Verify CosyVoice model directory exists (legacy)."""
-    from config import COSYVOICE_MODEL_PATH
-    if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
-        _ok(f"CosyVoice (legacy, {COSYVOICE_MODEL_PATH})")
+    """Verify the CosyVoice model directory when it is the configured TTS provider."""
+    from config import COSYVOICE_MODEL_PATH, TTS_PROVIDER
+    if TTS_PROVIDER != "cosyvoice":
+        _ok(f"CosyVoice (not the configured TTS provider: {TTS_PROVIDER})")
         return True
-    _warn("CosyVoice (legacy)", f"path not found: {COSYVOICE_MODEL_PATH}")
+    if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
+        _ok(f"CosyVoice ({COSYVOICE_MODEL_PATH})")
+        return True
+    _warn("CosyVoice", f"path not found: {COSYVOICE_MODEL_PATH}")
     return True
 
 
 def check_voxcpm() -> bool:
-    """Verify VoxCPM2 model availability."""
-    from config import VOXCPM_MODEL_PATH
+    """Verify VoxCPM2 availability when it is the configured TTS provider."""
+    from config import TTS_PROVIDER, VOXCPM_MODEL_PATH
+    if TTS_PROVIDER != "voxcpm":
+        _ok(f"VoxCPM2 (not the configured TTS provider: {TTS_PROVIDER})")
+        return True
+
     from services.tts_service_voxcpm import TTSService
 
     blocker = TTSService.get_load_blocker()

@@ -1,8 +1,10 @@
-"""Standalone live acceptance probe for the Windows/WSL2 Blackwell stack.
+"""Standalone live acceptance probe for a configured model deployment.
 
-This command assumes that the launcher has already started both vLLM
-services.  It performs observation and inference only; it never starts,
-stops, or reconfigures a service.
+This command assumes that the operator has already started the services
+described by the runtime configuration (``config/runtime.yaml`` by
+default).  It performs observation and inference only; it never starts,
+stops, or reconfigures a service.  Hardware identity is observed and
+reported, never assumed from the configuration.
 """
 
 from __future__ import annotations
@@ -20,17 +22,18 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import requests
 from openai import OpenAI
 
-# Make ``python scripts/acceptance/blackwell_live_probe.py`` work from the
-# repository root without requiring the application to be installed.
+# Make direct execution of this file work from the repository root without
+# requiring the application to be installed.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from deployment.profiles import DeploymentProfile, RuntimeModels
+from deployment.runtime_config import RuntimeConfig, get_runtime_config, load_runtime_config
 from inference.factory import build_dialogue_client
+from inference.openai_client import build_no_keepalive_http_client
 try:
     from . import probe_support as support
-except ImportError:  # Direct ``python scripts/acceptance/blackwell_live_probe.py`` execution.
+except ImportError:  # Direct execution as a script instead of a package module.
     import probe_support as support
 
 
@@ -60,16 +63,16 @@ def _write_artifact(directory: Path, name: str, payload: Any) -> Path:
     return path
 
 
-def _new_artifact_directory(output_root: str | Path | None, profile_name: str) -> Path:
-    root = Path(output_root) if output_root is not None else PROJECT_ROOT / "test_output" / "blackwell_acceptance"
+def _new_artifact_directory(output_root: str | Path | None, config_label: str) -> Path:
+    root = Path(output_root) if output_root is not None else PROJECT_ROOT / "test_output" / "live_acceptance"
     if not root.is_absolute():
         root = PROJECT_ROOT / root
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    candidate = root / f"{stamp}_{profile_name}"
+    candidate = root / f"{stamp}_{config_label}"
     suffix = 1
     while candidate.exists():
-        candidate = root / f"{stamp}_{profile_name}_{suffix}"
+        candidate = root / f"{stamp}_{config_label}_{suffix}"
         suffix += 1
     candidate.mkdir()
     return candidate
@@ -164,11 +167,14 @@ def run_agent_json_probe(call_json: Callable[..., Any], *, model: str | None = N
     }
 
 
-def build_profile_dialogue_client(profile: DeploymentProfile, models: RuntimeModels,
-                                  *, timeout_seconds: float):
-    client = build_dialogue_client(profile, models, timeout=float(timeout_seconds))
+def build_probe_dialogue_client(*, timeout_seconds: float, config: RuntimeConfig | None = None):
+    config = config if config is not None else get_runtime_config()
+    client = build_dialogue_client(config, timeout=float(timeout_seconds))
     if client is None:
-        raise support.ProbeError("DIALOGUE_CLIENT_BUILD_FAILED", "selected profile did not build a vLLM dialogue client")
+        raise support.ProbeError(
+            "DIALOGUE_CLIENT_BUILD_FAILED",
+            "the runtime configuration did not build an OpenAI-compatible dialogue client",
+        )
     return client
 
 
@@ -232,20 +238,20 @@ def run_dialogue_stream_probe(client: Any, *, timeout_seconds: float,
     }
 
 
-def validate_thinking_contract(profile: DeploymentProfile, client: Any) -> None:
+def validate_thinking_contract(config: RuntimeConfig, client: Any) -> None:
     options = client._generation_options()
     extra_body = options.get("extra_body", {}) if isinstance(options, Mapping) else {}
     template_kwargs = extra_body.get("chat_template_kwargs", {}) if isinstance(extra_body, Mapping) else {}
     configured = getattr(client, "dialogue_enable_thinking", None)
-    expected = profile.dialogue_enable_thinking
+    expected = config.dialogue.enable_thinking
     if expected is False:
         if configured is not False or template_kwargs.get("enable_thinking") is not False:
-            raise support.ProbeError("THINKING_CONFIG_MISSING", "profile requires enable_thinking=False")
+            raise support.ProbeError("THINKING_CONFIG_MISSING", "runtime configuration requires enable_thinking=False")
     elif expected is None:
         if "enable_thinking" in template_kwargs:
-            raise support.ProbeError("THINKING_CONFIG_UNEXPECTED", "profile does not permit thinking kwargs")
+            raise support.ProbeError("THINKING_CONFIG_UNEXPECTED", "runtime configuration does not permit thinking kwargs")
     elif configured != expected or template_kwargs.get("enable_thinking") != expected:
-        raise support.ProbeError("THINKING_CONFIG_MISMATCH", "client thinking options differ from profile contract")
+        raise support.ProbeError("THINKING_CONFIG_MISMATCH", "client thinking options differ from the runtime configuration")
 
 
 def _prepared_messages(client: Any, messages: Sequence[dict[str, str]]) -> list[dict[str, str]]:
@@ -255,7 +261,7 @@ def _prepared_messages(client: Any, messages: Sequence[dict[str, str]]) -> list[
 
 def _raw_nonstream_response(client: Any, messages: Sequence[dict[str, str]]) -> Any:
     if getattr(client, "request_mode", "chat") != "chat":
-        raise support.ProbeError("DIALOGUE_RAW_UNSUPPORTED", "Blackwell probe requires the chat request mode")
+        raise support.ProbeError("DIALOGUE_RAW_UNSUPPORTED", "this probe requires the chat request mode")
     request = {
         "model": client.model,
         "messages": _prepared_messages(client, messages),
@@ -267,7 +273,7 @@ def _raw_nonstream_response(client: Any, messages: Sequence[dict[str, str]]) -> 
 
 def _raw_stream_request(client: Any, messages: Sequence[dict[str, str]]) -> Iterable[Any]:
     if getattr(client, "request_mode", "chat") != "chat":
-        raise support.ProbeError("DIALOGUE_RAW_UNSUPPORTED", "Blackwell probe requires the chat request mode")
+        raise support.ProbeError("DIALOGUE_RAW_UNSUPPORTED", "this probe requires the chat request mode")
     request = {
         "model": client.model,
         "messages": _prepared_messages(client, messages),
@@ -410,16 +416,22 @@ def _query_metrics(base_url: str, timeout_seconds: float) -> dict[str, Any]:
         return {"reachable": False, "error": str(exc)}
 
 
-def _probe_agent_direct(profile: DeploymentProfile, *, timeout_seconds: float) -> dict[str, Any]:
-    client = OpenAI(base_url=profile.agent_base_url, api_key="EMPTY", timeout=timeout_seconds, max_retries=0)
+def _probe_agent_direct(config: RuntimeConfig, *, timeout_seconds: float) -> dict[str, Any]:
+    client = OpenAI(
+        base_url=config.agent.base_url,
+        api_key=config.agent.api_key or "EMPTY",
+        timeout=timeout_seconds,
+        max_retries=0,
+        http_client=build_no_keepalive_http_client(timeout_seconds),
+    )
 
     def call_json(**request: Any) -> Any:
         return client.chat.completions.create(**request)
 
-    return run_agent_json_probe(call_json, model=profile.agent_model, timeout_seconds=timeout_seconds)
+    return run_agent_json_probe(call_json, model=config.agent.model, timeout_seconds=timeout_seconds)
 
 
-def _probe_vllm_version(distro: str | None, executable: str, timeout_seconds: float) -> tuple[str | None, str | None]:
+def _probe_server_version(distro: str | None, executable: str, timeout_seconds: float) -> tuple[str | None, str | None]:
     command = ["wsl.exe"]
     if distro:
         command.extend(["-d", distro])
@@ -438,11 +450,11 @@ def _probe_vllm_version(distro: str | None, executable: str, timeout_seconds: fl
     return (text.splitlines()[0] if text else None), None
 
 
-def _summary_template(profile_name: str) -> dict[str, Any]:
+def _summary_template(runtime_config: str) -> dict[str, Any]:
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
-        "profile": profile_name,
+        "runtime_config": runtime_config,
         "hardware_status": "NOT RUN",
         "windows_gpu": None,
         "wsl_gpu": None,
@@ -470,7 +482,7 @@ def _summary_template(profile_name: str) -> dict[str, Any]:
         "completion_tokens": None,
         "client_output_tokens_per_second": None,
         "server_per_request_metrics": "UNAVAILABLE / NOT ENABLED",
-        "vllm_version": None,
+        "server_version": None,
         "thinking_leak": False,
         "reasoning_field_leak": False,
         "control_tag_leak": False,
@@ -486,51 +498,59 @@ def _summary_template(profile_name: str) -> dict[str, Any]:
     }
 
 
-def run_probe(profile_name: str, *, distro: str | None = None,
+def run_probe(config_path: str | None = None, *, distro: str | None = None,
               output_root: str | Path | None = None,
               timeout_seconds: float = 120.0,
-              vllm_executable: str = "~/.venvs/voicechat-vllm/bin/vllm") -> int:
+              server_executable: str | None = None) -> int:
     """Execute one real acceptance run and always preserve a summary artifact."""
-    directory = _new_artifact_directory(output_root, profile_name)
-    summary = _summary_template(profile_name)
+    config_label = Path(config_path).name if config_path else "runtime.yaml"
+    directory = _new_artifact_directory(output_root, config_label)
+    summary = _summary_template(config_label)
     try:
-        profile, models = support.validate_profile(profile_name)
-        summary["dialogue_model"] = models.dialogue
-        summary["agent_model"] = profile.agent_model
+        config = support.validate_runtime_deployment(config_path)
+        summary["dialogue_model"] = config.dialogue.model
+        summary["agent_model"] = config.agent.model
 
         windows = support.validate_gpu_observation(
-            support.query_windows_gpu(timeout_seconds=timeout_seconds), source="windows"
+            support.query_windows_gpu(timeout_seconds=timeout_seconds), source="windows",
         )
         summary["windows_gpu"] = windows.to_dict()
         _write_artifact(directory, "hardware.json", {"windows": windows.to_dict()})
         wsl = support.validate_gpu_observation(
-            support.query_wsl_gpu(distro, timeout_seconds=timeout_seconds), source="wsl"
+            support.query_wsl_gpu(distro, timeout_seconds=timeout_seconds), source="wsl",
         )
         support.compare_gpu_observations(windows, wsl)
         summary["hardware_status"] = "PASS"
         summary["wsl_gpu"] = wsl.to_dict()
         _write_artifact(directory, "hardware.json", {"windows": windows.to_dict(), "wsl": wsl.to_dict()})
 
-        dialogue_ids = _server_model_ids(profile.dialogue_base_url, timeout_seconds)
-        agent_ids = _server_model_ids(profile.agent_base_url, timeout_seconds)
-        support.require_exact_model(dialogue_ids, models.dialogue, "dialogue")
-        support.require_exact_model(agent_ids, profile.agent_model, "agent")
+        dialogue_ids = _server_model_ids(config.dialogue.base_url, timeout_seconds)
+        support.require_exact_model(dialogue_ids, config.dialogue.model, "dialogue")
         summary["dialogue_identity_status"] = "PASS"
-        summary["agent_identity_status"] = "PASS"
-        _write_artifact(directory, "server_identity.json", {"dialogue": dialogue_ids, "agent": agent_ids})
+        if config.agent.enabled:
+            agent_ids = _server_model_ids(config.agent.base_url, timeout_seconds)
+            support.require_exact_model(agent_ids, config.agent.model, "agent")
+            summary["agent_identity_status"] = "PASS"
+            _write_artifact(directory, "server_identity.json", {"dialogue": dialogue_ids, "agent": agent_ids})
+        else:
+            summary["agent_identity_status"] = "SKIPPED"
+            _write_artifact(directory, "server_identity.json", {"dialogue": dialogue_ids, "agent": None})
 
         before = support.validate_gpu_observation(
-            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows"
+            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows",
         )
         summary["gpu_memory_before_mib"] = before.memory_used_mib
         _write_artifact(directory, "gpu_before.json", before.to_dict())
 
-        agent_result = _probe_agent_direct(profile, timeout_seconds=timeout_seconds)
-        summary["agent_inference_status"] = agent_result["status"]
-        _write_artifact(directory, "agent_probe.json", agent_result)
+        if config.agent.enabled:
+            agent_result = _probe_agent_direct(config, timeout_seconds=timeout_seconds)
+            summary["agent_inference_status"] = agent_result["status"]
+            _write_artifact(directory, "agent_probe.json", agent_result)
+        else:
+            summary["agent_inference_status"] = "SKIPPED"
 
-        client = build_profile_dialogue_client(profile, models, timeout_seconds=timeout_seconds)
-        validate_thinking_contract(profile, client)
+        client = build_probe_dialogue_client(timeout_seconds=timeout_seconds, config=config)
+        validate_thinking_contract(config, client)
         nonstream = run_dialogue_nonstream_probe(client, timeout_seconds=timeout_seconds)
         summary["production_client_nonstream_status"] = "RAN"
         raw_nonstream = _raw_nonstream_response(client, SYNTHETIC_DIALOGUE_MESSAGES)
@@ -588,18 +608,21 @@ def run_probe(profile_name: str, *, distro: str | None = None,
         raw_stream_artifact["raw_acceptance"]["status"] = summary["raw_stream_acceptance_status"]
         _write_artifact(directory, "dialogue_stream.json", raw_stream_artifact)
         summary["server_per_request_metrics"] = support.extract_server_metrics(raw_stream["raw_chunks"])
-        _write_artifact(directory, "server_metrics.json", _query_metrics(profile.dialogue_base_url, timeout_seconds))
+        _write_artifact(directory, "server_metrics.json", _query_metrics(config.dialogue.base_url, timeout_seconds))
 
         after = support.validate_gpu_observation(
-            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows"
+            support.query_windows_gpu(timeout_seconds=timeout_seconds, include_utilization=True), source="windows",
         )
         summary["gpu_memory_after_mib"] = after.memory_used_mib
         summary["gpu_memory_delta_mib"] = after.memory_used_mib - before.memory_used_mib
         _write_artifact(directory, "gpu_after.json", after.to_dict())
-        version, version_warning = _probe_vllm_version(distro, vllm_executable, timeout_seconds)
+        if server_executable:
+            version, version_warning = _probe_server_version(distro, server_executable, timeout_seconds)
+        else:
+            version, version_warning = None, "no server executable given; pass --server-executable to record one"
         if version_warning:
-            summary["warnings"].append(f"vLLM version unavailable: {version_warning}")
-        summary["vllm_version"] = version
+            summary["warnings"].append(f"inference server version unavailable: {version_warning}")
+        summary["server_version"] = version
         summary["overall_status"] = "PASS"
     except support.ProbeError as exc:
         summary["errors"].append(str(exc))
@@ -607,6 +630,11 @@ def run_probe(profile_name: str, *, distro: str | None = None,
         summary["errors"].append(f"UNEXPECTED_PROBE_ERROR: {exc}")
     finally:
         write_summary_artifact(directory, summary)
+    print(f"live probe: {summary['overall_status']}")
+    print(f"runtime config: {summary.get('runtime_config')}")
+    print(f"artifacts: {directory}")
+    for error in summary["errors"]:
+        print(f"error: {error}", file=sys.stderr)
     return exit_code_for_status(summary["overall_status"])
 
 
@@ -622,23 +650,24 @@ def _server_model_ids(base_url: str, timeout_seconds: float) -> list[str]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Live Windows/WSL2 Blackwell vLLM acceptance probe")
-    parser.add_argument("--profile", required=True, choices=sorted(support.SUPPORTED_PROFILES))
+    parser = argparse.ArgumentParser(description="Live acceptance probe for the configured model deployment")
+    parser.add_argument("--config", default=None, help="runtime configuration to probe; otherwise use VOICECHAT_RUNTIME_CONFIG")
     parser.add_argument("--distro", default=None)
-    parser.add_argument("--output-root", default=str(Path("test_output") / "blackwell_acceptance"))
+    parser.add_argument("--output-root", default=str(Path("test_output") / "live_acceptance"))
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
-    parser.add_argument("--vllm-executable", default="~/.venvs/voicechat-vllm/bin/vllm")
+    parser.add_argument("--server-executable", default=None,
+                        help="inference server binary probed for its version inside WSL; skipped when omitted")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     return run_probe(
-        args.profile,
+        args.config,
         distro=args.distro,
         output_root=args.output_root,
         timeout_seconds=args.timeout_seconds,
-        vllm_executable=args.vllm_executable,
+        server_executable=args.server_executable,
     )
 
 

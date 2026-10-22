@@ -40,7 +40,7 @@ def test_capture_without_nvidia_smi_is_not_available():
     def missing(_command, **_kwargs):
         raise FileNotFoundError("nvidia-smi")
 
-    result = capture_memory_snapshot(runner=missing, profile="rtxpro6000_96g")
+    result = capture_memory_snapshot(runner=missing, runtime_config="config/runtime.yaml")
     assert result["status"] == "NOT AVAILABLE"
     assert result["evidence_type"] == EVIDENCE_NOT_AVAILABLE
     assert result["hardware_evidence"] == "NOT RUN"
@@ -52,7 +52,7 @@ def test_capture_records_measured_rows_without_thresholds():
         assert "nvidia-smi" in command[0]
         return subprocess.CompletedProcess(command, 0, CSV, "")
 
-    result = capture_memory_snapshot(runner=runner, profile="rtxpro6000_96g", git_commit="test-commit")
+    result = capture_memory_snapshot(runner=runner, runtime_config="config/runtime.yaml", git_commit="test-commit")
     assert result["status"] == "PASS"
     assert result["evidence_type"] == "MEASURED"
     assert result["git_commit"] == "test-commit"
@@ -65,7 +65,7 @@ def test_capture_records_measured_rows_without_thresholds():
 def test_simulated_snapshot_is_explicitly_simulated():
     result = simulated_memory_snapshot(
         {"gpu_index": 0, "gpu_name": "fake", "memory_total_mb": 10, "memory_used_mb": 2, "memory_free_mb": 8},
-        profile="rtxpro6000_96g",
+        runtime_config="config/runtime.yaml",
     )
     assert result["status"] == "PASS"
     assert result["evidence_type"] == EVIDENCE_SIMULATED

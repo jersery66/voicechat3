@@ -702,23 +702,81 @@ Baseline Qwen/Qwen2.5-72B-Instruct-AWQ  http://127.0.0.1:8000/v1
 Candidate Qwen/Qwen3.8-27B-FP8          explicit opt-in / NOT APPROVED
 ```
 
-真实 GPU、CUDA、vLLM 和模型兼容性仍为 `NOT RUN`。上机时使用不可变
-`pre-hardware-validation-ready-v2-20260817`，先执行：
+**硬件上机前预检（可选）**
+
+真实 GPU、CUDA 与推理引擎版本以实测为准。上机时可先跑一次只读预检，它只观察
+不修改，不启动服务、也不加载模型：
 
 ```powershell
-python scripts\real_hardware_preflight.py --profile rtxpro6000_96g
-.\scripts\windows\start_blackwell_stack.ps1 `
-  -Profile rtxpro6000_96g `
-  -DialogueGpuMemoryUtilization <measured-value> `
-  -AgentGpuMemoryUtilization <measured-value>
+python scripts\real_hardware_preflight.py --config config\runtime.yaml
 ```
 
-必须先启动并验证 Agent，再启动一个 dialogue 模型；显存比例必须由操作员
-显式提供，不能复用旧 A100 的预算。完整顺序见
-`deployment/real_hardware_validation/README.md`。
+预检按配置里声明的推理引擎选择验证项：`engine: llamacpp` 检查 `llama-server`，
+`engine: vllm` 检查 `vllm` 与 PyTorch CUDA，`engine: ollama` 检查 `ollama`。
+引擎可执行文件不在 `PATH` 上时用对应参数指定，例如：
 
-Ollama 仍可作为 `dev_6g` / `dev_vllm_6g` 的开发兼容路径，但不是当前
-Blackwell 上机入口，也不是正式模型验收依据。
+```powershell
+python scripts\real_hardware_preflight.py --config config\runtime.yaml `
+  --llama-cpp-executable /root/llama_cpp_python-0.3.36/vendor/llama.cpp/build/bin/llama-server
+```
+
+服务起来之后再加 `--expect-services`，把「端点可达 + 模型身份一致」也纳入判定：
+
+```powershell
+python scripts\real_hardware_preflight.py --config config\runtime.yaml --expect-services
+```
+
+在线推理验收由活体探针负责，两者职责不同：
+
+```powershell
+python scripts\real_hardware_smoke.py --config config\runtime.yaml
+```
+
+> 早期按显卡型号命名的 Windows 启动器 `start_blackwell_stack.ps1` 已归档到
+> `archive/`，服务生命周期统一由 `scripts/engines/` 下的脚本管理。
+> `deployment/real_hardware_validation/` 是冻结包的历史记录，其中的命令属于
+> 当时形态，不代表当前入口。
+
+---
+
+#### 🖥️ 推理服务启动：llama.cpp 还是 vLLM
+
+启动方式与显卡型号无关：模型、端点、执行参数全部写在 `config/runtime.yaml`，
+推理引擎脚本只负责按参数起停服务。当前默认配置使用 llama.cpp，两个
+`llama-server` 分别在 8000（主对话）和 8001（Agent）监听。
+
+若改用 vLLM，只需把 `config/runtime.yaml` 的 `base_url` 与 `model` 换成 vLLM
+实际公布的值，再按服务逐个启动：
+
+```bash
+scripts/engines/vllm/start_service.sh --service-name dialogue \
+  --model Qwen/Qwen2.5-72B-Instruct-AWQ --port 8000 \
+  --gpu-memory-utilization 0.82 --max-model-len 32768
+
+scripts/engines/vllm/start_service.sh --service-name agent \
+  --model Qwen/Qwen2.5-3B-Instruct-AWQ --port 8001 \
+  --gpu-memory-utilization 0.08 --max-model-len 16384
+```
+
+`scripts/engines/vllm/status_service.sh --service-name dialogue` 查看状态，
+`scripts/engines/vllm/stop_service.sh --service-name dialogue` 停止；llama.cpp
+的同名脚本位于 `scripts/engines/llama_cpp/`。脚本只认自己写下的 pid 与模型/端口
+元数据，遇到无法证明归属的进程会拒绝接管。两个 `/v1/models` 就绪后，用
+`python scripts/deployment/doctor.py` 核对配置与真实模型身份，再启动桌面程序。
+
+本地没有 GPU 时可以用 Ollama 调试：
+
+```bash
+ollama serve
+```
+
+默认监听 `http://localhost:11434`。把 `config/runtime.yaml` 的 `dialogue.provider`
+设为 `ollama` 即走原生 SDK；模型名同样由配置显式指定，系统不会去检测本机装了
+哪些模型再替你挑一个——这是心理访谈实验可复现的前提。
+
+不要把推理端口直接暴露到局域网；若需要远程桌面或远程服务，请在受控网络中通过具备认证和 TLS 的反向代理访问。
+
+`run_local.ps1` 和 `start_voicechat.ps1` 仍只服务于本地 Ollama 调试，不是生产入口。
 
 ---
 
@@ -896,7 +954,7 @@ Phase 1 当前运行时不执行 `END_SAFETY`；历史枚举与旧报告数据�
 ### 🧪 9. 旧版开发脚本（已弃用）
 
 `scripts/test_conversation.py` 是仅面向 Ollama 的历史对话冒烟脚本，已标记
-为 **legacy / deprecated**。它不验证当前 vLLM、Blackwell profile、
+为 **legacy / deprecated**。它不验证当前 `config/runtime.yaml` 指定的部署、
 `RouterProposal → TurnPolicy → TurnDecision` authority chain、实时交付或
 `scripts/acceptance/blackwell_live_probe.py` 的验收结果。不要用它验收
 Qwen3.8 或正式部署。
@@ -904,6 +962,29 @@ Qwen3.8 或正式部署。
 ---
 
 ### ⚙️ 10. 配置说明
+
+部署相关的一切（主模型、Agent、ASR、TTS、端点、采样参数、严格校验开关）都在
+`config/runtime.yaml` 中，详见 `docs/deployment/runtime_config.md`：
+
+```yaml
+dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen3.8-27B-Q4_K_S   # 必须与服务端公布的模型名完全一致
+agent:
+  enabled: true
+  base_url: http://127.0.0.1:8001/v1
+  model: Qwen3-4B-Instruct-2507
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+```
+
+换显卡、换模型、换推理引擎只改这个文件；应用不会根据检测到的显卡自动选模型，
+以保证心理访谈实验可复现。用另一份配置启动：
+`VOICECHAT_RUNTIME_CONFIG=config/runtime_b.yaml`。推理服务本身由
+`scripts/engines/` 下的引擎脚本启停（见 `docs/deployment/engine_services.md`）。
 
 ```python
 MIN_ROUNDS_BEFORE_SCALE = 5    # 🔢 前几轮不启动新量表
@@ -1609,25 +1690,88 @@ Baseline  Qwen/Qwen2.5-72B-Instruct-AWQ  http://127.0.0.1:8000/v1
 Candidate Qwen/Qwen3.8-27B-FP8          explicit opt-in / NOT APPROVED
 ```
 
-GPU identity, WSL CUDA, vLLM, and model compatibility are still `NOT RUN`.
-Use the immutable `pre-hardware-validation-ready-v2-20260817` tag and begin
-with:
+**Optional: read-only preflight before going on hardware**
+
+GPU identity, WSL CUDA, and inference-engine versions are only evidence once
+measured. The preflight observes and never modifies — it starts no service and
+loads no model:
 
 ```powershell
-python scripts\real_hardware_preflight.py --profile rtxpro6000_96g
-.\scripts\windows\start_blackwell_stack.ps1 `
-  -Profile rtxpro6000_96g `
-  -DialogueGpuMemoryUtilization <measured-value> `
-  -AgentGpuMemoryUtilization <measured-value>
+python scripts\real_hardware_preflight.py --config config\runtime.yaml
 ```
 
-Start and verify Agent first, then one dialogue model. Memory utilization must
-be supplied by the operator; the old A100 budget is not a Blackwell default.
-See `deployment/real_hardware_validation/README.md` for the complete order.
+The preflight follows the engine the configuration declares: `engine: llamacpp`
+checks `llama-server`, `engine: vllm` checks `vllm` and PyTorch CUDA, and
+`engine: ollama` checks `ollama`. Point it at a binary that is not on `PATH`
+with the matching flag:
 
-Ollama remains a development compatibility path for `dev_6g` and
-`dev_vllm_6g`; it is not the Blackwell production entrypoint or a real-model
-acceptance source.
+```powershell
+python scripts\real_hardware_preflight.py --config config\runtime.yaml `
+  --llama-cpp-executable /root/llama_cpp_python-0.3.36/vendor/llama.cpp/build/bin/llama-server
+```
+
+Once the servers are running, add `--expect-services` to fold "endpoint
+answers and publishes the configured model id" into the verdict:
+
+```powershell
+python scripts\real_hardware_preflight.py --config config\runtime.yaml --expect-services
+```
+
+Live inference acceptance is a separate step, owned by the probe:
+
+```powershell
+python scripts\real_hardware_smoke.py --config config\runtime.yaml
+```
+
+> The early GPU-specific Windows launcher `start_blackwell_stack.ps1` now lives
+> in `archive/`; service lifecycle is owned by the scripts under
+> `scripts/engines/`. The `deployment/real_hardware_validation/` directory is a
+> historical record of a frozen package — its commands describe that moment,
+> not the current entry points.
+
+---
+
+#### 🖥️ Starting the inference services: llama.cpp or vLLM
+
+Launch parameters are independent of the GPU model: models, endpoints, and
+runtime options live in `config/runtime.yaml`, and the engine scripts only
+start and stop services from explicit arguments. The default configuration uses
+llama.cpp, with two `llama-server` instances on 8000 (dialogue) and 8001 (Agent).
+
+To switch to vLLM, change only `base_url` and `model` in `config/runtime.yaml`
+to what vLLM actually serves, then start each service inside WSL:
+
+```bash
+scripts/engines/vllm/start_service.sh --service-name dialogue \
+  --model Qwen/Qwen2.5-72B-Instruct-AWQ --port 8000 \
+  --gpu-memory-utilization 0.82 --max-model-len 32768
+
+scripts/engines/vllm/start_service.sh --service-name agent \
+  --model Qwen/Qwen2.5-3B-Instruct-AWQ --port 8001 \
+  --gpu-memory-utilization 0.08 --max-model-len 16384
+```
+
+Use `status_service.sh --service-name <name>` and
+`stop_service.sh --service-name <name>` for the same slot; the llama.cpp
+equivalents live in `scripts/engines/llama_cpp/`. The scripts only act on
+processes they can prove they own through their pid and model/port metadata,
+and refuse to adopt or replace anything else. Once both `/v1/models` endpoints
+answer, run `python scripts/deployment/doctor.py` to verify the configuration
+against the real model identity, then start the desktop application.
+
+Ollama remains available for development on a machine without a GPU:
+
+```bash
+ollama serve
+```
+
+It listens on `http://localhost:11434` by default. Set `dialogue.provider:
+ollama` in `config/runtime.yaml` to use the native SDK. Model names are stated
+explicitly in the configuration; the application never inspects which models
+happen to be installed and picks one for you — that is what makes a
+psychological-interview experiment reproducible.
+
+Do not expose inference ports directly to a LAN. Remote access requires a controlled network with an authenticated TLS reverse proxy. `run_local.ps1` and `start_voicechat.ps1` remain Ollama-only development entry points.
 
 ---
 
@@ -1809,7 +1953,7 @@ The Phase 1 runtime does not execute `END_SAFETY`; the historical enum and legac
 
 `scripts/test_conversation.py` is a historical Ollama-only conversation smoke
 script and is explicitly **legacy / deprecated**. It does not validate the
-current vLLM or Blackwell profile, the
+deployment described by `config/runtime.yaml`, the
 `RouterProposal → TurnPolicy → TurnDecision` authority chain, sentence
 delivery, or the live probe. Do not use it to accept Qwen3.8 or a production
 deployment.
@@ -1817,6 +1961,32 @@ deployment.
 ---
 
 ### ⚙️ 10. Configuration
+
+Everything deployment-related — dialogue model, Agent, ASR, TTS, endpoints,
+sampling parameters, strict-check switches — lives in `config/runtime.yaml`;
+see `docs/deployment/runtime_config.md`:
+
+```yaml
+dialogue:
+  provider: openai_compatible
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen3.8-27B-Q4_K_S   # must match the model id the server publishes
+agent:
+  enabled: true
+  base_url: http://127.0.0.1:8001/v1
+  model: Qwen3-4B-Instruct-2507
+asr:
+  provider: funasr
+tts:
+  provider: voxcpm
+```
+
+Changing the GPU, the model, or the inference engine is an edit to this file
+only; the application never picks a model from detected hardware, so interview
+experiments stay reproducible. Start with another configuration via
+`VOICECHAT_RUNTIME_CONFIG=config/runtime_b.yaml`. The inference servers
+themselves are started and stopped by the engine scripts under
+`scripts/engines/` (see `docs/deployment/engine_services.md`).
 
 ```python
 MIN_ROUNDS_BEFORE_SCALE = 5    # 🔢 Don't start new scales in early rounds

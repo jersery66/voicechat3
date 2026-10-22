@@ -171,6 +171,39 @@ _PROFILES = {
         immutable_runtime_contract=True,
         strict_preflight=True,
     ),
+    "rtx5090_32g": DeploymentProfile(
+        name="rtx5090_32g",
+        expected_gpu_memory_gb=32,
+        runtime_backend="vllm",
+        dialogue_model="Qwen3.8-27B-Q4_K_S",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen3-4B-Instruct-2507",
+        agent_model="Qwen3-4B-Instruct-2507",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        vllm_request_mode="chat",
+        vllm_system_role_mode="native",
+        dialogue_max_tokens=1024,
+        dialogue_enable_thinking=False,
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+        notes=(
+            "Single RTX 5090 32GB workstation profile. Both language services "
+            "are served by llama.cpp llama-server under WSL2 with OpenAI-"
+            "compatible /v1 endpoints; the runtime_backend field stays 'vllm' "
+            "because the client contract, doctor checks, and acceptance probes "
+            "are shared with the vLLM profiles. Dialogue is Qwen3.8-27B "
+            "Q4_K_S GGUF (language stack only; the multimodal mmproj weights "
+            "are deliberately not loaded, 8192-token context, thinking mode "
+            "disabled via chat template kwargs). Agent is Qwen3-4B-Instruct-"
+            "2507 Q4_K_M GGUF, single concurrent slot, low temperature for "
+            "intent routing. The GPU is shared with the Windows-side FunASR "
+            "and VoxCPM2 services, leaving roughly 5GB of headroom. vLLM "
+            "0.31 cannot serve GGUF, which is why llama.cpp replaced it. "
+            "Hardware, WSL2 runtime, memory budget, and latency remain "
+            "unvalidated."
+        ),
+    ),
 }
 
 

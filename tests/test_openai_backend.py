@@ -1,23 +1,11 @@
-"""vLLM/OpenAI-compatible backend tests without a running GPU server."""
+"""OpenAI-compatible backend tests without a running model server."""
 
 from types import SimpleNamespace
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-from inference.factory import build_dialogue_client
-from inference.vllm_client import VLLMOpenAIClient
+from inference.openai_client import OpenAICompatibleClient
 
 
-def test_a100_profile_uses_vllm_for_dialogue_and_keeps_router_explicit():
-    profile = get_deployment_profile("a100_80g")
-    models = resolve_runtime_models(profile, environment={})
-
-    assert profile.runtime_backend == "vllm"
-    assert models.dialogue == "Qwen/Qwen2.5-72B-Instruct-AWQ"
-    assert models.router == "Qwen/Qwen2.5-3B-Instruct-AWQ"
-    assert profile.agent_base_url == "http://127.0.0.1:8001/v1"
-
-
-def test_vllm_client_streams_openai_compatible_chunks_and_preserves_messages():
+def test_client_streams_openai_compatible_chunks_and_preserves_messages():
     calls = []
 
     class Completions:
@@ -28,9 +16,9 @@ def test_vllm_client_streams_openai_compatible_chunks_and_preserves_messages():
                 SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="lo"))]),
             ])
 
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "test-model"
-    client.base_url = "http://a100:8000/v1"
+    client.base_url = "http://model-server:8000/v1"
     client._client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
 
     assert list(client.stream_reply(user_text="hello", system_context="system")) == ["hel", "lo"]
@@ -42,36 +30,33 @@ def test_vllm_client_streams_openai_compatible_chunks_and_preserves_messages():
     assert calls[0]["stream"] is True
 
 
-def test_vllm_client_handles_empty_delta_content():
+def test_client_handles_empty_delta_content():
     class Completions:
         def create(self, **kwargs):
             return iter([SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None))])])
 
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "test-model"
     client._client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
 
     assert list(client.stream_reply(user_text="hello")) == []
 
 
-def test_vllm_client_lists_served_model_ids():
+def test_client_lists_served_model_ids():
     class Models:
         def list(self):
             return SimpleNamespace(data=[
-                SimpleNamespace(id="gemma-2b-awq"),
+                SimpleNamespace(id="qwen-main"),
                 SimpleNamespace(id="another-model"),
             ])
 
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client._client = SimpleNamespace(models=Models())
 
-    assert getattr(client, "list_model_ids", lambda: [])() == [
-        "gemma-2b-awq",
-        "another-model",
-    ]
+    assert client.list_model_ids() == ["qwen-main", "another-model"]
 
 
-def test_vllm_client_completes_a_short_non_streaming_message():
+def test_client_completes_a_short_non_streaming_message():
     calls = []
 
     class Completions:
@@ -81,26 +66,26 @@ def test_vllm_client_completes_a_short_non_streaming_message():
                 SimpleNamespace(message=SimpleNamespace(content="short reply"))
             ])
 
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "test-model"
     client._client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
 
-    assert getattr(client, "complete_messages", lambda **_: "")(
+    assert client.complete_messages(
         messages=[{"role": "user", "content": "hello"}], max_tokens=7
     ) == "short reply"
     assert calls[0]["stream"] is False
     assert calls[0]["max_tokens"] == 7
 
 
-def test_vllm_client_warmup_requires_its_configured_model_to_be_served():
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+def test_client_warmup_requires_its_configured_model_to_be_served():
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "expected-model"
     client.list_model_ids = lambda: ["some-other-model"]
 
-    assert getattr(client, "warmup", lambda: True)() is False
+    assert client.warmup() is False
 
 
-def test_vllm_client_streams_the_completion_endpoint_when_profile_selects_it():
+def test_client_streams_the_completion_endpoint_when_configured():
     calls = []
 
     class Completions:
@@ -110,7 +95,7 @@ def test_vllm_client_streams_the_completion_endpoint_when_profile_selects_it():
                 SimpleNamespace(choices=[SimpleNamespace(text="4")]),
             ])
 
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "gemma-2b-awq"
     client.request_mode = "completion"
     client.max_tokens = 32
@@ -126,7 +111,7 @@ def test_vllm_client_streams_the_completion_endpoint_when_profile_selects_it():
     assert "User: What is 2+2?" in calls[0]["prompt"]
 
 
-def test_vllm_client_folds_system_text_into_first_user_turn_for_templates_without_system_role():
+def test_client_folds_system_text_into_first_user_turn_for_templates_without_system_role():
     calls = []
 
     class Completions:
@@ -138,7 +123,7 @@ def test_vllm_client_folds_system_text_into_first_user_turn_for_templates_withou
                 ]),
             ])
 
-    client = VLLMOpenAIClient.__new__(VLLMOpenAIClient)
+    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.model = "gemma-2b-it-awq"
     client.request_mode = "chat"
     client.system_role_mode = "prepend_user"
@@ -156,18 +141,74 @@ def test_vllm_client_folds_system_text_into_first_user_turn_for_templates_withou
     ]
 
 
-def test_factory_builds_vllm_client_only_for_a_vllm_profile():
-    a100 = get_deployment_profile("a100_80g")
-    dev = get_deployment_profile("dev_6g")
+def test_client_rejects_invalid_request_contracts():
+    for kwargs in (
+        {"request_mode": "raw"},
+        {"system_role_mode": "inline"},
+        {"max_tokens": 0},
+        {"dialogue_temperature": -1},
+        {"dialogue_top_p": 1.5},
+        {"dialogue_top_k": 0},
+    ):
+        base = {
+            "model": "test-model",
+            "base_url": "http://model-server:8000/v1",
+        }
+        base.update(kwargs)
+        try:
+            OpenAICompatibleClient(**base)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {kwargs}")
 
-    assert isinstance(build_dialogue_client(a100, resolve_runtime_models(a100)), VLLMOpenAIClient)
-    assert build_dialogue_client(dev, resolve_runtime_models(dev)) is None
+
+def test_request_body_carries_generation_options():
+    calls = []
+
+    class Completions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return iter([])
+
+    client = OpenAICompatibleClient(
+        model="qwen-main",
+        base_url="http://model-server:8000/v1",
+        max_tokens=256,
+        dialogue_temperature=0.35,
+        dialogue_top_p=0.8,
+        dialogue_top_k=20,
+        dialogue_presence_penalty=1.5,
+        dialogue_enable_thinking=False,
+    )
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+
+    list(client.stream_messages(messages=[{"role": "user", "content": "hello"}]))
+
+    request = calls[0]
+    assert request["temperature"] == 0.35
+    assert request["top_p"] == 0.8
+    assert request["presence_penalty"] == 1.5
+    assert request["max_tokens"] == 256
+    assert request["extra_body"]["top_k"] == 20
+    assert request["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
-def test_vllm_factory_pins_a100_dialogue_endpoint_against_override(monkeypatch):
-    profile = get_deployment_profile("a100_80g")
-    monkeypatch.setenv("VOICECHAT_DIALOGUE_BASE_URL", "http://a100-host:8000/v1")
+def test_request_body_omits_optional_extras_when_unconfigured():
+    calls = []
 
-    client = build_dialogue_client(profile, resolve_runtime_models(profile))
+    class Completions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return iter([])
 
-    assert client.base_url == "http://127.0.0.1:8000/v1"
+    client = OpenAICompatibleClient(
+        model="qwen-main",
+        base_url="http://model-server:8000/v1",
+    )
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+
+    list(client.stream_messages(messages=[{"role": "user", "content": "hello"}]))
+
+    assert "extra_body" not in calls[0]
+    assert calls[0]["temperature"] == 0.35
+    assert calls[0]["top_p"] == 0.8

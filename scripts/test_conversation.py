@@ -2,7 +2,8 @@
 
 This historical development helper exercises the old Ollama + ``|||``
 response path only. It is not a production acceptance tool and must not be
-used to validate vLLM, Blackwell profiles, Qwen3.8, or the current
+used to validate the deployment described by ``config/runtime.yaml``,
+Qwen3.8, or the current
 ``RouterProposal -> TurnPolicy -> TurnDecision`` authority chain.
 
 Usage (development diagnostics only): ``python scripts/test_conversation.py``
@@ -13,13 +14,13 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.rag_service import RAGService
-from config import SYSTEM_PROMPT, OLLAMA_MODEL, OLLAMA_HOST
+from config import SYSTEM_PROMPT, DIALOGUE_MODEL, OLLAMA_HOST
 import ollama
 
 
 def test_conversation():
     # 从 config 读取模型名与 host（不再硬编码）
-    model = OLLAMA_MODEL
+    model = DIALOGUE_MODEL
     host = OLLAMA_HOST
     client = ollama.Client(host=host)
 

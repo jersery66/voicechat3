@@ -138,7 +138,7 @@ def test_measurement_event_contains_provenance_and_nullable_identity():
         value=12.5,
         unit="ms",
         evidence_type=EVIDENCE_SIMULATED,
-        profile="rtxpro6000_96g",
+        runtime_config="config/runtime.yaml",
         git_commit="test-commit",
     )
     assert event["schema_version"] == 1
@@ -163,7 +163,7 @@ def test_not_available_evidence_is_not_measured():
 
 
 def test_measurement_artifact_initializer_is_not_run(tmp_path):
-    paths = initialise_measurement_artifacts(tmp_path, profile="rtxpro6000_96g", git_commit="test-commit")
+    paths = initialise_measurement_artifacts(tmp_path, runtime_config="config/runtime.yaml", git_commit="test-commit")
     assert paths["performance_summary"].exists()
     assert "NOT RUN" in paths["performance_summary"].read_text(encoding="utf-8")
 
@@ -174,7 +174,7 @@ def test_performance_summary_never_mixes_simulated_with_measured():
             {"metric_name": "ttft_ms", "value": 100, "status": STATUS_SUCCESS, "evidence_type": EVIDENCE_MEASURED},
             {"metric_name": "ttft_ms", "value": 10, "status": STATUS_SUCCESS, "evidence_type": EVIDENCE_SIMULATED},
         ],
-        profile="rtxpro6000_96g",
+        runtime_config="config/runtime.yaml",
         git_commit="test-commit",
     )
     assert summary["status"] == EVIDENCE_MEASURED
@@ -186,7 +186,7 @@ def test_performance_summary_never_mixes_simulated_with_measured():
 def test_measured_data_does_not_imply_performance_acceptance():
     summary = build_performance_summary(
         [{"metric_name": "ttft_ms", "value": 1, "status": STATUS_SUCCESS, "evidence_type": EVIDENCE_MEASURED}],
-        profile="rtxpro6000_96g",
+        runtime_config="config/runtime.yaml",
     )
     assert summary["status"] == "MEASURED"
     assert summary["status"] not in {"PASS", "ACCEPTED", "PROMOTED", "WINNER"}

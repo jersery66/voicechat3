@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("rtxpro6000_96g", "rtxpro6000_96g_qwen38_candidate")]
+    [ValidateSet("rtxpro6000_96g", "rtxpro6000_96g_qwen38_candidate", "rtx5090_32g")]
     [string]$Profile = "rtxpro6000_96g",
     [string]$Python = "",
     [string]$Distro = "",
@@ -108,8 +108,16 @@ function Test-ProfileContract {
     if (-not $Contract.strict_preflight) {
         throw "Profile '$($Contract.name)' is not strict-preflight enabled."
     }
-    if ([int]$Contract.expected_gpu_memory_gb -ne 96) {
-        throw "Profile '$($Contract.name)' is not a 96GB Blackwell target profile."
+    # Supported Blackwell targets: 96GB (RTX PRO 6000) and 32GB (RTX 5090).
+    $supportedBlackwellTargets = @{
+        "rtxpro6000_96g"                  = 96
+        "rtxpro6000_96g_qwen38_candidate" = 96
+        "rtx5090_32g"                     = 32
+    }
+    $expectedGpuMemoryGb = [int]$Contract.expected_gpu_memory_gb
+    if (-not $supportedBlackwellTargets.ContainsKey($Contract.name) -or
+        $supportedBlackwellTargets[$Contract.name] -ne $expectedGpuMemoryGb) {
+        throw "Profile '$($Contract.name)' is not a supported Blackwell target profile (96GB or 32GB)."
     }
 
     $dialogueUri = [Uri]$Contract.dialogue_base_url

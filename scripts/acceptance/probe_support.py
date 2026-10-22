@@ -1,8 +1,13 @@
-"""Small, dependency-light helpers for the Blackwell live acceptance probe.
+"""Small, dependency-light helpers for the live acceptance probe.
 
 The helpers in this module deliberately do not start or stop model services,
 load STT/TTS providers, or select a GPU.  They only validate observations and
 normalize evidence collected by the standalone probe.
+
+The deployment under test is described by one runtime configuration
+(``config/runtime.yaml`` by default).  Hardware identity is observed, never
+assumed: the probe reports what GPU is present instead of requiring a
+hardcoded model or a fixed VRAM threshold.
 """
 
 from __future__ import annotations
@@ -14,13 +19,15 @@ import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
-from deployment.profiles import DeploymentProfile, RuntimeModels, get_deployment_profile, resolve_runtime_models
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    PROVIDER_OLLAMA,
+    RuntimeConfig,
+    load_runtime_config,
+)
+from urllib.parse import urlparse
 
 
-SUPPORTED_PROFILES = {
-    "rtxpro6000_96g",
-    "rtxpro6000_96g_qwen38_candidate",
-}
 GPU_QUERY_FIELDS = (
     "index",
     "name",
@@ -59,19 +66,52 @@ class GPUObservation:
         return asdict(self)
 
 
-def validate_profile(name: str) -> tuple[DeploymentProfile, RuntimeModels]:
-    """Resolve one explicitly selected, strict 96GB vLLM profile."""
-    if name not in SUPPORTED_PROFILES:
-        raise ProbeError("UNSUPPORTED_PROFILE", f"profile {name!r} is outside Blackwell acceptance")
-    profile = get_deployment_profile(name)
-    models = resolve_runtime_models(profile, environment={})
-    if profile.runtime_backend != "vllm":
-        raise ProbeError("PROFILE_CONTRACT", "Blackwell probe requires runtime_backend='vllm'")
-    if profile.expected_gpu_memory_gb != 96:
-        raise ProbeError("PROFILE_CONTRACT", "Blackwell probe requires expected_gpu_memory_gb=96")
-    if not profile.immutable_runtime_contract or not profile.strict_preflight:
-        raise ProbeError("PROFILE_CONTRACT", "Blackwell profile must be immutable and strict")
-    return profile, models
+def validate_runtime_deployment(config_path: str | None = None) -> RuntimeConfig:
+    """Load and validate the runtime configuration the probe will observe.
+
+    The configuration is the single source of truth for models, endpoints,
+    and providers; the probe refuses to run when it is not an explicit,
+    loopback-only, OpenAI-compatible or Ollama deployment.  A disabled agent
+    is a valid deployment shape and needs no endpoint.
+    """
+    try:
+        config = load_runtime_config(config_path) if config_path else _load_default()
+    except (OSError, ValueError, TypeError) as exc:
+        raise ProbeError("RUNTIME_CONFIG_INVALID", f"runtime configuration could not be loaded: {exc}") from exc
+
+    errors: list[str] = []
+    for label, provider in (("dialogue", config.dialogue.provider), ("agent", config.agent.provider)):
+        if provider not in {PROVIDER_OPENAI_COMPATIBLE, PROVIDER_OLLAMA}:
+            errors.append(f"unsupported {label} provider: {provider!r}")
+    for label, value in (
+        ("dialogue_model", config.dialogue.model),
+        ("dialogue_base_url", config.dialogue.base_url),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{label} is empty")
+    if config.agent.enabled:
+        for label, value in (
+            ("agent_model", config.agent.model),
+            ("agent_base_url", config.agent.base_url),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{label} is empty")
+    endpoints = [("dialogue_base_url", config.dialogue.base_url)]
+    if config.agent.enabled:
+        endpoints.append(("agent_base_url", config.agent.base_url))
+    for label, value in endpoints:
+        parsed = urlparse(value)
+        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
+            errors.append(f"{label} must be a loopback HTTP URL with an explicit port")
+    if errors:
+        raise ProbeError("RUNTIME_CONFIG_CONTRACT", "; ".join(errors))
+    return config
+
+
+def _load_default() -> RuntimeConfig:
+    from deployment.runtime_config import get_runtime_config
+
+    return get_runtime_config()
 
 
 def run_command(command: Sequence[str], *, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -198,31 +238,34 @@ def _normalized_gpu_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
-def validate_gpu_observation(observations: Sequence[GPUObservation], *, source: str) -> GPUObservation:
-    """Enforce the current single-GPU RTX PRO 6000 Blackwell target."""
+def validate_gpu_observation(
+    observations: Sequence[GPUObservation],
+    *,
+    source: str,
+) -> GPUObservation:
+    """Return the single observed GPU without imposing a hardware target.
+
+    GPU identity is reported, not enforced: a different GPU is a fact for
+    the operator to interpret, not a code-level rejection, and no fixed
+    VRAM threshold decides whether the deployment may run.
+    """
     if len(observations) != 1:
         raise ProbeError(
             "UNSUPPORTED_MULTI_GPU_CURRENT_CONTRACT",
             f"{source} reports {len(observations)} NVIDIA GPUs; explicit device selection is not implemented",
         )
-    observation = observations[0]
-    normalized = _normalized_gpu_name(observation.name)
-    if "rtx pro 6000" not in normalized or "blackwell" not in normalized:
-        raise ProbeError("HARDWARE_PROFILE_MISMATCH", f"{source} GPU is {observation.name!r}")
-    if observation.memory_total_mib < 90 * 1024:
-        raise ProbeError(
-            "HARDWARE_PROFILE_MISMATCH",
-            f"{source} GPU reports only {observation.memory_total_mib} MiB; expected approximately 96 GiB",
-        )
-    return observation
+    return observations[0]
 
 
-def compare_gpu_observations(windows: GPUObservation, wsl: GPUObservation) -> None:
-    if (
-        "rtx pro 6000" not in _normalized_gpu_name(wsl.name)
-        or "blackwell" not in _normalized_gpu_name(wsl.name)
-    ):
-        raise ProbeError("GPU_CONSISTENCY_MISMATCH", "WSL GPU family differs from the Windows target")
+def compare_gpu_observations(
+    windows: GPUObservation,
+    wsl: GPUObservation,
+) -> None:
+    """Check that WSL and Windows observe the same physical GPU."""
+    normalized_windows = _normalized_gpu_name(windows.name)
+    normalized_wsl = _normalized_gpu_name(wsl.name)
+    if normalized_windows != normalized_wsl:
+        raise ProbeError("GPU_CONSISTENCY_MISMATCH", "WSL GPU differs from the Windows GPU")
     tolerance = max(4096, int(max(windows.memory_total_mib, wsl.memory_total_mib) * 0.10))
     if abs(windows.memory_total_mib - wsl.memory_total_mib) > tolerance:
         raise ProbeError(

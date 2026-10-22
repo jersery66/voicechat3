@@ -969,9 +969,9 @@ class MainWindow(QMainWindow):
     def load_models(self):
         """Load all models with progress updates."""
         try:
-            from services.stt_service import STTService
+            from services.stt_service import get_stt_service
             from services.llm_factory import build_llm_service
-            from services.tts_service import TTSService
+            from services.tts_service import get_tts_service
             from services.rag_service import get_rag_service
             from data.data_manager import DataManager
             from services.report_service import ReportService
@@ -992,7 +992,7 @@ class MainWindow(QMainWindow):
             def load_stt():
                 nonlocal stt_ok
                 try:
-                    service = STTService()
+                    service = get_stt_service()
                     service.load_model()
                     self.stt_service = service
                     stt_ok = True
@@ -1009,7 +1009,7 @@ class MainWindow(QMainWindow):
                     logger.warning("TTS disabled by config; continuing without TTS.")
                     return
                 try:
-                    service = TTSService()
+                    service = get_tts_service()
                     service.load_model(use_streaming=True)
                     self.tts_service = service
                     tts_ok = True
@@ -1088,14 +1088,14 @@ class MainWindow(QMainWindow):
             self.llm_service.warmup()
             self.processing_queue.put(("loading_progress", 90))
 
-            # Step 2.5: Agent (3B routing model)
+            # Step 2.5: Agent (routing model)
             try:
                 from services.agent_service import get_agent_service
                 self.agent_service = get_agent_service()
-                if self.agent_service.is_available():
-                    logger.info("Agent service (3B) ready")
+                if self.agent_service is not None and self.agent_service.is_available():
+                    logger.info("Agent service ready")
                 else:
-                    logger.warning("3B agent model not available, using keyword fallback")
+                    logger.warning("Agent model not available, using keyword fallback")
             except Exception as e:
                 logger.warning(f"Agent service init failed: {e}")
                 self.agent_service = None

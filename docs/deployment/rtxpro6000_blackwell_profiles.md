@@ -1,5 +1,10 @@
 # RTX PRO 6000 Blackwell deployment profiles
 
+> Historical record. The `deployment/profiles.py` module these profiles lived in
+> has been retired: model selection, endpoints, and generation parameters now
+> live in `config/runtime.yaml` (see `runtime_config.md`). The values below are
+> preserved only as the provenance of the current configuration.
+
 This document records the explicit deployment profiles added from baseline
 `4b88726cc207dd333f0abe71fa0f101a3e7ee7bb`.
 

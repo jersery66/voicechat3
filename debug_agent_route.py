@@ -11,6 +11,10 @@ from services.agent_service import get_agent_service
 
 agent = get_agent_service()
 
+if agent is None:
+    print("Agent disabled by runtime configuration (agent.enabled: false).")
+    sys.exit(1)
+
 print(f"Agent model: {agent.model}")
 print(f"Agent available: {agent.is_available()}")
 print()
