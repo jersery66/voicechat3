@@ -13,6 +13,31 @@ from inference.factory import build_dialogue_client
 from inference.openai_client import OpenAICompatibleClient
 
 
+class _ChatStreamHandle:
+    """Iterable stream handle carrying ``rollback_user_entry`` for the owner.
+
+    Wraps the response generator with the minimal iterator/closing surface
+    used by callers (``for chunk in ...``, ``list(...)``, ``close()``) plus
+    the targeted history rollback exposed to the deferred-delivery owner.
+    """
+
+    def __init__(self, generator, rollback_user_entry) -> None:
+        self._generator = generator
+        self.rollback_user_entry = rollback_user_entry
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._generator)
+
+    def close(self):
+        return self._generator.close()
+
+    def throw(self, *args):
+        return self._generator.throw(*args)
+
+
 class OpenAICompatibleLLMService:
     """Preserves the legacy LLMService surface over an OpenAI-compatible backend.
 
@@ -71,13 +96,63 @@ class OpenAICompatibleLLMService:
                 if self.conversation_history[index] is user_entry:
                     self.conversation_history.pop(index)
                     return
+
+        generator = self._stream_chat_response(
+            system_suffix,
+            commit_history,
+            _rollback_user_entry,
+        )
+        # Deferred-delivery owners (pipeline + delivery ledger) decide the
+        # final history policy for cancelled generations.  Expose the targeted
+        # rollback on a stream handle so a superseded request can drop its
+        # pending user turn instead of leaving an orphan user message in the
+        # context.  (Generators reject attribute assignment, hence the handle.)
+        return _ChatStreamHandle(generator, _rollback_user_entry)
+
+    def _stream_chat_response(
+        self,
+        system_suffix: Optional[str],
+        commit_history: bool,
+        _rollback_user_entry,
+    ) -> Generator[str, None, None]:
+        """Stream one provider response and apply the history commit policy.
+
+        History states after this generator finishes:
+
+        - delivered complete: user entry + full assistant reply committed;
+        - cancelled/failed with a partial response under ``commit_history``:
+          user entry + partial assistant reply committed;
+        - cancelled via ``GeneratorExit`` under ``commit_history``: nothing was
+          surfaced by this generator yet, so the pending user entry is rolled
+          back (no orphan user message);
+        - deferred mode (``commit_history=False``): the user entry stays until
+          the delivery ledger finalizes; the ledger owner calls
+          ``rollback_user_entry`` when nothing reached the participant.
+        """
         full_response = ""
         messages = [{"role": "system", "content": self._system_context(system_suffix)}]
         messages.extend(self.conversation_history)
+        assistant_committed = False
         try:
-            for chunk in self.backend.stream_messages(messages=messages):
-                full_response += chunk
-                yield chunk
+            stream = self.backend.stream_messages(messages=messages)
+            try:
+                for chunk in stream:
+                    full_response += chunk
+                    yield chunk
+            finally:
+                # Deterministically release the provider stream (HTTP response,
+                # decoder) when the consumer abandons this generator.
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
+        except GeneratorExit:
+            # The consumer closed the stream (cancellation).  In deferred
+            # delivery mode the ledger owns the decision and may still commit
+            # an already-delivered prefix, so only the self-committing mode
+            # rolls back here.
+            if commit_history and not assistant_committed:
+                _rollback_user_entry()
+            raise
         except Exception:
             if not full_response and commit_history:
                 _rollback_user_entry()
@@ -97,6 +172,7 @@ class OpenAICompatibleLLMService:
                 "role": "assistant",
                 "content": self._history_visible_text(full_response),
             })
+            assistant_committed = True
             self._maybe_summarize()
 
     @staticmethod

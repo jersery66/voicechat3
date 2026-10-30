@@ -5,6 +5,40 @@ import os
 import sys
 from datetime import datetime
 
+# Raw participant text (utterances, transcripts, model replies) is sensitive:
+# by default it must never reach console or log files.  The helpers below keep
+# the operational value of a log line (event type, text length, error class)
+# while making raw text strictly opt-in for dedicated research/debug shells.
+
+SENSITIVE_TEXT_LOG_ENV = "VOICECHAT_LOG_SENSITIVE_TEXT"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def sensitive_text_logging_enabled() -> bool:
+    """Whether raw sensitive text may be written to logs (opt-in only)."""
+    return os.environ.get(SENSITIVE_TEXT_LOG_ENV, "").strip().lower() in _TRUTHY
+
+
+def text_meta(label: str, value: object, *, limit: int = 200) -> str:
+    """Render potentially sensitive text as metadata for a log line.
+
+    The default rendering keeps only the text length.  The truncated raw text
+    is emitted exclusively when ``VOICECHAT_LOG_SENSITIVE_TEXT`` is explicitly
+    enabled.  Text hashes are deliberately never substituted for the raw
+    text: short utterances stay vulnerable to dictionary attacks and
+    cross-record linkage even when hashed.
+    """
+    if value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = str(value)
+    if sensitive_text_logging_enabled():
+        return f"{label}={text[:limit]!r}"
+    return f"{label}_len={len(text)}"
+
 
 def setup_logging(log_dir: str = None, level: int = logging.DEBUG):
     """Configure root logger with console and file handlers.

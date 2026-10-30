@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any, Generator
 from openai import OpenAI
 
 from inference.openai_client import build_no_keepalive_http_client
-from services.logger import get_logger
+from services.logger import get_logger, text_meta
 from config import (
     AGENT_ENABLED,
     AGENT_MODEL,
@@ -137,7 +137,7 @@ class AgentService:
 
         logger.warning(
             f"[AgentRaw] model={self.model} finish_reason={finish_reason} "
-            f"content_len={len(content)} content_head={content[:300]!r}"
+            f"content_len={len(content)} {text_meta('content_head', content, limit=300)}"
         )
 
         if not content:
@@ -146,7 +146,10 @@ class AgentService:
         try:
             return json.loads(content)
         except Exception as e:
-            logger.warning(f"[AgentRaw] JSON parse failed: {e}; raw={content[:1000]!r}")
+            logger.warning(
+                f"[AgentRaw] JSON parse failed: {e}; "
+                f"{text_meta('raw', content, limit=1000)}"
+            )
             raise
 
     # ==================== Intent Classification ====================
@@ -501,7 +504,10 @@ class AgentService:
         if m:
             return json.loads(m.group(0))
 
-        raise ValueError(f"No JSON object found in route output: {text[:500]!r}")
+        raise ValueError(
+            "No JSON object found in route output; "
+            f"{text_meta('output', text, limit=500)}"
+        )
 
     def route_conversation_actions(
         self,
@@ -603,7 +609,7 @@ class AgentService:
 
             logger.warning(
                 f"[AgentRouteRaw] finish_reason={finish_reason} "
-                f"len={len(content)} head={content[:500]!r}"
+                f"len={len(content)} {text_meta('head', content, limit=500)}"
             )
 
             if not content:

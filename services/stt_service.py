@@ -52,7 +52,7 @@ from config import (
     VAD_SILENCE_DURATION, VAD_SPEECH_MIN_DURATION
 )
 from services.fsmn_vad_adapter import FSMNVADAdapter, VadEvent
-from services.logger import get_logger
+from services.logger import get_logger, text_meta
 
 logger = get_logger(__name__)
 
@@ -753,7 +753,7 @@ class STTService:
                 # res seems to be a list of results (one per input file)
                 # each result is a list of segments?
                 
-                logger.debug(f"Raw result: {res}")
+                logger.debug(f"Raw result: {text_meta('raw', res, limit=1000)}")
                 
                 if res and len(res) > 0:
                     item = res[0]
@@ -766,7 +766,10 @@ class STTService:
                     
                     # Check if result is primarily Chinese, if not retry with forced Chinese
                     if text and not self._is_chinese_text(text):
-                        logger.warning(f"Non-Chinese text detected: {text}, retrying with forced Chinese...")
+                        logger.warning(
+                            "Non-Chinese text detected: "
+                            f"{text_meta('text', text)}, retrying with forced Chinese..."
+                        )
                         # Retry with explicit Chinese language setting
                         retry_kwargs = dict(self.model_kwargs)
                         retry_kwargs['language'] = 'zh'
@@ -780,7 +783,7 @@ class STTService:
                                 text = retry_item[0].get("text", "").strip()
                             elif isinstance(retry_item, dict):
                                 text = retry_item.get("text", "").strip()
-                        logger.info(f"Retry result: {text}")
+                        logger.info(f"Retry result: {text_meta('retry_result', text)}")
                     
                     # Post-processing: correct common misrecognitions
                     text = self._correct_common_errors(text)
@@ -810,7 +813,7 @@ class STTService:
             # This helps avoid edge cases in model processing
             dummy_audio = np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.01
             result = self.transcribe(dummy_audio)
-            logger.info(f"STT warmup complete. Test result: '{result}'")
+            logger.info(f"STT warmup complete. {text_meta('warmup_result', result)}")
             return True
         except Exception as e:
             logger.warning(f"STT Warmup had issue (non-fatal): {e}")

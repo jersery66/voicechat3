@@ -9,7 +9,7 @@ from typing import Optional, Any, Callable, List, Dict
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from services.logger import get_logger
+from services.logger import get_logger, text_meta
 from services.metrics import get_metrics
 from config import (
     MIN_ROUNDS_BEFORE_SCALE,
@@ -246,7 +246,11 @@ def correct_asr_text(raw_text: str, recent_context: str = "") -> tuple:
         corrections.append("whitespace_normalized")
 
     if corrections:
-        logger.warning(f"[ASRCorrect] raw={raw_text!r} corrected={corrected!r} fixes={corrections}")
+        logger.warning(
+            "[ASRCorrect] "
+            f"{text_meta('raw', raw_text)} {text_meta('corrected', corrected)} "
+            f"fixes={corrections}"
+        )
 
     return corrected, corrections
 
@@ -680,7 +684,8 @@ class ConversationPipeline:
                 )
             self._agent_route_cooldown = 0
             logger.warning(
-                f"[AgentRoute] user={user_text!r} action={observation.proposal.action.value} "
+                "[AgentRoute] "
+                f"action={observation.proposal.action.value} "
                 f"scale={observation.proposal.scale_name} confidence={observation.proposal.confidence} "
                 f"intent={observation.intent!r} source={observation.source!r}"
             )
@@ -1121,7 +1126,10 @@ class ConversationPipeline:
         semantic_flags = inspect_input_semantics(raw_text)
         result.user_text, _asr_corrections = correct_asr_text(raw_text)
         if _asr_corrections:
-            logger.warning(f"[ASRCorrect] raw={raw_text!r} corrected={result.user_text!r}")
+            logger.warning(
+                "[ASRCorrect] "
+                f"{text_meta('raw', raw_text)} {text_meta('corrected', result.user_text)}"
+            )
 
         emit("append_chat", ("user", result.user_text))
 
@@ -1464,8 +1472,9 @@ class ConversationPipeline:
 
             # Log raw LLM response before post-processing
             logger.warning(
-                f"[PipelineReplyRaw] user={result.user_text!r} "
-                f"raw={result.full_response[:800]!r}"
+                "[PipelineReplyRaw] "
+                f"{text_meta('user', result.user_text)} "
+                f"{text_meta('raw', result.full_response, limit=800)}"
             )
 
         except RuntimeError as e:
@@ -1510,7 +1519,10 @@ class ConversationPipeline:
 
         # Check for internal strategy term leak before display/TTS
         if _contains_internal_leak(result.spoken_text):
-            logger.warning(f"[OutputClean] internal strategy leaked: {result.spoken_text!r}")
+            logger.warning(
+                "[OutputClean] internal strategy leaked: "
+                f"{text_meta('spoken', result.spoken_text)}"
+            )
             if runtime.active_scale:
                 result.spoken_text = self._make_scale_clarify_reply(
                     runtime.active_scale, runtime.current_item or 1, result.user_text
@@ -2349,6 +2361,43 @@ class ConversationPipeline:
         for event in segmenter.flush(generation_id):
             self._emit_generation_sentence(event, emit)
 
+    def _discard_cancelled_user_entry(
+        self,
+        generation_id: int,
+        rollback_user_entry,
+        *,
+        deferred_history_supported: bool,
+        stream_failed: bool = False,
+    ) -> None:
+        """Drop a pending user turn whose response never reached the participant.
+
+        History policy per generation outcome:
+
+        - delivered complete: ledger commits user + full assistant reply;
+        - partial delivery (cancelled or failed mid-stream): ledger commits
+          user + the delivered prefix as the assistant reply;
+        - cancelled/failed with nothing delivered: the pending user entry is
+          rolled back so no orphan user message pollutes later context;
+        - a superseded (stale) generation never commits history once a newer
+          generation exists (enforced by the delivery ledger).
+        """
+        if not deferred_history_supported or not callable(rollback_user_entry):
+            return
+        record = self.delivery_controller.get_record(generation_id)
+        stale = record is None or record.cancelled or (
+            not self.delivery_controller.is_current(generation_id)
+        )
+        if not (stale or stream_failed):
+            return
+        if self.delivery_ledger.delivered_text(generation_id):
+            # Something was already spoken/shown: the ledger finalization will
+            # commit the delivered prefix, so the user turn stays.
+            return
+        try:
+            rollback_user_entry()
+        except Exception:
+            logger.warning("[Pipeline] failed to roll back cancelled user entry")
+
     def _stream_llm(
         self,
         text: str,
@@ -2378,7 +2427,8 @@ class ConversationPipeline:
             built = ResponseBuilder.build(generated_text)
             if not built.tts_text.strip():
                 logger.warning(
-                    f"generated text empty after normalization; head={generated_text[:300]!r}"
+                    "generated text empty after normalization; "
+                    f"{text_meta('head', generated_text, limit=300)}"
                 )
                 generated_text = make_safe_fallback_reply(text)
                 built = ResponseBuilder.build(generated_text)
@@ -2401,6 +2451,9 @@ class ConversationPipeline:
         deferred_history_supported = True
         history = getattr(self.llm, "conversation_history", None)
         history_before = len(history) if isinstance(history, list) else 0
+        chunks = None
+        rollback_user_entry = None
+        stream_failed = False
         try:
             try:
                 chunks = self.llm.chat(
@@ -2414,20 +2467,40 @@ class ConversationPipeline:
                 # delivery finalization below controls the production history.
                 deferred_history_supported = False
                 chunks = self.llm.chat(text, system_suffix=system_suffix)
-            for chunk in chunks:
-                if not self.delivery_controller.is_current(generation_id):
-                    break
-                content = str(chunk or "")
-                if not content:
-                    continue
-                if timing is not None and "dialogue_ttft_ms" not in timing:
-                    timing["dialogue_ttft_ms"] = (time.perf_counter() - stream_started) * 1000.0
-                generated_parts.append(content)
-                self.delivery_ledger.record_generated(generation_id, content)
-                if not self._feed_sentence_registration(registration, content):
-                    break
+            rollback_user_entry = getattr(chunks, "rollback_user_entry", None)
+            try:
+                for chunk in chunks:
+                    if not self.delivery_controller.is_current(generation_id):
+                        break
+                    content = str(chunk or "")
+                    if not content:
+                        continue
+                    if timing is not None and "dialogue_ttft_ms" not in timing:
+                        timing["dialogue_ttft_ms"] = (time.perf_counter() - stream_started) * 1000.0
+                    generated_parts.append(content)
+                    self.delivery_ledger.record_generated(generation_id, content)
+                    if not self._feed_sentence_registration(registration, content):
+                        break
+            finally:
+                # Deterministically terminate the provider stream: closing the
+                # generator raises GeneratorExit inside the adapter, releasing
+                # the HTTP response and decoder.  This stops client-side
+                # consumption only; whether the model server also stops
+                # decoding is a server-side property and is not asserted here.
+                close = getattr(chunks, "close", None)
+                if callable(close):
+                    close()
+        except BaseException:
+            stream_failed = True
+            raise
         finally:
             self._finalize_sentence_flush_registration(registration)
+            self._discard_cancelled_user_entry(
+                generation_id,
+                rollback_user_entry,
+                deferred_history_supported=deferred_history_supported,
+                stream_failed=stream_failed,
+            )
 
         generated_text = "".join(generated_parts)
         if not deferred_history_supported and isinstance(history, list):
@@ -2439,7 +2512,8 @@ class ConversationPipeline:
         built = ResponseBuilder.build(generated_text)
         if not built.tts_text.strip():
             logger.warning(
-                f"generated text empty after normalization; head={generated_text[:300]!r}"
+                "generated text empty after normalization; "
+                f"{text_meta('head', generated_text, limit=300)}"
             )
             generated_text = make_safe_fallback_reply(text)
             self.delivery_ledger.record_generated(generation_id, generated_text)

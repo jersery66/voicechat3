@@ -27,6 +27,22 @@ def build_no_keepalive_http_client(timeout: float) -> httpx.Client:
     )
 
 
+def _close_provider_stream(stream: object) -> None:
+    """Release the underlying HTTP response of a streaming call, if supported.
+
+    Closing the client-side stream only stops local consumption.  Whether the
+    model server also stops decoding is a server-side property (connection
+    teardown semantics) and is deliberately not asserted here.
+    """
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            # Resource release must never mask the original streaming error.
+            pass
+
+
 class OpenAICompatibleClient:
     """Dialogue adapter for any OpenAI-compatible ``/v1`` API.
 
@@ -195,13 +211,16 @@ class OpenAICompatibleClient:
             stream = self._client.completions.create(
                 **request,
             )
-            for chunk in stream:
-                choices = self._field(chunk, "choices", []) or []
-                if not choices:
-                    continue
-                content = self._field(choices[0], "text", "") or ""
-                if content:
-                    yield content
+            try:
+                for chunk in stream:
+                    choices = self._field(chunk, "choices", []) or []
+                    if not choices:
+                        continue
+                    content = self._field(choices[0], "text", "") or ""
+                    if content:
+                        yield content
+            finally:
+                _close_provider_stream(stream)
             return
 
         request = {
@@ -211,14 +230,17 @@ class OpenAICompatibleClient:
             **self._generation_options(),
         }
         stream = self._client.chat.completions.create(**request)
-        for chunk in stream:
-            choices = self._field(chunk, "choices", []) or []
-            if not choices:
-                continue
-            delta = self._field(choices[0], "delta")
-            content = self._field(delta, "content") if delta is not None else None
-            if content:
-                yield content
+        try:
+            for chunk in stream:
+                choices = self._field(chunk, "choices", []) or []
+                if not choices:
+                    continue
+                delta = self._field(choices[0], "delta")
+                content = self._field(delta, "content") if delta is not None else None
+                if content:
+                    yield content
+        finally:
+            _close_provider_stream(stream)
 
     def complete_messages(self, *, messages: Sequence[dict[str, str]],
                           max_tokens: int) -> str:

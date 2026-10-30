@@ -5,7 +5,7 @@ import sys
 import time
 from typing import Generator, List, Dict, Any, Optional
 
-from services.logger import get_logger
+from services.logger import get_logger, text_meta
 from services.metrics import get_metrics
 from services._ollama_pool import get_ollama_client
 
@@ -186,7 +186,7 @@ class LLMService:
                     logger.warning(
                         f"[LLMChunkDebug] type={type(msg).__name__} "
                         f"keys={_msg_keys(msg)} "
-                        f"head={str(msg)[:400]}"
+                        f"{text_meta('head', msg, limit=400)}"
                     )
 
                 # Thinking/reasoning: capture but don't yield to UI
@@ -265,7 +265,10 @@ class LLMService:
                 raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
         # Log raw LLM output for debugging
-        logger.warning(f"[LLMRawFull] len={len(full_response)} text={full_response[:1000]!r}")
+        logger.warning(
+            f"[LLMRawFull] len={len(full_response)} "
+            f"{text_meta('text', full_response, limit=1000)}"
+        )
 
         # Note: do NOT yield full_response again — chunks were already yielded
         # in the stream loop above. Yielding here would duplicate the content.
