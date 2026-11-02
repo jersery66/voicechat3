@@ -190,6 +190,12 @@ class TurnStateSnapshot(_FrozenContract):
     # Safety flow owns this flag; the policy must never trade it for an
     # activity invitation.
     risk_marker: bool = False
+    #: A safety signal was raised earlier in this session and the safety path has
+    #: not cleared it.  ``risk_marker`` is about *this* utterance; this flag is
+    #: about the conversation.  Without it, one calm turn after a disclosure
+    #: ("有时候会这么想") looks like an ordinary moment and an invitation slips
+    #: through in the middle of a risk conversation.
+    risk_in_session: bool = False
 
 
 class TurnSignals(_FrozenContract):

@@ -236,3 +236,159 @@ def test_report_block_names_every_headline_metric():
     report = format_report(summary)
     for label in ("scale", "relax", "guards", "quality", "scale_choice", "policy_agreement"):
         assert label in report
+
+
+# ---------------------------------------------------------------------------
+# Multi-window and uncertain annotations
+# ---------------------------------------------------------------------------
+
+
+def test_offering_inside_any_acceptable_window_is_a_hit():
+    result = evaluate_trajectory(
+        trajectory(windows={"scale": [[5, 6], [9, 10]]}),
+        [turn(4), turn(9, intervention="offer_scale", offers=[SCALE_OFFER])],
+    )
+    assert result["scale_outcome"] == "hit"
+    assert result["scale_windows"] == [[5, 6], [9, 10]]
+
+
+def test_offering_between_two_windows_is_late_not_spurious():
+    result = evaluate_trajectory(
+        trajectory(windows={"scale": [[5, 6], [10, 11]]}),
+        [turn(8, intervention="offer_scale", offers=[SCALE_OFFER])],
+    )
+    assert result["scale_outcome"] == "late"
+
+
+def test_a_late_offer_reports_both_delays():
+    result = evaluate_trajectory(
+        trajectory(windows={"scale": [6, 8]}),
+        [turn(10, intervention="offer_scale", offers=[SCALE_OFFER])],
+    )
+    # delay keeps the historical definition (vs window start); late_by is the
+    # stricter reading (vs window end)
+    assert result["scale_delay"] == 4
+    assert result["scale_late_by"] == 2
+
+
+def test_an_uncertain_window_is_reported_but_not_scored():
+    certain = evaluate_trajectory(
+        trajectory(id="C", windows={"scale": [6, 7]}),
+        [turn(6), turn(7)],
+    )
+    uncertain = evaluate_trajectory(
+        trajectory(id="U", windows={"scale": {"any": [[6, 7]], "certainty": "uncertain"}}),
+        [turn(6), turn(7)],
+    )
+    assert certain["scale_scored"] is True
+    assert uncertain["scale_scored"] is False
+    assert uncertain["scale_certainty"] == "uncertain"
+
+    summary = aggregate([certain, uncertain])
+    assert summary["scale"]["opportunities"] == 1
+    assert summary["scale"]["uncertain_opportunities"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Micro vs macro
+# ---------------------------------------------------------------------------
+
+
+def test_micro_and_macro_are_reported_separately_and_can_differ():
+    long_row = evaluate_trajectory(
+        trajectory(id="LONG", windows={}),
+        [
+            turn(1, expect="continue_interview"),
+            turn(2, expect="continue_interview"),
+            turn(3, expect="continue_interview"),
+            turn(4, intervention="offer_scale", expect="offer_scale"),
+        ],
+    )
+    short_row = evaluate_trajectory(
+        trajectory(id="SHORT", windows={}),
+        [turn(1, expect="offer_scale")],
+    )
+    summary = aggregate([long_row, short_row])
+
+    # micro: 4 of 5 graded turns agreed
+    assert summary["micro"]["turn_agreement"] == 0.8
+    assert summary["micro"]["turns_graded"] == 5
+    # macro: mean of (1.0, 0.0)
+    assert summary["macro"]["turn_agreement"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Permission violations come from events, not from reason strings
+# ---------------------------------------------------------------------------
+
+
+def test_execution_with_an_accepted_offer_id_is_not_a_violation():
+    result = evaluate_trajectory(
+        trajectory(windows={}),
+        [
+            turn(
+                7,
+                executed="start_scale",
+                active_scale="PHQ-9",
+                accepted_offer_kind="scale",
+                accepted_offer_target="PHQ-9",
+                accepted_offer_id="scale-7-1",
+            )
+        ],
+    )
+    assert result["permission_violations"] == 0
+
+
+def test_execution_after_an_explicit_request_is_not_a_violation():
+    result = evaluate_trajectory(
+        trajectory(windows={}),
+        [turn(7, executed="start_scale", active_scale="PHQ-9", explicit_request="scale")],
+    )
+    assert result["permission_violations"] == 0
+
+
+def test_execution_with_neither_evidence_is_a_violation_even_with_a_consent_reason():
+    """The reason string must not be able to authorise anything on its own."""
+    result = evaluate_trajectory(
+        trajectory(windows={}),
+        [
+            turn(
+                7,
+                executed="start_scale",
+                active_scale="PHQ-9",
+                policy_reason="offer_scale_accepted",
+                consent_basis="offer_accepted",
+            )
+        ],
+    )
+    assert result["permission_violations"] == 1
+
+
+def test_recommending_relaxation_without_consent_is_a_violation():
+    result = evaluate_trajectory(
+        trajectory(windows={}),
+        [turn(8, executed="recommend_relaxation")],
+    )
+    assert result["permission_violations"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Stage separation
+# ---------------------------------------------------------------------------
+
+
+def test_the_four_stages_are_counted_apart():
+    from decision.timing_metrics import aggregate_turns
+
+    turns = {
+        "T": [
+            turn(1, intervention="offer_scale", validate_reason="risk_requires_safety_path"),
+            turn(2, intervention="offer_scale", validate_accepted=True, offers=[SCALE_OFFER]),
+            turn(3, intervention="continue_interview", validate_accepted=True),
+        ]
+    }
+    stage = aggregate_turns([], turns)
+    assert stage["proposed"]["offer_scale"] == 2
+    assert stage["validator"] == {"accepted": 2, "rejected": 1}
+    assert stage["reject_reasons"]["risk_requires_safety_path"] == 1
+    assert stage["policy_actions"]["chat"] == 3

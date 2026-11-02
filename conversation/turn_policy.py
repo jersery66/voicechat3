@@ -94,7 +94,7 @@ class TurnPolicy:
         # for a questionnaire or an exercise is the one failure this layer must
         # make impossible, including when the participant also asks to stop.
         # The decision here only refuses to act; it never concludes "no risk".
-        if signals.risk_marker or snapshot.risk_marker:
+        if signals.risk_marker or snapshot.risk_marker or snapshot.risk_in_session:
             return self._chat("offer_blocked_risk")
 
         # Priority 1: explicit user ending always wins over ordinary work.
@@ -410,7 +410,7 @@ class TurnPolicy:
             return self._chat("offer_already_pending")
         if self._scale_cooldown_active(snapshot):
             return self._chat("offer_scale_cooldown")
-        if signals.risk_marker or snapshot.risk_marker:
+        if signals.risk_marker or snapshot.risk_marker or snapshot.risk_in_session:
             # A safety situation is not an assessment opportunity; the risk
             # path owns this turn.
             return self._chat("offer_blocked_risk")

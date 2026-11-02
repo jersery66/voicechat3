@@ -243,11 +243,18 @@ state_conflict_game_active
 | 放松状态 | `relaxation_done` / `relaxation_active` | 声称已经做过训练 |
 | 既往建议 | `OfferLedger` → `OfferState` | 声称来访者同意过或拒绝过 |
 | 候选量表 | `rank_scale_candidates()` 基于注册表 | 生成注册表之外的量表名 |
-| 症状线索 | `symptom_turns` / `symptom_summary`（领域计数） | 判断严重程度、下诊断 |
-| 安全线索 | `risk_marker`（只做路由） | 用「我觉得没那么严重」排除风险 |
+| 症状线索 | `symptom_turns` / `symptom_summary`（由 `conversation/interview_state.py` 从话语文本累积） | 判断严重程度、下诊断 |
+| 最近对话 | `recent_history`（`format_history()`，6 轮 × 150 字） | 引用未出现过的内容 |
+| 安全线索 | `risk_marker`（当轮）+ `risk_in_session`（会话内披露未解除） | 用「我觉得没那么严重」排除风险 |
 
 `symptom_summary` 只记录**谈到过哪些领域**（睡眠、情绪、焦虑……），不含分数、不含严重度。
 小模型不做临床分级，这既是权限问题，也是可复现性问题。
+
+`symptom_summary` 与 `recent_history` 的构造集中在
+`decision/request_builder.py:build_decision_request()`，生产与离线回放**共用同一个构造点**，
+由 `tests/test_decision_input_consistency.py` 逐字段比对两条路径的实际请求。
+历史与累积证据此前只在生产端存在——回放端写死空历史、并用当轮测试标注拼摘要，
+细节与修正见 [`interview_state_input_report.md`](interview_state_input_report.md)。
 
 ### 10.4 问题与候选的构造
 

@@ -197,3 +197,86 @@ def test_the_rule_baseline_is_reported_as_a_baseline_not_a_model():
     assert provider.name == "rule_baseline"
     assert provider.is_available() is True
     assert provider.describe()["min_rounds_before_scale"] == MIN_ROUNDS_BEFORE_SCALE
+
+
+# ---------------------------------------------------------------------------
+# The holdout set: frozen, unseen, and structurally sound
+# ---------------------------------------------------------------------------
+
+HOLDOUT = CASES / "interview_trajectories_holdout.jsonl"
+
+
+@pytest.fixture(scope="module")
+def holdout():
+    return load(HOLDOUT)
+
+
+def test_the_holdout_does_not_reuse_ids_from_the_other_splits(dev, test_split, holdout):
+    others = {row["id"] for row in dev} | {row["id"] for row in test_split}
+    assert {row["id"] for row in holdout}.isdisjoint(others)
+    assert all(row["split"] == "holdout" for row in holdout)
+
+
+def test_every_holdout_window_is_satisfiable_by_the_programme_floors(holdout):
+    """An annotation the floors forbid is an annotation no system can meet."""
+    from decision.timing_metrics import _normalise_windows
+
+    floors = {"scale": MIN_ROUNDS_BEFORE_SCALE, "relaxation": MIN_ROUNDS_FOR_RELAXATION}
+    for row in holdout:
+        for kind, floor in floors.items():
+            windows, _certainty = _normalise_windows((row.get("windows") or {}).get(kind))
+            for start, _end in windows:
+                assert start >= floor, f"{row['id']} {kind} window starts at {start} < floor {floor}"
+
+
+def test_holdout_rounds_are_sequential(holdout):
+    for row in holdout:
+        rounds = [turn.get("round") or index for index, turn in enumerate(row["turns"], start=1)]
+        assert rounds == list(range(1, len(rounds) + 1)), row["id"]
+
+
+def test_the_holdout_covers_the_required_scenarios(holdout):
+    from decision.timing_metrics import _normalise_windows
+
+    windows = [
+        {
+            kind: _normalise_windows((row.get("windows") or {}).get(kind))
+            for kind in ("scale", "relaxation")
+        }
+        for row in holdout
+    ]
+
+    def kinds_of(entry):
+        return {kind for kind, (spans, _c) in entry.items() if spans}
+
+    assert any(kinds_of(entry) == {"scale"} for entry in windows)
+    assert any(kinds_of(entry) == {"relaxation"} for entry in windows)
+    assert any(kinds_of(entry) == set() for entry in windows)  # must not offer
+    assert any(
+        any(certainty == "uncertain" for _spans, certainty in entry.values())
+        for entry in windows
+    )
+    assert any(
+        any(len(spans) > 1 for spans, _c in entry.values()) for entry in windows
+    )
+    # a refusal followed by a later acceptable window
+    assert any(
+        row.get("windows", {}).get("scale") and any(
+            "不用" in str(turn.get("text") or "") or "先别" in str(turn.get("text") or "")
+            for turn in row["turns"]
+        )
+        for row in holdout
+    )
+
+
+def test_a_turn_inside_a_window_carries_no_per_turn_expectation(holdout):
+    """A range has no single correct round; annotating one would penalise the rest."""
+    from decision.timing_metrics import _normalise_windows
+
+    for row in holdout:
+        for kind in ("scale", "relaxation"):
+            spans, _c = _normalise_windows((row.get("windows") or {}).get(kind))
+            for turn in row["turns"]:
+                round_number = turn["round"]
+                if any(start <= round_number <= end for start, end in spans):
+                    assert "expect" not in turn, f"{row['id']} round {round_number}"

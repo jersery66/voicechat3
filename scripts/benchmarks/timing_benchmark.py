@@ -50,6 +50,10 @@ DEFAULT_OUT = PROJECT_ROOT / "test_output" / "timing"
 SPLIT_FILES = {
     "dev": CASES_DIR / "interview_trajectories_dev.jsonl",
     "test": CASES_DIR / "interview_trajectories_test.jsonl",
+    #: Frozen, never used for tuning.  Written before the input fix was run and
+    #: scored exactly once, so its numbers are the only ones that can be read as
+    #: "held out".
+    "holdout": CASES_DIR / "interview_trajectories_holdout.jsonl",
 }
 
 #: Providers that must never be presented as model results.
@@ -167,15 +171,24 @@ def resolve_endpoint(args: argparse.Namespace) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def run_provider(name: str, provider: Any, trajectories: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def run_provider(
+    name: str,
+    provider: Any,
+    trajectories: Sequence[dict[str, Any]],
+    *,
+    history_mode: str = "structured_history",
+) -> dict[str, Any]:
     if provider == "__replay__":
         from decision.providers.scripted import ScriptedTimingProvider
 
         return run_trajectories(
             provider_for=ScriptedTimingProvider.from_trajectory,
             trajectories=trajectories,
+            history_mode=history_mode,
         )
-    return run_trajectories(provider=provider, trajectories=trajectories)
+    return run_trajectories(
+        provider=provider, trajectories=trajectories, history_mode=history_mode
+    )
 
 
 def render_turn_rows(report: dict[str, Any]) -> str:
@@ -324,7 +337,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         description="Multi-turn interview timing benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--split", choices=("dev", "test", "all"), default="dev")
+    parser.add_argument("--split", choices=("dev", "test", "holdout", "all"), default="dev")
     parser.add_argument("--providers", default="rule,replay",
                         help="comma separated: rule,replay,tacit,anyjev")
     parser.add_argument("--endpoint", help="decision service endpoint for tacit/anyjev")
@@ -342,6 +355,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         choices=("en", "zh"),
         default="en",
         help="question wording; choose on dev, never on test",
+    )
+    parser.add_argument(
+        "--history-mode",
+        choices=("minimal", "structured", "structured_history"),
+        default="structured_history",
+        help="input ablation: 'minimal' = current utterance + basic state, "
+        "'structured' = + accumulated symptom evidence, "
+        "'structured_history' = + bounded recent dialogue (production)",
     )
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--label", default=None, help="artifact name override")
@@ -366,7 +387,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"[skip] {name}: {note}", file=sys.stderr)
             continue
         started = time.perf_counter()
-        result = run_provider(name, provider, trajectories)
+        result = run_provider(
+            name, provider, trajectories, history_mode=args.history_mode
+        )
         elapsed = time.perf_counter() - started
 
         stats: dict[str, Any] = {}
@@ -382,6 +405,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "provider": args.label or name,
             "role": NON_MODEL_PROVIDERS.get(name, "decision model"),
             "split": args.split,
+            "history_mode": args.history_mode,
             "case_files": sources,
             "trajectories": len(trajectories),
             "wall_seconds": round(elapsed, 2),
@@ -395,6 +419,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         # An explicit label already names the run (e.g. "dev-tacit-zh"), so do
         # not prefix the split a second time.
         stem = slug if args.label else f"{args.split}-{slug}"
+        # Three ablation arms must not overwrite each other's artifacts.  An
+        # explicit label already names the run, so it owns the file name.
+        if args.history_mode != "structured_history" and not args.label:
+            stem = f"{stem}-{args.history_mode}"
         json_path = out_dir / f"{stem}.json"
         md_path = out_dir / f"{stem}.md"
         report["artifact"] = str(json_path)

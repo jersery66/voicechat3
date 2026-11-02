@@ -311,14 +311,24 @@ python scripts/benchmarks/timing_benchmark.py --split dev \
     --providers tacit --transport inprocess --template zh \
     --model-path D:/models/tacit/Tacit-1.7B
 
-# 配置在 dev 上定好之后，再在未见过的 test 集上跑一次
-python scripts/benchmarks/timing_benchmark.py --split test \
+# 输入消融：只换输入，模型与模板不变
+--history-mode minimal            # 当前轮 + 基础状态
+--history-mode structured         # + 累积症状证据
+--history-mode structured_history # + 有界最近对话（生产默认）
+
+# 配置在 dev 上定好之后，再在未见过的留出集上跑一次
+python scripts/benchmarks/timing_benchmark.py --split holdout \
     --providers tacit --transport inprocess --template zh \
-    --model-path D:/models/tacit/Tacit-1.7B --label test-tacit-zh
+    --model-path D:/models/tacit/Tacit-1.7B --label holdout-tacit-zh
 ```
 
-`--template` 必须在 dev 上选：英文是官方训练用语，中文在本机 dev 上明显更好
-（放松命中 0% → 100%，政策一致 32.5% → 49.2%）。**在 test 上换模板再报分等于作废。**
+`--template` 与 `--history-mode` 都必须在 dev 上选：英文是官方训练用语，
+中文在本机 dev 上更好；历史对话是本轮唯一能显著提升量表窗口命中的输入
+（0/3 → 2/3，见 `docs/design/interview_state_input_report.md`）。
+**在留出集上换配置再报分等于作废。**
+
+`--split` 现在有四档：`dev`（调）、`test`（已用过，仅供参考）、
+`holdout`（冻结后只跑一次）、`all`（前三者合并）。
 
 产物：`test_output/timing/<split>-<provider>.json|.md`，含逐轨迹的窗口命中表与逐轮明细。
 

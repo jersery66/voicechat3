@@ -237,9 +237,16 @@ _ANSWER_CONTRAST_MARKERS = (
 #: Safety markers owned by the risk path, not by this decision layer.  They
 #: exist here only so an activity invitation can never be offered on a turn
 #: that contains them.
+#: Explicit and *indirect* self-harm markers.  The indirect forms matter: the
+#: holdout set showed a participant saying "不如就这么算了" -- a common Chinese
+#: way of voicing suicidal ideation -- and the gate never opened, so a
+#: questionnaire was offered in the middle of a risk conversation.  These are
+#: routing observations only; none of them concludes anything clinical.
 _RISK_MARKERS = (
     "不想活", "想死", "去死", "自杀", "自残", "伤害自己", "活不下去",
     "结束生命", "轻生", "死了算了", "没有活着的意义", "活着没意思",
+    "不如就这么算", "不如算了", "一了百了", "活着太累", "消失了算了",
+    "不如死了", "死了更好",
 )
 
 

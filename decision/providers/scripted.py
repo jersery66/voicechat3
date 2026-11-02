@@ -47,25 +47,60 @@ class ScriptedTimingProvider:
 
     @classmethod
     def from_trajectory(cls, trajectory: Mapping[str, Any]) -> "ScriptedTimingProvider":
-        """Build a replay plan from one trajectory's ``expect``/``force`` fields."""
+        """Build a replay plan from one trajectory's annotations.
+
+        Two annotation styles are supported, and they answer different
+        questions:
+
+        ``expect`` / ``force``  a per-turn label.  Used by the older fixtures and
+                                by the guard cases ("propose this here even
+                                though it is wrong, and check the policy refuses").
+        ``windows``             a *range* of acceptable rounds.  A turn inside a
+                                window is where an invitation is defensible, so
+                                the replay opens one there.  This is what makes
+                                "can the chain reach the window at all" a real
+                                self-check for window-annotated trajectories,
+                                which by design carry no per-turn ``expect`` on
+                                the turns inside their windows (a range has no
+                                single correct round).
+        """
+        from decision.timing_metrics import _normalise_windows
+
         plan: dict[int, str] = {}
         targets: dict[int, str] = {}
         forced: set[int] = set()
+
+        windows: dict[str, list[tuple[int, int]]] = {}
+        for kind in ("scale", "relaxation"):
+            found, _certainty = _normalise_windows((trajectory.get("windows") or {}).get(kind))
+            windows[kind] = found
+
         for index, turn in enumerate(trajectory.get("turns", ()), start=1):
             round_number = int(turn.get("round") or index)
             label = turn.get("force") or turn.get("expect")
-            if not label:
-                continue
-            normalized = normalize_intervention(str(label))
-            if not normalized:
-                continue
-            plan[round_number] = normalized
-            if turn.get("force"):
-                # ``force`` means "propose this even though the state says
-                # otherwise", used to prove that the surrounding guards refuse.
-                forced.add(round_number)
-            if turn.get("gold_target"):
-                targets[round_number] = str(turn["gold_target"])
+            if label:
+                normalized = normalize_intervention(str(label))
+                if normalized:
+                    plan[round_number] = normalized
+                    if turn.get("force"):
+                        # ``force`` means "propose this even though the state says
+                        # otherwise", used to prove that the surrounding guards refuse.
+                        forced.add(round_number)
+                    if turn.get("gold_target"):
+                        targets[round_number] = str(turn["gold_target"])
+                    continue
+
+            for kind, spans in windows.items():
+                if any(start <= round_number <= end for start, end in spans):
+                    plan[round_number] = (
+                        InterventionIntent.OFFER_SCALE.value
+                        if kind == "scale"
+                        else InterventionIntent.OFFER_RELAXATION.value
+                    )
+                    if kind == "scale" and trajectory.get("gold_scale"):
+                        targets[round_number] = str(trajectory["gold_scale"])
+                    break
+
         return cls(plan, targets=targets, forced=forced)
 
     # -- provider protocol -------------------------------------------------

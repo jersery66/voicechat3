@@ -199,6 +199,13 @@ DecisionProvider ──干预建议──► DecisionValidator ──审批─�
 
 ### 8.3 真实 Tacit-1.7B（本机权重，进程内官方 readout）
 
+> **已被取代，不要引用本节数字。**
+> 这里的成绩是在**历史对话被写死为空串、症状摘要取自当轮测试标注**的输入下测出来的
+> （`decision/timing_eval.py` 旧实现）。模型当时看不到访谈的发展过程，
+> 因此这些数字既不是"模型不会判断时机"的证据，也不能说明输入修好后它会怎样。
+> 修复后的输入、留出集与真实结果见
+> [`interview_state_input_report.md`](interview_state_input_report.md)。
+
 运行环境：RTX 5090 32GB，bf16，`Tacit.from_pretrained(D:/models/tacit/Tacit-1.7B, adaptive=False)`。
 加载 5.0 s；加载峰值 **3282 MiB**，4 题批推理峰值 **3392 MiB**（约整卡 10%）。
 

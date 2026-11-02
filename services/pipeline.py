@@ -34,22 +34,6 @@ from decision.timing import (
 logger = get_logger(__name__)
 
 
-#: Coarse, deterministic symptom domains.  Used only to describe the interview
-#: state to the decision model and to the rule baseline; never scored, never
-#: reported as severity.
-_SYMPTOM_DOMAIN_KEYWORDS = (
-    ("睡眠", ("睡不着", "失眠", "睡不好", "早醒", "入睡", "睡太多", "多梦")),
-    ("情绪", ("心情不好", "不开心", "低落", "难过", "沮丧", "没希望", "绝望")),
-    ("焦虑", ("焦虑", "紧张", "心慌", "害怕", "担心", "坐立不安")),
-    ("烦躁", ("烦躁", "急躁", "容易生气", "控制不住", "静不下来")),
-    ("精力", ("累", "没力气", "没劲", "疲惫", "乏力", "没活力")),
-    ("食欲", ("吃不下", "没胃口", "吃太多", "食欲", "饭量")),
-    ("注意", ("注意力", "集中不了", "看不进去", "分心")),
-    ("自责", ("自责", "失败", "不够好", "让家人失望")),
-    ("躯体", ("头疼", "胸闷", "胃", "身体不舒服", "乏力感")),
-)
-
-
 _RELAXATION_TYPE_ALIASES = {
     "breathing": "breathing",
     "mindfulness": "meditation",
@@ -115,8 +99,18 @@ from conversation.contracts import (
     TurnStateSnapshot,
 )
 from conversation.agent_observation import AgentObservation
+from conversation.interview_state import (
+    SYMPTOM_DOMAIN_KEYWORDS,
+    InterviewState,
+    format_history,
+)
 from conversation.turn_policy import TurnPolicy
 from conversation.turn_signals import collect_turn_signals
+
+#: Coarse, deterministic symptom domains.  The table itself lives in
+#: :mod:`conversation.interview_state` so that production and the offline timing
+#: replay read the *same* vocabulary; this alias keeps older imports working.
+_SYMPTOM_DOMAIN_KEYWORDS = SYMPTOM_DOMAIN_KEYWORDS
 from conversation.input_semantics import inspect_input_semantics
 from conversation.delivery import (
     DeliveryLedger,
@@ -467,10 +461,19 @@ class ConversationPipeline:
         # made, and how the participant answered.  The decision layer reads it
         # as state; TurnPolicy reads it as a gate.
         self._offer_ledger = OfferLedger()
-        self._symptom_domains: set[str] = set()
+        # Accumulated, utterance-derived interview evidence (domains, duration,
+        # frequency, functional impact, denials).  Shared with the offline
+        # timing replay so the two paths cannot describe the same session
+        # differently -- see conversation/interview_state.py.
+        self._interview_state = InterviewState()
         # Whether the previous turn left something unclarified.  Read as state
         # by the decision layer; never used to act on its own.
         self._clarification_pending: bool = False
+        # A safety disclosure holds for the rest of the session.  ``risk_marker``
+        # is re-detected from each utterance, so a calm confirmation turn would
+        # otherwise look like an ordinary moment and an invitation could land in
+        # the middle of a risk conversation.
+        self._risk_disclosed: bool = False
         # Read-only policy fact surfaced in TurnStateSnapshot.  It is distinct
         # from ReportService.completed_relaxation: an offer can be rejected or
         # media can fail after the proactive allowance has been consumed.
@@ -516,7 +519,8 @@ class ConversationPipeline:
         self._proactive_relaxation_offered = False
         self._proactive_relaxation_candidate = None
         self._offer_ledger.reset()
-        self._symptom_domains = set()
+        self._interview_state.reset()
+        self._risk_disclosed = False
         self._clarification_pending = False
         self._guard_contexts.clear()
         self._guard_states.clear()
@@ -639,19 +643,39 @@ class ConversationPipeline:
         return tuple(candidate.name for candidate in ranked)
 
     def _symptom_summary(self) -> str:
-        """Deterministic description of the symptom domains seen so far."""
-        domains = getattr(self, "_symptom_domains", None) or set()
-        if not domains:
-            return ""
-        return "、".join(sorted(domains)) + "方面的主诉"
+        """Deterministic description of the evidence seen so far.
 
-    def _update_symptom_domains(self, text: str) -> None:
-        normalized = (text or "").strip().lower()
-        if not normalized:
+        Only two things change here relative to the RC1-era version: the
+        domains accumulate through the shared :class:`InterviewState`, and the
+        summary now also carries duration, frequency, functional impact,
+        explicit denials and contradictions.  A model deciding *when* to offer
+        an assessment needs the denials at least as much as the complaints:
+        without them it re-offers a questionnaire the participant just ruled
+        out, and it reads a single anxious turn as a longitudinal picture.
+        """
+        state = getattr(self, "_interview_state", None)
+        if state is None:
+            return ""
+        return state.symptom_summary()
+
+    def _record_interview_turn(self, text: str, round_count: int = 0) -> None:
+        """Accumulate one participant utterance into the shared state.
+
+        Called *after* the decision, exactly like ``_update_symptom_domains``
+        was: the current utterance is already handed to the model verbatim as
+        ``user_text``, and folding it into the summary as well would make the
+        same sentence appear twice while biasing the summary toward the present
+        turn.  ``symptom_turns`` is counted by the scoring block below, so the
+        shared state is not asked to count it again.
+        """
+        state = getattr(self, "_interview_state", None)
+        if state is None:
             return
-        for domain, keywords in _SYMPTOM_DOMAIN_KEYWORDS:
-            if any(keyword in normalized for keyword in keywords):
-                self._symptom_domains.add(domain)
+        try:
+            active = bool(getattr(self.scale_runtime.snapshot(), "active_scale", None))
+        except Exception:
+            active = False
+        state.record_user(text, round_count=int(round_count), assessment_active=active)
 
     def _begin_offer_round(self, round_count: int, user_text: str = "") -> None:
         """Retire invitations only when the conversation has really moved on.
@@ -767,6 +791,7 @@ class ConversationPipeline:
             game_active=False,
             time_limit_reached=bool(time_limit_reached),
             risk_marker=bool(risk_marker),
+            risk_in_session=bool(getattr(self, "_risk_disclosed", False)),
             **offer_fields,
         )
 
@@ -815,8 +840,14 @@ class ConversationPipeline:
         self.session_emotions.append({"role": "user", **result.emotion_result})
 
     def _build_decision_request(self, user_text: str, current_rounds: int):
-        """Snapshot the turn for the decision layer without exposing runtime objects."""
-        from decision.contracts import DecisionRequest
+        """Snapshot the turn for the decision layer without exposing runtime objects.
+
+        Field assembly lives in :func:`decision.request_builder.build_decision_request`
+        so that this path and the offline timing replay cannot disagree about
+        what "the state of the interview" means.  This method only gathers; it
+        makes no decisions about content.
+        """
+        from decision.request_builder import build_decision_request
 
         try:
             snapshot = self.scale_runtime.snapshot()
@@ -829,32 +860,25 @@ class ConversationPipeline:
             except Exception:
                 return default
 
-        collected = getattr(snapshot, "answers_by_scale", None) or {}
-        return DecisionRequest(
+        return build_decision_request(
             user_text=user_text,
-            recent_history=_safe(self._get_recent_dialogue_text, "") or "",
-            current_round=current_rounds,
-            active_scale=getattr(snapshot, "active_scale", None),
-            collected_scales={name: dict(answers) for name, answers in collected.items()},
-            relaxation_done=bool(_safe(self._get_relaxation_done, False)),
-            session_state=str(_safe(self._session_state_name, "CHATTING") or "CHATTING"),
-            waiting_for_answer=bool(getattr(snapshot, "waiting_for_answer", False)),
-            completed_scales=tuple(_safe(self._completed_scale_names, ()) or ()),
-            # -- multi-turn timing state ---------------------------------
+            round_count=current_rounds,
+            interview_state=getattr(self, "_interview_state", None),
+            symptom_turns=int(getattr(self, "symptom_turns", 0) or 0),
+            runtime=snapshot,
             offer_state=self._offer_state(),
             registered_scales=tuple(_safe(self._registered_scale_names, ()) or ()),
-            administered_scales=tuple(
-                getattr(snapshot, "administered_scales", ()) or ()
-            ),
+            session_state=str(_safe(self._session_state_name, "CHATTING") or "CHATTING"),
+            clarification_pending=bool(getattr(self, "_clarification_pending", False)),
+            relaxation_done=bool(_safe(self._get_relaxation_done, False)),
             relaxation_active=bool(
                 getattr(snapshot, "active_scale", None) is None
                 and getattr(getattr(self, "relaxation", None), "active", False)
             ),
-            clarification_pending=bool(getattr(self, "_clarification_pending", False)),
+            history=_safe(self._get_recent_dialogue_text, "") or "",
+            history_mode="structured_history",
             risk_marker=detect_risk_marker(user_text),
-            participant_wants_to_talk=detect_wants_to_talk(user_text),
-            symptom_turns=int(getattr(self, "symptom_turns", 0) or 0),
-            symptom_summary=self._symptom_summary(),
+            wants_to_talk=detect_wants_to_talk(user_text),
         )
 
     def _decision_coordinator(self):
@@ -1598,10 +1622,11 @@ class ConversationPipeline:
             self._cancel_open_offers(current_rounds, "session_end")
         elif detect_risk_marker(result.user_text):
             self._cancel_open_offers(current_rounds, "risk")
+            self._risk_disclosed = True
         self._apply_offer_outcome(decision, current_rounds)
         self._apply_turn_decision(decision, result, current_rounds)
         self._clarification_pending = decision.action is TurnAction.CLARIFY_INPUT
-        self._update_symptom_domains(result.user_text)
+        self._record_interview_turn(result.user_text, current_rounds)
         self._commit_user_turn(config, result, emit)
         runtime = self.scale_runtime.snapshot()
         if not compound_relaxation_turn:
@@ -2172,16 +2197,17 @@ class ConversationPipeline:
         )
 
     def _get_recent_dialogue_text(self, max_turns: int = 6) -> str:
-        """Get recent dialogue text for agent context."""
+        """Get recent dialogue text for agent context.
+
+        The formatting (role labels, per-line cap, turn cap) lives in
+        :func:`conversation.interview_state.format_history` so the replay
+        harness renders a scripted dialogue exactly the way a live session is
+        rendered.  Only the *source* differs: here it is the transcript the
+        language model already owns.
+        """
         if not self.llm or not hasattr(self.llm, 'conversation_history'):
             return ""
-        recent = self.llm.conversation_history[-max_turns * 2:]
-        lines = []
-        for msg in recent:
-            role = "来访者" if msg["role"] == "user" else "小薇"
-            content = msg.get("content", "")[:150]
-            lines.append(f"{role}: {content}")
-        return "\n".join(lines)
+        return format_history(self.llm.conversation_history, max_turns=max_turns)
 
     def _build_decision_language_context(
         self, decision: TurnDecision, runtime: Any
