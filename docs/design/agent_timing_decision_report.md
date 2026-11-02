@@ -386,4 +386,16 @@ python -m pytest tests -q --basetemp=/tmp/wb_pytest_$$
 
 ## 13. 提交
 
-见 §14（提交后才写入的 SHA）。
+分支 `exp/agent-jev-decision`（实验分支，未合并到 `main`）：
+
+| SHA | 类型 | 内容 |
+| --- | --- | --- |
+| `bc407db` | **功能** | `feat(decision): implement consent-gated scale and relaxation timing`，36 文件，+6364 / −204 |
+| `6d82611` | 文档 + CLI | 真实 Tacit 数据入档；`--transport inprocess`、`--template en\|zh` |
+| 其后若干 | 仅文档 | 补 §8.3 的 dev 解析错误计数、§10.2 的退出码说明、本节 |
+
+`main` 仍为 `2da1f1bc0dc47e26a5f819cc3d0c22de12315a57`，
+`release/voicechat3-20261030-rc1` 仍为 `fc7b13c6bdead4a4bf1946bf044a606d34d9e047`，
+两者均未被本分支改动，也未 force push。
+
+分支链接：<https://github.com/jersery66/voicechat3/tree/exp/agent-jev-decision>
