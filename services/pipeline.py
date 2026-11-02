@@ -626,13 +626,72 @@ class ConversationPipeline:
         }
         self.session_emotions.append({"role": "user", **result.emotion_result})
 
+    def _build_decision_request(self, user_text: str, current_rounds: int):
+        """Snapshot the turn for the decision layer without exposing runtime objects."""
+        from decision.contracts import DecisionRequest
+
+        try:
+            snapshot = self.scale_runtime.snapshot()
+        except Exception:
+            snapshot = None
+
+        def _safe(call, default):
+            try:
+                return call()
+            except Exception:
+                return default
+
+        collected = getattr(snapshot, "answers_by_scale", None) or {}
+        return DecisionRequest(
+            user_text=user_text,
+            recent_history=_safe(self._get_recent_dialogue_text, "") or "",
+            current_round=current_rounds,
+            active_scale=getattr(snapshot, "active_scale", None),
+            collected_scales={name: dict(answers) for name, answers in collected.items()},
+            relaxation_done=bool(_safe(self._get_relaxation_done, False)),
+            session_state=str(_safe(self._session_state_name, "CHATTING") or "CHATTING"),
+            waiting_for_answer=bool(getattr(snapshot, "waiting_for_answer", False)),
+            completed_scales=tuple(_safe(self._completed_scale_names, ()) or ()),
+        )
+
+    def _decision_coordinator(self):
+        """Return the cached decision coordinator for the current agent."""
+        cached = getattr(self, "_decision_coordinator_cache", None)
+        if cached is not None and cached[0] is self.agent:
+            return cached[1]
+
+        from decision.registry import build_decision_coordinator
+
+        try:
+            from deployment.runtime_config import get_runtime_config
+
+            decision_config = get_runtime_config().decision
+        except Exception:
+            # A broken/absent config must never block observation: fall back to
+            # the RC1 path, which is what DecisionConfig() means.
+            from deployment.runtime_config import DecisionConfig
+
+            decision_config = DecisionConfig()
+
+        coordinator = build_decision_coordinator(
+            decision_config=decision_config,
+            agent=self.agent,
+        )
+        self._decision_coordinator_cache = (self.agent, coordinator)
+        return coordinator
+
     def _request_agent_observation(
         self,
         *,
         user_text: str,
         current_rounds: int,
     ) -> AgentObservation:
-        """Obtain one non-executable observation from the configured Agent."""
+        """Obtain one non-executable observation from the configured Agent.
+
+        The decision layer (``decision/``) owns *which* provider runs.  It never
+        owns the outcome: whatever comes back is still a non-executable
+        ``AgentObservation`` that ``TurnPolicy`` re-judges.
+        """
         if not AGENT_ROUTE_ENABLED:
             logger.warning("[AgentRoute] skipped: AGENT_ROUTE_ENABLED=False")
             return self._agent_deterministic_fallback(user_text)
@@ -644,50 +703,16 @@ class ConversationPipeline:
             return self._agent_deterministic_fallback(user_text)
 
         try:
-            kwargs = {
-                "user_text": user_text,
-                "recent_history": self._get_recent_dialogue_text(),
-                "current_round": current_rounds,
-                "active_scale": self.scale_runtime.snapshot().active_scale,
-                "collected_scales": {
-                    name: dict(answers)
-                    for name, answers in self.scale_runtime.snapshot().answers_by_scale.items()
-                },
-                "relaxation_done": self._get_relaxation_done(),
-            }
-            if hasattr(self.agent, "observe_turn"):
-                raw_observation = self.agent.observe_turn(**kwargs)
-                if isinstance(raw_observation, AgentObservation):
-                    observation = raw_observation
-                else:
-                    raw = dict(raw_observation or {})
-                    proposal = raw.get("proposal")
-                    if not isinstance(proposal, RouterProposal):
-                        proposal = RouterProposal.from_legacy_route(raw)
-                    observation = AgentObservation(
-                        proposal=proposal,
-                        intent=str(raw.get("intent", "counseling") or "counseling"),
-                        fallback_used=bool(raw.get("fallback_used", False)),
-                        source=str(raw.get("source", "agent") or "agent"),
-                    )
-            elif hasattr(self.agent, "route_proposal"):
-                raw = self.agent.route_proposal(**kwargs)
-                proposal = raw if isinstance(raw, RouterProposal) else RouterProposal.from_legacy_route(raw)
-                observation = AgentObservation(proposal=proposal)
-            else:
-                raw = self.agent.route_conversation_actions(**kwargs)
-                proposal = raw if isinstance(raw, RouterProposal) else RouterProposal.from_legacy_route(raw)
-                observation = AgentObservation(
-                    proposal=proposal,
-                    intent=str(raw.get("intent", "counseling") or "counseling") if isinstance(raw, dict) else "counseling",
-                    fallback_used=bool(raw.get("fallback_used", False)) if isinstance(raw, dict) else False,
-                )
+            request = self._build_decision_request(user_text, current_rounds)
+            outcome = self._decision_coordinator().observe_turn(request)
+            observation = outcome.observation
             self._agent_route_cooldown = 0
             logger.warning(
-                "[AgentRoute] "
-                f"action={observation.proposal.action.value} "
+                f"[AgentRoute] action={observation.proposal.action.value} "
                 f"scale={observation.proposal.scale_name} confidence={observation.proposal.confidence} "
-                f"intent={observation.intent!r} source={observation.source!r}"
+                f"intent={observation.intent!r} source={observation.source!r} "
+                f"mode={outcome.mode.value} provider={outcome.provider} "
+                f"escalated={outcome.escalated}"
             )
             return observation
         except Exception as exc:

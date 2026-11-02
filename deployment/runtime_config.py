@@ -18,7 +18,7 @@ Design contract:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -55,10 +55,36 @@ TTS_PROVIDERS = frozenset({TTS_PROVIDER_VOXCPM, TTS_PROVIDER_COSYVOICE})
 REQUEST_MODES = frozenset({"chat", "completion"})
 SYSTEM_ROLE_MODES = frozenset({"native", "prepend_user"})
 
+# Decision layer. ``legacy`` keeps the RC1 Qwen Agent as the only decision
+# source; ``shadow`` runs a second opinion without letting it touch state;
+# ``jev`` makes a Jev-style backend the primary observation source.
+DECISION_MODE_LEGACY = "legacy"
+DECISION_MODE_SHADOW = "shadow"
+DECISION_MODE_JEV = "jev"
+DECISION_MODES = frozenset({DECISION_MODE_LEGACY, DECISION_MODE_SHADOW, DECISION_MODE_JEV})
+
+DECISION_BACKEND_LEGACY = "legacy_qwen"
+DECISION_BACKEND_ANYJEV = "anyjev_decider"
+DECISION_BACKEND_TACIT = "tacit"
+DECISION_BACKEND_FAKE = "fake"
+# ``legacy_qwen`` is a valid backend only for legacy/shadow; a Jev mode needs a
+# decision model, otherwise the mode switch would silently do nothing.
+DECISION_BACKENDS = frozenset(
+    {DECISION_BACKEND_LEGACY, DECISION_BACKEND_ANYJEV, DECISION_BACKEND_TACIT, DECISION_BACKEND_FAKE}
+)
+JEV_BACKENDS = frozenset({DECISION_BACKEND_ANYJEV, DECISION_BACKEND_TACIT, DECISION_BACKEND_FAKE})
+
+DECISION_TRANSPORTS = frozenset({"server", "inprocess"})
+
+ESCALATION_LEGACY = "legacy"
+ESCALATION_DETERMINISTIC = "deterministic"
+ESCALATION_MODES = frozenset({ESCALATION_LEGACY, ESCALATION_DETERMINISTIC})
+
 # ``model_path: auto`` (or null) means: use the config.py auto-detection.
 PATH_AUTO = "auto"
 
-_TOP_LEVEL_SECTIONS = ("dialogue", "agent", "asr", "tts", "runtime")
+_TOP_LEVEL_SECTIONS = ("dialogue", "agent", "asr", "tts", "runtime", "decision")
+_OPTIONAL_TOP_LEVEL_SECTIONS = frozenset({"decision"})
 _DIALOGUE_KEYS = (
     "provider", "engine", "base_url", "model", "api_key", "timeout", "max_tokens",
     "temperature", "top_p", "top_k", "presence_penalty", "enable_thinking",
@@ -74,6 +100,14 @@ _RUNTIME_KEYS = (
     "strict_preflight", "immutable_contract", "manage_model_servers",
     "enable_streaming_tts",
 )
+_DECISION_KEYS = (
+    "mode", "backend", "model", "model_path", "model_dtype", "endpoint", "transport",
+    "timeout", "abstain_threshold", "escalation_mode", "shadow_enabled", "shadow_backend",
+    "journal_path", "allow_remote_endpoint", "allow_model_download", "batch",
+    "adaptive", "tau", "max_cot_share", "clinical_review",
+)
+_CLINICAL_REVIEW_KEYS = ("enabled",)
+_MODEL_DTYPES = frozenset({"auto", "bfloat16", "float16", "float32"})
 
 # Legacy dev-shell overrides, honored only when the runtime contract is not
 # immutable. Production configs set ``immutable_contract: true`` so the YAML
@@ -153,6 +187,47 @@ class RuntimeSection:
 
 
 @dataclass(frozen=True)
+class ClinicalReviewConfig:
+    """Complex-review service. Disabled by default and never self-authorising."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class DecisionConfig:
+    """Decision-layer selection. The defaults reproduce RC1 exactly."""
+
+    mode: str = DECISION_MODE_LEGACY
+    backend: str = DECISION_BACKEND_LEGACY
+    model: Optional[str] = None
+    model_path: Optional[str] = None
+    model_dtype: str = "bfloat16"
+    endpoint: Optional[str] = None
+    transport: str = "server"
+    timeout: float = 5.0
+    abstain_threshold: float = 0.55
+    escalation_mode: str = ESCALATION_LEGACY
+    shadow_enabled: bool = False
+    shadow_backend: Optional[str] = None
+    journal_path: Optional[str] = None
+    allow_remote_endpoint: bool = False
+    allow_model_download: bool = False
+    batch: bool = True
+    adaptive: bool = False
+    tau: float = 0.5
+    max_cot_share: Optional[float] = 0.2
+    clinical_review: ClinicalReviewConfig = field(default_factory=ClinicalReviewConfig)
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.mode == DECISION_MODE_LEGACY
+
+    @property
+    def effective_shadow_backend(self) -> Optional[str]:
+        return self.shadow_backend if self.mode == DECISION_MODE_SHADOW else None
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """One fully resolved runtime configuration."""
 
@@ -162,6 +237,7 @@ class RuntimeConfig:
     tts: TTSConfig
     runtime: RuntimeSection
     source_path: str = ""
+    decision: DecisionConfig = field(default_factory=DecisionConfig)
 
     @property
     def dialogue_is_openai_compatible(self) -> bool:
@@ -207,6 +283,19 @@ class RuntimeConfig:
                 "manage_model_servers": self.runtime.manage_model_servers,
                 "enable_streaming_tts": self.runtime.enable_streaming_tts,
             },
+            "decision": {
+                "mode": self.decision.mode,
+                "backend": self.decision.backend,
+                "transport": self.decision.transport,
+                "endpoint": self.decision.endpoint,
+                "model": self.decision.model,
+                "model_path": self.decision.model_path,
+                "model_dtype": self.decision.model_dtype,
+                "abstain_threshold": self.decision.abstain_threshold,
+                "escalation_mode": self.decision.escalation_mode,
+                "shadow_backend": self.decision.shadow_backend,
+                "clinical_review_enabled": self.decision.clinical_review.enabled,
+            },
         }
 
 
@@ -227,6 +316,20 @@ def _require_section(raw: Mapping[str, Any], name: str, source: Path) -> Mapping
     section = raw[name]
     if section is None:
         raise _fail(f"runtime config section '{name}' is empty in {source}")
+    if not isinstance(section, Mapping):
+        raise _fail(f"runtime config section '{name}' must be a mapping in {source}")
+    return section
+
+
+def _optional_section(
+    raw: Mapping[str, Any], name: str, source: Path
+) -> Optional[Mapping[str, Any]]:
+    """Read an optional section; a missing or null section means 'defaults'."""
+    if name not in raw:
+        return None
+    section = raw[name]
+    if section is None:
+        return {}
     if not isinstance(section, Mapping):
         raise _fail(f"runtime config section '{name}' must be a mapping in {source}")
     return section
@@ -477,6 +580,153 @@ def _parse_runtime(section: Mapping[str, Any], source: Path) -> RuntimeSection:
     )
 
 
+def _parse_clinical_review(section: Mapping[str, Any], source: Path) -> ClinicalReviewConfig:
+    name = "decision.clinical_review"
+    _reject_unknown_keys(section, _CLINICAL_REVIEW_KEYS, name, source)
+    return ClinicalReviewConfig(enabled=_required_bool(section, "enabled", name, False))
+
+
+def _parse_decision(
+    section: Optional[Mapping[str, Any]], source: Path
+) -> DecisionConfig:
+    """Parse the optional ``decision`` section.
+
+    Absent section, or a section with only some keys, resolves to the RC1
+    behaviour: ``mode: legacy`` driven by the existing Qwen Agent.  Everything
+    that could change runtime behaviour is opt-in.
+    """
+    if section is None:
+        return DecisionConfig()
+
+    name = "decision"
+    _reject_unknown_keys(section, _DECISION_KEYS, name, source)
+
+    mode = _require_choice(
+        _optional_str(section, "mode", name, DECISION_MODE_LEGACY) or DECISION_MODE_LEGACY,
+        DECISION_MODES, name, "mode",
+    )
+    backend = _require_choice(
+        _optional_str(section, "backend", name, DECISION_BACKEND_LEGACY) or DECISION_BACKEND_LEGACY,
+        DECISION_BACKENDS, name, "backend",
+    )
+    transport = _require_choice(
+        _optional_str(section, "transport", name, "server") or "server",
+        DECISION_TRANSPORTS, name, "transport",
+    )
+    escalation_mode = _require_choice(
+        _optional_str(section, "escalation_mode", name, ESCALATION_LEGACY) or ESCALATION_LEGACY,
+        ESCALATION_MODES, name, "escalation_mode",
+    )
+
+    timeout = _optional_number(section, "timeout", name, 5.0)
+    if timeout is None or timeout <= 0:
+        raise _fail(f"runtime config '{name}.timeout' must be positive, got {timeout!r}")
+    abstain = _optional_number(section, "abstain_threshold", name, 0.55)
+    if abstain is None or not 0.0 < abstain <= 1.0:
+        raise _fail(
+            f"runtime config '{name}.abstain_threshold' must be in (0, 1], got {abstain!r}"
+        )
+    tau = _optional_number(section, "tau", name, 0.5)
+    if tau is None or tau < 0:
+        raise _fail(f"runtime config '{name}.tau' must be non-negative, got {tau!r}")
+    max_cot_share = _optional_number(section, "max_cot_share", name, 0.2)
+    if max_cot_share is not None and not 0.0 < max_cot_share <= 1.0:
+        raise _fail(
+            f"runtime config '{name}.max_cot_share' must be in (0, 1] or null, got {max_cot_share!r}"
+        )
+
+    endpoint = _optional_str(section, "endpoint", name)
+    if endpoint:
+        endpoint = _require_http_url(endpoint, name, "endpoint")
+    model = _optional_str(section, "model", name)
+    model_dtype = _require_choice(
+        _optional_str(section, "model_dtype", name, "bfloat16") or "bfloat16",
+        _MODEL_DTYPES, name, "model_dtype",
+    )
+    model_path = _optional_str(section, "model_path", name)
+    if model_path:
+        # A relative offline path is resolved against the config file itself so
+        # a self-contained bundle stays relocatable.  Existence is enforced by
+        # the preflight / service start, never here: the config must stay
+        # loadable on a machine that has not been provisioned yet.
+        candidate = Path(model_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = source.parent / candidate
+        model_path = str(candidate.resolve())
+    shadow_backend = _optional_str(section, "shadow_backend", name)
+    if shadow_backend is not None:
+        shadow_backend = _require_choice(shadow_backend, DECISION_BACKENDS, name, "shadow_backend")
+    journal_path = _optional_str(section, "journal_path", name)
+    allow_remote_endpoint = _required_bool(section, "allow_remote_endpoint", name, False)
+    allow_model_download = _required_bool(section, "allow_model_download", name, False)
+    batch = _required_bool(section, "batch", name, True)
+    adaptive = _required_bool(section, "adaptive", name, False)
+    shadow_enabled = _required_bool(section, "shadow_enabled", name, False)
+
+    clinical_section = section.get("clinical_review")
+    if clinical_section is None:
+        clinical_review = ClinicalReviewConfig()
+    elif not isinstance(clinical_section, Mapping):
+        raise _fail(f"runtime config '{name}.clinical_review' must be a mapping")
+    else:
+        clinical_review = _parse_clinical_review(clinical_section, source)
+
+    # -- cross-field consistency ------------------------------------------
+    if mode == DECISION_MODE_JEV and backend not in JEV_BACKENDS:
+        raise _fail(
+            f"runtime config '{name}.mode' is 'jev' but '{name}.backend' is {backend!r}; "
+            f"choose one of {sorted(JEV_BACKENDS)} (legacy mode keeps the Qwen Agent)"
+        )
+    if mode == DECISION_MODE_SHADOW and not shadow_backend:
+        raise _fail(
+            f"runtime config '{name}.mode' is 'shadow' but '{name}.shadow_backend' is missing; "
+            f"choose one of {sorted(JEV_BACKENDS)}"
+        )
+    if shadow_backend == DECISION_BACKEND_LEGACY:
+        raise _fail(
+            f"runtime config '{name}.shadow_backend' cannot be 'legacy_qwen'; "
+            "a shadow run must use a different backend from the authoritative one"
+        )
+    if shadow_enabled and mode != DECISION_MODE_SHADOW:
+        raise _fail(
+            f"runtime config '{name}.shadow_enabled' is true but '{name}.mode' is {mode!r}; "
+            "set mode: shadow to run a shadow decision"
+        )
+    if backend == DECISION_BACKEND_ANYJEV and transport == "server" and not endpoint:
+        raise _fail(
+            f"runtime config '{name}.backend' is 'anyjev_decider' over server transport "
+            f"but '{name}.endpoint' is missing (e.g. http://127.0.0.1:8100)"
+        )
+    if backend == DECISION_BACKEND_TACIT and transport == "inprocess" and not (model or model_path):
+        raise _fail(
+            f"runtime config '{name}.backend' is 'tacit' over inprocess transport "
+            f"but neither '{name}.model_path' nor '{name}.model' is set"
+        )
+
+    return DecisionConfig(
+        mode=mode,
+        backend=backend,
+        model=model,
+        model_path=model_path,
+        model_dtype=model_dtype,
+        endpoint=endpoint,
+        transport=transport,
+        timeout=timeout,
+        abstain_threshold=abstain,
+        escalation_mode=escalation_mode,
+        shadow_enabled=shadow_enabled or mode == DECISION_MODE_SHADOW,
+        shadow_backend=shadow_backend,
+        journal_path=journal_path,
+        allow_remote_endpoint=allow_remote_endpoint,
+        allow_model_download=allow_model_download,
+        batch=batch,
+        adaptive=adaptive,
+        tau=tau,
+        max_cot_share=max_cot_share,
+        clinical_review=clinical_review,
+    )
+
+
 def _apply_env_overrides(config: RuntimeConfig,
                          environment: Mapping[str, str]) -> RuntimeConfig:
     """Apply legacy dev-shell overrides; disabled for immutable contracts."""
@@ -546,6 +796,7 @@ def load_runtime_config(path: Optional[str | Path] = None,
         tts=_parse_tts(_require_section(raw, "tts", resolved), resolved),
         runtime=_parse_runtime(_require_section(raw, "runtime", resolved), resolved),
         source_path=str(resolved),
+        decision=_parse_decision(_optional_section(raw, "decision", resolved), resolved),
     )
     env = os.environ if environment is None else environment
     return _apply_env_overrides(config, env)

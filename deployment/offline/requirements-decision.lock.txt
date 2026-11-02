@@ -1,0 +1,54 @@
+# ============================================================================
+# voicechat3 决策服务离线依赖锁定（decision service only）
+# ============================================================================
+# 用途：在访谈机上用【独立 venv】承载 transformers 决策进程，不污染主 .venv。
+# 版本号全部取自本项目实测通过的组合：
+#   Python 3.13.14 · torch 2.11.0+cu130 · transformers 5.20.0 · RTX 5090 32GB
+#
+# 三个阶段（联网机 -> 离线机）：
+#
+#   1) 联网机：预取 wheel（含 CUDA 变体），不安装
+#      python -m venv wheelhouse-env
+#      wheelhouse-env/Scripts/pip install --upgrade pip
+#      wheelhouse-env/Scripts/pip download -r deployment/offline/requirements-decision.lock.txt \
+#          -d wheelhouse --only-binary=:all:
+#      # torch 的 CUDA 轮子要显式指定索引，否则会拿到 CPU 版：
+#      wheelhouse-env/Scripts/pip download torch==2.11.0+cu130 \
+#          --index-url https://download.pytorch.org/whl/cu130 -d wheelhouse
+#      python scripts/decision/wheelhouse.py seal --dir wheelhouse
+#
+#   2) 拷贝 wheelhouse/ 到离线机
+#
+#   3) 离线机：校验 + 安装（--no-index 保证不会偷偷联网）
+#      python scripts/decision/wheelhouse.py verify --dir wheelhouse
+#      python -m venv <bundle>/venv-decision
+#      <bundle>/venv-decision/Scripts/pip install --no-index --find-links wheelhouse \
+#          -r deployment/offline/requirements-decision.lock.txt
+#
+# 说明：
+#   - 不写死 sha256。哈希必须在“实际下载了 wheel 的那台机器”上生成，
+#     这里预填等于伪造。seal 步骤会生成 wheelhouse_manifest.json 并逐文件校验。
+#   - anyjev 为可选依赖：本项目自带等效 L0 readout 引擎（decision/engine），
+#     只有需要对照官方 AnyJev 实现时才安装，见文件末尾的可选段。
+# ============================================================================
+
+# --- 推理核心 ---------------------------------------------------------------
+torch==2.11.0
+transformers==5.20.0
+tokenizers==0.23.3
+safetensors==0.8.0
+huggingface-hub==2.2.0
+numpy==2.5.4
+
+# --- 契约与序列化 -----------------------------------------------------------
+pydantic==2.14.1
+PyYAML==6.0.3
+
+# --- 大模型加载加速（transformers 可选但强烈建议） --------------------------
+accelerate==1.15.0
+
+# --- 分词器兼容（部分中文词表需要） -----------------------------------------
+sentencepiece==0.2.2
+
+# --- 可选：对照官方 AnyJev 实现（见文末说明） --------------------------------
+# anyjev==0.3.0

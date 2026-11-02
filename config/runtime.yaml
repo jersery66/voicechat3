@@ -75,3 +75,44 @@ runtime:
   immutable_contract: true     # true = 忽略遗留环境变量覆盖，配置即契约
   manage_model_servers: false  # 应用不负责拉起/停止模型服务（由引擎脚本管理）
   enable_streaming_tts: true
+
+# ============================================================================
+# decision —— 结构化决策层（可选段；缺省等于 legacy，行为与 RC1 完全一致）
+# ============================================================================
+# mode:
+#   legacy —— 只使用上面的 Qwen Agent 做观测（默认，线上保持这个）
+#   shadow —— Qwen Agent 照常决策，另跑一个决策模型记录对照，不改变任何状态
+#   jev    —— 由 Jev-style 决策模型提供 AgentObservation，仍必须经 TurnPolicy
+#
+# backend: legacy_qwen | anyjev_decider | tacit | fake
+# transport: server（调用本地 /v1/decide 网关）| inprocess（进程内加载权重）
+#
+# 离线部署（本机无外网时唯一可用的方式）：
+#   model_path  —— 本地权重目录，绝对路径，或相对本文件所在目录。
+#                  必须是完整目录（config.json / tokenizer / *.safetensors 齐全）。
+#   model_dtype —— auto | bfloat16 | float16 | float32，默认 bfloat16（5090 可原生跑）。
+#   配合 scripts/decision/tacit_model_check.py 校验 sha256；配置加载本身不检查
+#   文件是否存在（否则换机器就起不来），由启动预检和服务进程强制检查。
+#
+# 安全默认值（不要随意放宽）：
+#   allow_remote_endpoint: false —— 决策端点必须是回环地址（AnyJev 网关无鉴权）
+#   allow_model_download: false  —— 不允许隐式下载模型权重
+#   clinical_review.enabled: false —— 复杂评估接口存在但默认关闭
+decision:
+  mode: legacy
+  backend: legacy_qwen
+  transport: server
+  timeout: 5.0
+  abstain_threshold: 0.55      # 低于此置信度视为弃权并回退，不是"弱投票"
+  escalation_mode: legacy      # legacy = 回退到 Qwen Agent；deterministic = 直接确定性 CHAT
+  shadow_backend: null         # mode: shadow 时必填
+  endpoint: null               # 例如 http://127.0.0.1:8100
+  model: null
+  model_path: null             # 例如 models/Tacit-1.7B（离线部署必填）
+  model_dtype: bfloat16
+  batch: true
+  allow_remote_endpoint: false
+  allow_model_download: false
+  journal_path: null           # 设为路径后按轮追加元数据 JSONL（不含文本）
+  clinical_review:
+    enabled: false

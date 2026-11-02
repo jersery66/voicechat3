@@ -282,6 +282,76 @@ def check_relaxation_media() -> bool:
     return True  # non-fatal
 
 
+def check_decision_backend() -> bool:
+    """Report the decision layer's readiness without ever blocking the launch.
+
+    A decision failure is *designed* to fall back to the Qwen Agent (or to a
+    deterministic chat), so an unreachable decision service must remain a WARN:
+    turning it into a hard FAIL would contradict the fallback contract and stop
+    interviews that would otherwise run fine.
+    """
+    try:
+        decision = get_runtime_config().decision
+    except Exception as exc:  # config already validated at import; defensive only
+        _warn("Decision Layer", f"config unavailable: {type(exc).__name__}")
+        return True
+
+    if decision.mode == "legacy":
+        _ok(f"Decision Layer (mode=legacy, backend={decision.backend})")
+        return True
+
+    label = f"Decision Layer (mode={decision.mode}, backend={decision.backend})"
+
+    if decision.backend in {"anyjev_decider", "tacit"} and decision.transport == "server":
+        endpoint = decision.endpoint
+        if not endpoint:
+            _warn(label, "no endpoint configured; will fall back at runtime")
+            return True
+        url = urljoin(endpoint.rstrip("/") + "/", "health")
+        try:
+            # Loopback must not be routed through a system proxy.
+            response = requests.get(url, timeout=float(decision.timeout or 5.0),
+                                    proxies={"http": None, "https": None})
+            payload = response.json() if response.ok else {}
+        except Exception as exc:
+            _warn(label, f"{endpoint} unreachable ({type(exc).__name__}); falls back at runtime")
+            return True
+        if str(payload.get("status")) == "ok":
+            integrity = payload.get("integrity") or {}
+            if integrity and not integrity.get("ok", True):
+                _warn(label, f"service up but weights unverified: {integrity.get('problems')}")
+            else:
+                _ok(f"{label} at {endpoint}")
+        else:
+            _warn(label, f"{endpoint} reported status={payload.get('status')!r}")
+        return True
+
+    if decision.transport == "inprocess" or decision.backend == "tacit":
+        model_path = decision.model_path or decision.model
+        if not model_path:
+            _warn(label, "no model_path/model configured; falls back at runtime")
+            return True
+        try:
+            from decision.integrity import summarise, verify_model_dir
+
+            report = verify_model_dir(model_path, require_manifest=True, extra_files_ok=True)
+        except Exception as exc:
+            _warn(label, f"integrity check failed: {type(exc).__name__}: {exc}")
+            return True
+        if report.ok:
+            _ok(f"{label} — {summarise(report)}")
+        else:
+            _warn(label, summarise(report))
+        return True
+
+    if decision.backend == "fake":
+        _warn(label, "fake backend is for tests only; not production inference")
+        return True
+
+    _warn(label, "no readiness probe defined for this backend")
+    return True  # non-fatal
+
+
 def run_check() -> bool:
     """Run all checks. Returns True if all critical checks pass."""
     print("=" * 50)
@@ -300,6 +370,7 @@ def run_check() -> bool:
         check_converted_knowledge_base(),
         check_relaxation_media(),
         check_data_root(),
+        check_decision_backend(),
     ]
 
     print("=" * 50)
