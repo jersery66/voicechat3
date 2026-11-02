@@ -14,8 +14,10 @@ Jev 的主要职责从「给这句话打动作标签」改成「在连续访谈�
 - 危机信号与会话结束优先级最高，且会取消所有未决邀请；
 - 生产调用链实测：`OFFER_SCALE` 不启动量表，**只有同意之后** `ScaleRuntime` 才真正启动。
 
-**真实 Tacit-1.7B / Qwen 的时机准确率没有测出**——本机没有权重（HF 缓存只有 `refs`，无 `blobs`/`snapshots`），
-也没有在跑的服务。本文不给这类数字，`rule` 与 `replay` 都不是模型成绩。
+**真实 Tacit-1.7B 已经跑完**（本地权重 `D:/models/tacit/Tacit-1.7B`，进程内官方 letter readout）：
+dev 上英文模板每轮建议一致率仅 9.2%，改用中文模板后升至 24.9%；test 上（配置已在 dev 定好，只跑一次）
+量表时机命中 50%、政策一致 79.8%、**权限违规 0**。它的行为很明确：**强烈偏向 `clarify_first`，很少主动建议**，
+因此「不越权」做得很好，「该建议时建议」做得很差。Qwen3-4B 未跑（未安装 agent 后端）。
 
 ## 2. 交付清单
 
@@ -27,7 +29,7 @@ Jev 的主要职责从「给这句话打动作标签」改成「在连续访谈�
 | 4 | 量表选择与触发契约修复 | 完成 | `decision/providers/{tacit,anyjev,base}.py`、`conversation/turn_policy.py` |
 | 5 | 放松训练时机与同意流程 | 完成 | `OfferKind.RELAXATION` + 生命周期状态机 |
 | 6 | 多轮决策测试集与结果 | 完成（链路层） | §7、§8 |
-| 7 | 三基线比较 | **部分**：离线两基线已跑；真实模型未跑 | §8 |
+| 7 | 三基线比较 | **完成 2.5/3**：`rule`、`replay`、**真实 Tacit-1.7B** 已跑；Qwen agent 后端未安装 | §8 |
 | 8 | TurnPolicy 权限与回退测试 | 完成：单元 + **生产链路** | `tests/test_offer_flow.py`、`tests/test_pipeline_offer_execution.py` |
 | 9 | 全量回归 | 完成：**1628 passed / 0 failed**，退出码 0 | §10 |
 | 10 | 完整中文结果报告 | 本文 | — |
@@ -195,6 +197,58 @@ DecisionProvider ──干预建议──► DecisionValidator ──审批─�
 - **权限违规为 0** 是这两行里唯一可以直接当作安全性结论的数字：它统计「执行了量表/放松但没有任何同意依据」
   的轮次，来源是每轮的 `consent_basis`，不是靠断言口头保证。
 
+### 8.3 真实 Tacit-1.7B（本机权重，进程内官方 readout）
+
+运行环境：RTX 5090 32GB，bf16，`Tacit.from_pretrained(D:/models/tacit/Tacit-1.7B, adaptive=False)`。
+加载 5.0 s；加载峰值 **3282 MiB**，4 题批推理峰值 **3392 MiB**（约整卡 10%）。
+
+**模板在 dev 上选择（不是 test）**：
+
+| dev（7 条 / 56 轮） | `--template en` | `--template zh` |
+| --- | --- | --- |
+| 量表命中 | 0%（3 个机会全漏） | 0% |
+| 无量表窗口却建议（spurious） | 2 | 1 |
+| 放松命中 | **0%**（1 个机会漏） | **100%** |
+| 每轮建议一致率 | 9.2% | **24.9%** |
+| 政策最终动作一致率 | 32.5% | **49.2%** |
+| 冲突建议拦截率 | 92.3% | 95.5% |
+| 权限违规 | 0 | 0 |
+
+中文模板在 dev 上全面更好，因此 test 使用 `zh`。
+
+**test（9 条 / 73 轮，只跑一次）**：
+
+| 指标 | 数值 |
+| --- | --- |
+| 量表建议机会 / 命中 | 2 / **50.0%**（TEST-11 命中 6–7 窗口；TEST-15 漏） |
+| 过早 / 过晚 / 漏 | 0% / 0% / 50% |
+| 无量表窗口却建议 | 1（TEST-09，放松被拒后转量表） |
+| 放松建议机会 / 命中 | 1 / **0%**（TEST-09 漏） |
+| 不合适任务切换 | 0 |
+| 拒绝后冷却内重复 | 0 |
+| 量表选择正确率 | 100% |
+| 同意后执行成功率 | 100% |
+| **权限违规** | **0** |
+| 同意解析错误 | 0 |
+| 每轮建议一致率 | 22.1% |
+| 政策最终动作一致率 | **79.8%** |
+| 冲突建议拦截率 | 93.6% |
+| 每轮决策延迟 P50 / P95 | **33.7 / 57.4 ms**（dev 实测，test 同量级） |
+
+**这些数字说明了什么**
+
+1. Tacit 在这套输入上**极保守**：56 轮 dev 里 28 次 `clarify_first`、2 次真正形成量表邀请；
+   25 次 `offer_scale` 中有 13 次在「选哪个量表」子问题里选了 `No scale for now`，
+   被 `DecisionValidator` 以 `missing_scale_name` 拒绝。这是模型自相矛盾，但系统正确地没有执行。
+2. **政策一致率（79.8%）远高于每轮建议一致率（22.1%）**：大多数轮次的正确动作就是继续访谈，
+   TurnPolicy 在模型过度澄清时仍把它们落成 `chat`/`clarify`，没有造成错误执行。
+3. **量表时机命中 50%**：只有一个真实机会（TEST-11）被抓住，另一个（TEST-15）漏了。
+4. 放松时机 0%：唯一机会（TEST-09）漏掉。**这印证了「Tacit 目前不能单独承担放松时机判断」**，
+   与部署架构一致——放松方式与执行交给既有模块，Tacit 只是建议源之一。
+
+不要把 79.8% 读成「Tacit 已经会判断时机」：它的高政策一致率来自「多数轮次不该做事」这一分布，
+而不是来自准确的时机识别。真正的时机能力要看窗口命中率。
+
 ## 9. 代码地图（本轮新增/改动）
 
 | 文件 | 变更 |
@@ -202,7 +256,7 @@ DecisionProvider ──干预建议──► DecisionValidator ──审批─�
 | `decision/timing.py` | 四分类词表、访谈阶段、`OfferStatus`/`OfferRecord`/`OfferState`/`OfferPolicy`、候选排序、`mentions_offer()`、理由常量 |
 | `decision/contracts.py` | `DecisionRequest` 多轮状态；`RawDecision.intervention`/`offer_target`/`scale_choice`；`build_observation` 映射并标 `offer` |
 | `decision/validator.py` | 有 `intervention` 走时机校验，否则原五类路径（legacy 等价）；10 个时机类拒绝理由 |
-| `decision/providers/{base,tacit,anyjev}.py` | 主问题改为 `intervention`；条件子问题；统一装配；**移除 `scale_name=None`** |
+| `decision/providers/{base,tacit,anyjev}.py` | 主问题改为 `intervention`；条件子问题；统一装配；**移除 `scale_name=None`**；Tacit 支持 `template=en|zh` 与 `transport=inprocess` |
 | `decision/providers/{rule,scripted,fake}.py` | 确定性基线、标注回放、测试夹具 |
 | `decision/timing_eval.py` | 用生产对象逐轮跑轨迹（`DecisionRequest`→validator→policy→ledger→runtime），输出 `consent_basis` |
 | `decision/timing_metrics.py` | 窗口化指标 + `permission_violations` / `consent_parse_errors` |
@@ -212,7 +266,7 @@ DecisionProvider ──干预建议──► DecisionValidator ──审批─�
 | `conversation/turn_signals.py` | 答复分类、问句识别、延后、双重否定、风险、显式请求、愿意倾诉 |
 | `services/pipeline.py` | 账本接线、风险/结束取消邀请、漂移过期、症状领域 |
 | `decision/service/server.py` | **错误路径读取请求体**，消除 Windows RST |
-| `scripts/benchmarks/timing_benchmark.py` | 多基线对照 CLI（rule/replay/tacit/anyjev，dev/test 分离） |
+| `scripts/benchmarks/timing_benchmark.py` | 多基线对照 CLI（rule/replay/tacit/anyjev，dev/test 分离，`--transport inprocess` 与 `--template en|zh`） |
 | `tests/test_timing_contracts.py`、`test_offer_flow.py`、`test_offer_lifecycle.py`、`test_timing_metrics.py`、`test_timing_trajectories.py`、`test_pipeline_offer_execution.py` | 本轮净增 34 项测试（1594 → 1628） |
 
 ## 10. 本轮修掉的缺陷（含根因）
@@ -262,17 +316,20 @@ DecisionProvider ──干预建议──► DecisionValidator ──审批─�
 - **失效后不执行**：漂移 3 轮后一句「好」不启动任何量表（TEST-15）；
 - **权限违规 0**：两基线的 `permission_violations` 均为 0；
 - 契约：`OFFER_SCALE` / `START_SCALE` 都要求注册表内的量表名，`None` 不可能通过；
+- **真实 Tacit-1.7B 已实测**：dev 上比较 en/zh 模板后定 zh，test 只跑一次；
+  权限违规 0，量表命中 50%，政策一致 79.8%（明细与局限见 §8.3）；
 - 全量回归：**1628 passed / 0 failed**，退出码 0（连续两次，`--basetemp` 唯一目录）。
 
 **未验证（不要当成结论）**
 
-- **真实 Tacit-1.7B / Qwen 的时机指标：没有**。本机 HF 缓存只有 `models--morriszjm--Tacit-1.7B/refs`（1 KB），
-  无权重文件；8099/8100 端口均未监听。报告里没有第三行属实证数据；
+- **Qwen3-4B agent 后端的时机成绩**：`anyjev` 未安装在项目环境，`--providers anyjev` 无法运行；
+- **Tacit 的时机能力整体偏弱**：test 量表命中 50%、放松 0%，样本只有 3 个窗口机会，
+  不能据此给出「Tacit 可以承担时机决策」的结论；需要更多真实轨迹与独立标注；
 - **窗口标注的临床效度**：由开发者按研究方案定义，**未经独立专业标注**。合成轨迹只能说明
   控制逻辑符合预先写下的预期，不能宣称「临床正确时机」；
-- 中英文问题模板、不同历史摘要、不同候选组织方式的对照：开关已具备，**未跑**；
-- 显存：未加载模型，无测量；
-- 完整语音闭环（TTS 念出邀请话术、ASR 识别「可以」）未在本轮实测。
+- 不同历史摘要长度、不同候选组织方式的对照：开关已具备，**未跑**；
+- 完整语音闭环（TTS 念出邀请话术、ASR 识别「可以」）未在本轮实测；
+- Tacit 的 `cot` 升级路径未启用（`adaptive=False`），启用后的时机与延迟未知。
 
 ## 12. 复现命令
 
@@ -284,9 +341,16 @@ python scripts/benchmarks/timing_benchmark.py --split all --providers replay --v
 # 全部 16 条，产物在 test_output/timing/
 python scripts/benchmarks/timing_benchmark.py --split all --out test_output/timing
 
-# 真实模型（本机未执行：无权重、无服务）
+# 真实模型：进程内加载官方 Tacit 权重（官方 letter readout）
+# 环境：D:\offline\tacit-bundle\venv-decision（装了 anyjev + torch cu130）
 python scripts/benchmarks/timing_benchmark.py --split dev \
-    --providers rule,tacit --endpoint http://127.0.0.1:8099
+    --providers tacit --transport inprocess --template zh \
+    --model-path D:/models/tacit/Tacit-1.7B
+
+# 配置在 dev 定好之后，test 只跑一次
+python scripts/benchmarks/timing_benchmark.py --split test \
+    --providers tacit --transport inprocess --template zh \
+    --model-path D:/models/tacit/Tacit-1.7B --label test-tacit-zh
 
 # 本轮测试
 python -m pytest tests/test_offer_lifecycle.py tests/test_pipeline_offer_execution.py \

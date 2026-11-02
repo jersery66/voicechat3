@@ -305,14 +305,20 @@ python scripts/benchmarks/timing_benchmark.py --split dev --providers replay --v
 ```
 
 ```bash
-# 真实模型对照：同一 dev 集，三个基线
+# 真实模型：进程内加载官方 Tacit 权重（必须用官方 letter readout，
+# 本地 decision/service 会主动拒绝 Tacit 检查点）
 python scripts/benchmarks/timing_benchmark.py --split dev \
-    --providers rule,tacit --endpoint http://127.0.0.1:8099 --out test_output/timing
+    --providers tacit --transport inprocess --template zh \
+    --model-path D:/models/tacit/Tacit-1.7B
 
 # 配置在 dev 上定好之后，再在未见过的 test 集上跑一次
 python scripts/benchmarks/timing_benchmark.py --split test \
-    --providers rule,tacit --endpoint http://127.0.0.1:8099 --out test_output/timing
+    --providers tacit --transport inprocess --template zh \
+    --model-path D:/models/tacit/Tacit-1.7B --label test-tacit-zh
 ```
+
+`--template` 必须在 dev 上选：英文是官方训练用语，中文在本机 dev 上明显更好
+（放松命中 0% → 100%，政策一致 32.5% → 49.2%）。**在 test 上换模板再报分等于作废。**
 
 产物：`test_output/timing/<split>-<provider>.json|.md`，含逐轨迹的窗口命中表与逐轮明细。
 

@@ -26,9 +26,9 @@ from typing import Any, Optional
 
 from decision.contracts import DecisionRequest, RawDecision
 from decision.providers.base import (
-    DECISION_QUESTIONS,
     DecisionBackendUnavailable,
     QuestionSpec,
+    build_questions,
     build_scale_choice_question,
     build_state_text,
     compose_decision,
@@ -76,10 +76,15 @@ class TacitDecisionProvider:
         tau: float = 0.5,
         max_cot_share: Optional[float] = 0.2,
         tacit_factory: Optional[Any] = None,
+        template: str = "en",
     ) -> None:
         self.transport = str(transport or "server").strip().lower()
         if self.transport not in {"server", "inprocess"}:
             raise ValueError("tacit transport must be 'server' or 'inprocess'")
+        # The English wording is what the official checkpoint was trained
+        # against; "zh" exists so the difference is measured, not assumed.
+        self.template = str(template or "en").strip().lower()
+        self.questions = build_questions(self.template)
         self.endpoint = endpoint
         self.model = model
         self.timeout = float(timeout)
@@ -134,9 +139,9 @@ class TacitDecisionProvider:
         state = build_state_text(request)
         started = time.perf_counter()
         if self.transport == "server":
-            answers, routes = self._decide_over_http(state, DECISION_QUESTIONS)
+            answers, routes = self._decide_over_http(state, self.questions)
         else:
-            answers, routes = self._decide_inprocess(state, DECISION_QUESTIONS)
+            answers, routes = self._decide_inprocess(state, self.questions)
 
         intervention = normalize_intervention(answers["intervention"][0])
 

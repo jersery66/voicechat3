@@ -95,6 +95,23 @@ def build_provider(name: str, args: argparse.Namespace):
         return "__replay__", "replays the annotation (self-check, not a model)"
 
     if name == "tacit":
+        if str(getattr(args, "transport", "server")) == "inprocess":
+            if not getattr(args, "model_path", None):
+                return None, "unavailable: inprocess needs --model-path"
+            from decision.providers.tacit import TacitDecisionProvider
+
+            # The official checkpoint must keep its own letter readout; the
+            # local decision service deliberately refuses Tacit checkpoints.
+            return (
+                TacitDecisionProvider(
+                    transport="inprocess",
+                    model=args.model_path,
+                    timeout=args.timeout,
+                    allow_model_download=False,
+                    template=args.template,
+                ),
+                f"tacit inprocess @ {args.model_path} [{args.template}]",
+            )
         endpoint = resolve_endpoint(args)
         if not endpoint:
             return None, "unavailable: pass --endpoint or --model-path"
@@ -312,6 +329,20 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="comma separated: rule,replay,tacit,anyjev")
     parser.add_argument("--endpoint", help="decision service endpoint for tacit/anyjev")
     parser.add_argument("--model-path", help="local checkpoint; spawns a service")
+    parser.add_argument(
+        "--transport",
+        choices=("server", "inprocess"),
+        default="server",
+        help="tacit only: 'server' spawns the local service; 'inprocess' loads the "
+        "official checkpoint directly (needed for Tacit, whose letter readout the "
+        "local service refuses to emulate)",
+    )
+    parser.add_argument(
+        "--template",
+        choices=("en", "zh"),
+        default="en",
+        help="question wording; choose on dev, never on test",
+    )
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--label", default=None, help="artifact name override")
     parser.add_argument("--verbose", action="store_true", help="print per-turn rows")
@@ -361,8 +392,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         reports.append(report)
 
         slug = str(report["provider"]).replace("/", "_").replace("\\", "_").lower()
-        json_path = out_dir / f"{args.split}-{slug}.json"
-        md_path = out_dir / f"{args.split}-{slug}.md"
+        # An explicit label already names the run (e.g. "dev-tacit-zh"), so do
+        # not prefix the split a second time.
+        stem = slug if args.label else f"{args.split}-{slug}"
+        json_path = out_dir / f"{stem}.json"
+        md_path = out_dir / f"{stem}.md"
         report["artifact"] = str(json_path)
         json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         md_path.write_text(render_markdown(report), encoding="utf-8")
