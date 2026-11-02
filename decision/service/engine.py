@@ -1,5 +1,10 @@
 """Engine behind the local decision service.
 
+This serves the project's own readout, not Tacit: see the warning at the top of
+``decision/engine/readout.py``.  A Tacit checkpoint is refused by default
+because a legal probability vector from the wrong readout is worse than an
+error -- it looks like an answer.
+
 A thin, honest wrapper: verify the checkpoint, load the readout, answer
 questions.  No caching of answers, no defaulting to a label, no fallback that
 invents a distribution -- if the model cannot answer, the caller gets an error
@@ -15,7 +20,18 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from decision.engine.readout import Readout, ReadoutError, ReadoutQuestion
-from decision.integrity import IntegrityReport, verify_model_dir
+from decision.integrity import (
+    IntegrityReport,
+    tacit_checkpoint_markers,
+    verify_model_dir,
+)
+
+
+#: Readout method -> route name.  "one_forward" is reserved for official Tacit.
+_ROUTE_BY_METHOD = {
+    "next_token": "label_token",
+    "candidate": "candidate",
+}
 
 
 class EngineUnavailable(RuntimeError):
@@ -35,6 +51,9 @@ class DecisionEngine:
     temperature: float = 1.0
     require_manifest: bool = True
     allow_unverified: bool = False
+    #: Refuse a Tacit checkpoint unless the operator says so explicitly: this
+    #: service implements its own readout, not Tacit's.
+    refuse_tacit_checkpoint: bool = True
 
     _readout: Optional[Readout] = field(default=None, init=False, repr=False)
     _integrity: Optional[IntegrityReport] = field(default=None, init=False, repr=False)
@@ -43,6 +62,7 @@ class DecisionEngine:
     _errors: int = field(default=0, init=False)
     _latencies: list[float] = field(default_factory=list, init=False)
     _started_at: float = field(default_factory=time.time, init=False)
+    _tacit_markers: list[str] = field(default_factory=list, init=False)
 
     # -- startup ----------------------------------------------------------
 
@@ -64,6 +84,16 @@ class DecisionEngine:
         root = Path(self.model_path).expanduser()
         if not root.is_dir():
             raise EngineUnavailable(f"model_path is not a directory: {root}")
+        markers = tacit_checkpoint_markers(root)
+        self._tacit_markers = markers
+        if markers and self.refuse_tacit_checkpoint:
+            raise EngineUnavailable(
+                "this looks like a Tacit checkpoint but this service implements its own "
+                "readout (option-string tokens, no chat template), which is NOT Tacit's "
+                f"letter readout; evidence: {', '.join(markers)}. Serve the official path "
+                "(decision.providers.tacit) instead, or pass --allow-non-tacit-readout to "
+                "run this readout deliberately as an experimental method."
+            )
         try:
             self.verify()
         except Exception as exc:
@@ -140,7 +170,9 @@ class DecisionEngine:
             "answer": result.answer,
             "probs": dict(result.probabilities),
             "probabilities": dict(result.probabilities),
-            "route": "one_forward" if result.method == "next_token" else "candidate",
+            # Deliberately not "one_forward": that string is Tacit's route, and
+            # this readout is not Tacit.  See docs/design/agent_decision_layer.md.
+            "route": _ROUTE_BY_METHOD.get(result.method, result.method),
             "method": result.method,
             "rounds": result.rounds,
             "entropy": round(result.entropy, 6),
@@ -178,6 +210,8 @@ class DecisionEngine:
             "device": self.device,
             "readout_mode": self.readout_mode,
             "rotations": self.rotations,
+            "readout_semantics": "option_label_tokens (not official Tacit letter readout)",
+            "tacit_checkpoint_markers": list(self._tacit_markers),
             "uptime_seconds": round(time.time() - self._started_at, 1),
             "calls": self._calls,
             "errors": self._errors,

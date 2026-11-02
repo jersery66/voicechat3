@@ -50,6 +50,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--allow-remote", action="store_true", help="bind a non-loopback host")
     parser.add_argument("--allow-unverified", action="store_true", help="serve without a manifest (unsafe)")
+    parser.add_argument(
+        "--allow-non-tacit-readout",
+        action="store_true",
+        help="serve a Tacit checkpoint with this project's readout (experimental; not Tacit semantics)",
+    )
     parser.add_argument("--check-only", action="store_true", help="verify integrity, then exit")
     parser.add_argument("--json", action="store_true", help="machine-readable output for probes")
     return parser
@@ -95,6 +100,7 @@ def _resolve_settings(args: argparse.Namespace) -> dict[str, Any]:
         "port": args.port if args.port is not None else 8100,
         "require_manifest": True,
         "allow_unverified": bool(args.allow_unverified),
+        "refuse_tacit_checkpoint": not bool(args.allow_non_tacit_readout),
     }
     if args.config:
         from_config = _from_config(args.config)
@@ -144,6 +150,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         temperature=float(settings["temperature"]),
         require_manifest=bool(settings["require_manifest"]),
         allow_unverified=bool(settings["allow_unverified"]),
+        refuse_tacit_checkpoint=bool(settings["refuse_tacit_checkpoint"]),
     )
     try:
         engine.load()
@@ -168,6 +175,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 4
 
     health = engine.health()
+    if health.get("tacit_checkpoint_markers"):
+        _log(
+            "[DecisionService] WARNING: Tacit checkpoint served with this project's readout. "
+            "Probabilities are over option-label tokens, not the official A/B/C letters, so they "
+            "are NOT comparable to official Tacit and must not be reported as Tacit results."
+        )
     _log(
         f"[DecisionService] listening on {service.url} "
         f"model={health.get('model_path')} dtype={health.get('dtype')} "

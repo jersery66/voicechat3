@@ -70,6 +70,12 @@ SessionEngine / ScaleRuntime
 
 ## 5. 读出（readout）机制
 
+> **先读这一条**：本节描述的自建 readout **不是**官方 Tacit 的推理语义，
+> 不能宣称与 Tacit 等价，也不能把它的输出当作 Tacit 结果报告。
+> 官方契约与本项目读法的逐项差异见 §5.1，实测差距见 §5.2。
+> 部署主路径是官方 `anyjev.Tacit`（`decision/providers/tacit.py`），
+> 自建 readout 保留为**可选实验方法**。
+
 `decision/engine/readout.py` 实现两种读法，配置 `mode` 选择：
 
 - `next_token`（默认首选）：prompt 以「答案：」结尾，取 next-token 分布，只在各选项标签的 token 上做**受限 softmax**。
@@ -77,9 +83,58 @@ SessionEngine / ScaleRuntime
 - `candidate`：把每个标签当作续写，分别求 log P(label | prompt)，再 softmax。标签不是单 token 时自动回落。
 - `auto`：优先 `next_token`，遇到多 token 标签按题回落 `candidate`（记录在 `notes`）。
 
+注意 `next_token` 读的是**选项标签字符串本身**（如 `" chat"`、`"start_scale"`）的 token 概率，
+而不是官方那样读**位置字母** A/B/C 的概率。两者是不同的估计量。
+
 **选项顺序偏差**：`rotations > 1` 时对选项列表做循环置换，把概率映射回原标签后平均。
 `tests/test_decision_readout.py::test_rotations_average_over_presentation_order` 用一个「永远偏好第一个选项」的
-假 scorer 证明了偏差被抵消。
+假 scorer 证明了偏差被抵消。但平均轮次并不等于官方 L0：L0 还会**除掉标签先验**
+（batch prior 或 content-free prior），本项目没有这一步。
+
+### 5.1 与官方 AnyJev 0.3.0 契约的差异（逐项核对 2026-11-02）
+
+官方源码：`anyjev/readout.py`、`anyjev/tacit.py`、`anyjev/decider.py`；
+Tacit-1.7B 自带 `tacit_decision.py` 与仓库实现一致。
+
+| 项目 | 官方 Tacit `one_forward` | 本项目 `Readout` |
+|---|---|---|
+| prompt 渲染 | `apply_chat_template(add_generation_prompt=True, enable_thinking=False)`，带 system | 纯文本拼接，无 chat template、无 system |
+| prompt 内容 | `State:` / `Question:` / `Options:` / `Answer with the letter only.` | `【会话状态】…` / `A. 选项` / `答案：` |
+| 读出目标 | 位置标签 `A,B,C…`（choice）、`Yes/No`（yes_no）、`1..K`（score） | 选项字符串自身的 token |
+| 概率 | 仅在 K 个标签 logits 上做受限 log-softmax | 同（受限 softmax），但标签集合不同 |
+| 顺序处理 | 单次、按给定顺序（L0 才做置换边缘化） | `rotations` 次循环置换平均 |
+| 标签先验 | Tacit 已由自蒸馏吸收；Decider L0 显式除掉 | 无 |
+| 返回路由 | `one_forward` / `cot` | `label_token` / `candidate`（**刻意不再用** `one_forward`） |
+
+由此产生三个必须承认的结论：
+
+1. **普通 `AutoModelForCausalLM` 能加载 Tacit 权重**（`Qwen3ForCausalLM`，与本机实测一致），
+   但「能加载 + 概率合法」不等于「决策方法正确」。
+2. 在 Qwen3 词表上，本项目的五个问题里 `intent`/`emotion`/`action` 都存在多 token 标签
+   （`help_seeking`、`irritable`、`start_scale`、`recommend_relaxation`、`recommend_game`、`end_session`），
+   `auto` 模式会**整题回落到 `candidate`**——即 5 题里 3 题不是「读 next-token 分布」。
+3. 因此 `DecisionService` 现在**默认拒绝**以自建 readout 服务 Tacit 检查点
+   （`decision/integrity.py::tacit_checkpoint_markers`），
+   必须显式加 `--allow-non-tacit-readout` 才能跑，并在 `/health` 里标注
+   `readout_semantics: option_label_tokens (not official Tacit letter readout)`。
+
+### 5.2 同一权重、同一 24 条中文用例的实测差距
+
+`scripts/benchmarks/tacit_official_compare.py`，RTX 5090，bf16，两份产物在
+`test_output/benchmarks/tacit_compare/`：
+
+| action 题 | 官方 Tacit | 本项目 readout |
+|---|---|---|
+| accuracy | **0.7083** | 0.4167 |
+| macro-F1 | **0.7391** | 0.2870 |
+| Brier | **0.4045** | 0.7192 |
+| ECE | **0.1616** | 0.2318 |
+| 选项顺序翻转率 | **0.0729** | 0.4792 |
+| 5 题一次批调用 P50 / P95 | **23.0 / 27.3 ms** | 108.8 / 115.8 ms |
+
+顺序翻转率 6.6 倍差距，正是官方文档里「raw label logits 会随选项重排改答案」的现象；
+本项目读法既没有 chat template，也没有除掉标签先验，落在这个陷阱里。
+
 
 ## 6. 校验与弃权
 

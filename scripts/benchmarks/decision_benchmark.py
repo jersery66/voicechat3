@@ -159,14 +159,34 @@ def _rotate(options: Sequence[str], offset: int) -> list[str]:
     return list(options[step:]) + list(options[:step])
 
 
+def http_decider(endpoint: str, timeout: float):
+    """Adapt a decision service endpoint to the ``decide(items) -> items`` shape."""
+
+    transport = HttpDecisionTransport(endpoint, timeout=timeout)
+
+    def decide(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        payload = transport.post({"items": list(items)})
+        results = payload.get("results") if isinstance(payload, dict) else payload
+        if not isinstance(results, list) or len(results) != len(items):
+            raise RuntimeError("unexpected_batch_shape")
+        return results
+
+    return decide
+
+
 def run_cases(
-    endpoint: str,
+    decide,
     cases: Sequence[dict[str, Any]],
     *,
-    timeout: float,
     order_rounds: int,
 ) -> dict[str, Any]:
-    transport = HttpDecisionTransport(endpoint, timeout=timeout)
+    """Grade one decision backend.
+
+    ``decide`` takes a list of request items and returns one result per item, so
+    the same grading code serves the HTTP service, the official Tacit API and
+    the experimental readout.  Keeping one grader is what makes their numbers
+    comparable at all.
+    """
     per_question: dict[str, dict[str, Any]] = {
         spec.name: {"gold": [], "pred": [], "probs": []} for spec in DECISION_QUESTIONS
     }
@@ -182,14 +202,13 @@ def run_cases(
         ]
         started = time.perf_counter()
         try:
-            payload = transport.post({"items": batch})
+            items = decide(batch)
         except Exception as exc:
             failures.append({"id": case.get("id"), "error": f"{type(exc).__name__}: {exc}"})
             continue
         latency = (time.perf_counter() - started) * 1000.0
         latencies.append(latency)
 
-        items = payload.get("results") if isinstance(payload, dict) else payload
         if not isinstance(items, list) or len(items) != len(batch):
             failures.append({"id": case.get("id"), "error": "unexpected_batch_shape"})
             continue
@@ -209,18 +228,18 @@ def run_cases(
             for spec in DECISION_QUESTIONS:
                 base_options = list(spec.options)
                 try:
-                    base = transport.post(
-                        {"state": state, "name": spec.name, "question": spec.text, "options": base_options}
-                    )
+                    base = decide(
+                        [{"state": state, "name": spec.name, "question": spec.text, "options": base_options}]
+                    )[0]
                 except Exception:
                     continue
                 base_answer = str(base.get("answer") or _argmax(base.get("probs") or {}))
                 for offset in range(1, min(order_rounds, len(base_options)) + 1):
                     rotated = _rotate(base_options, offset)
                     try:
-                        other = transport.post(
-                            {"state": state, "name": spec.name, "question": spec.text, "options": rotated}
-                        )
+                        other = decide(
+                            [{"state": state, "name": spec.name, "question": spec.text, "options": rotated}]
+                        )[0]
                     except Exception:
                         continue
                     other_answer = str(other.get("answer") or _argmax(other.get("probs") or {}))
@@ -410,7 +429,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             health = service.wait_healthy(timeout=args.timeout)
 
         result = run_cases(
-            service.base_url, cases, timeout=30.0, order_rounds=max(0, args.order_rounds)
+            http_decider(service.base_url, 30.0),
+            cases,
+            order_rounds=max(0, args.order_rounds),
         )
         report = {
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

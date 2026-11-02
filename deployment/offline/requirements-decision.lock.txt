@@ -1,36 +1,51 @@
 # ============================================================================
-# voicechat3 决策服务离线依赖锁定（decision service only）
+# voicechat3 决策服务离线依赖锁定
 # ============================================================================
-# 用途：在访谈机上用【独立 venv】承载 transformers 决策进程，不污染主 .venv。
-# 版本号全部取自本项目实测通过的组合：
-#   Python 3.13.14 · torch 2.11.0+cu130 · transformers 5.20.0 · RTX 5090 32GB
+# 目标平台：Windows x86_64 · CPython 3.13 · CUDA 13.0 · RTX 5090
+# 版本事实来源（本机实测，非猜测）：
+#   Python 3.13.14 · torch 2.11.0+cu130 · transformers 5.20.0
+#   tokenizers 0.23.3 · safetensors 0.8.0 · huggingface-hub 2.2.0
+#   numpy 2.5.4 · accelerate 1.15.0 · anyjev 0.3.0（官方）
+#
+# 解析验证（2026-11-02，联网机）：
+#   pip install --dry-run --only-binary=:all: --platform win_amd64 \
+#       --python-version 3.13 --implementation cp --abi cp313 \
+#       --target /tmp/t -r 本文件 --extra-index-url https://download.pytorch.org/whl/cu130
+#   → 解析成功，torch 解析为 2.11.0+cu130；共 45 个包
+#   注意：PyPI 上的 torch==2.11.0 与本项目实测的 2.11.0+cu130 不是同一个 wheel，
+#         必须带 --extra-index-url（或 --index-url）指向 cu130，否则会拿到别的 CUDA 变体。
 #
 # 三个阶段（联网机 -> 离线机）：
 #
-#   1) 联网机：预取 wheel（含 CUDA 变体），不安装
-#      python -m venv wheelhouse-env
-#      wheelhouse-env/Scripts/pip install --upgrade pip
-#      wheelhouse-env/Scripts/pip download -r deployment/offline/requirements-decision.lock.txt \
-#          -d wheelhouse --only-binary=:all:
-#      # torch 的 CUDA 轮子要显式指定索引，否则会拿到 CPU 版：
-#      wheelhouse-env/Scripts/pip download torch==2.11.0+cu130 \
-#          --index-url https://download.pytorch.org/whl/cu130 -d wheelhouse
+#   1) 联网机：预取 wheel（含 CUDA 变体），只下载不安装
+#      python -m pip download -r deployment/offline/requirements-decision.lock.txt \
+#          -d wheelhouse --only-binary=:all: \
+#          --extra-index-url https://download.pytorch.org/whl/cu130 \
+#          --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313
 #      python scripts/decision/wheelhouse.py seal --dir wheelhouse
 #
-#   2) 拷贝 wheelhouse/ 到离线机
+#   2) 拷贝 wheelhouse/ 到离线机（整目录，含 wheelhouse_manifest.json）
 #
 #   3) 离线机：校验 + 安装（--no-index 保证不会偷偷联网）
 #      python scripts/decision/wheelhouse.py verify --dir wheelhouse
 #      python -m venv <bundle>/venv-decision
-#      <bundle>/venv-decision/Scripts/pip install --no-index --find-links wheelhouse \
-#          -r deployment/offline/requirements-decision.lock.txt
+#      <bundle>/venv-decision/Scripts/python -m pip install --no-index \
+#          --find-links wheelhouse -r deployment/offline/requirements-decision.lock.txt
 #
 # 说明：
 #   - 不写死 sha256。哈希必须在“实际下载了 wheel 的那台机器”上生成，
-#     这里预填等于伪造。seal 步骤会生成 wheelhouse_manifest.json 并逐文件校验。
-#   - anyjev 为可选依赖：本项目自带等效 L0 readout 引擎（decision/engine），
-#     只有需要对照官方 AnyJev 实现时才安装，见文件末尾的可选段。
+#     这里预填等于伪造。seal 生成 wheelhouse_manifest.json 并逐文件校验。
+#   - anyjev 原为可选，现已改为必需：官方 Tacit 路径是部署主路径，
+#     自建 readout 只是实验方法（见 docs/design/agent_decision_layer.md）。
+#   - vLLM 不在本清单内：官方 anyjev 网关（python -m anyjev.serve）需要
+#     `vllm serve` 作为上游，而 vLLM 没有 Windows 原生 wheel。
+#     因此 Windows 上 Tacit 的主路径是进程内 transformers（decision.providers.tacit,
+#     transport=inprocess）；要跑网关必须用 WSL2/Linux。
 # ============================================================================
+
+# --- 官方决策框架（必需） ---------------------------------------------------
+# 依赖：numpy>=1.24；extra "hf" 需要 torch>=2.3、transformers>=4.53
+anyjev==0.3.0
 
 # --- 推理核心 ---------------------------------------------------------------
 torch==2.11.0
@@ -44,11 +59,8 @@ numpy==2.5.4
 pydantic==2.14.1
 PyYAML==6.0.3
 
-# --- 大模型加载加速（transformers 可选但强烈建议） --------------------------
+# --- 大模型加载（anyjev Tacit 的 device_map="auto" 需要） -------------------
 accelerate==1.15.0
 
 # --- 分词器兼容（部分中文词表需要） -----------------------------------------
 sentencepiece==0.2.2
-
-# --- 可选：对照官方 AnyJev 实现（见文末说明） --------------------------------
-# anyjev==0.3.0

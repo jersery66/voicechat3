@@ -180,7 +180,7 @@ def test_run_cases_grades_every_question(bench):
     ]
     service = _service()
     try:
-        result = bench.run_cases(service.url, cases, timeout=10.0, order_rounds=0)
+        result = bench.run_cases(bench.http_decider(service.url, 10.0), cases, order_rounds=0)
     finally:
         service.stop()
 
@@ -206,7 +206,7 @@ def test_order_sensitivity_is_measured(bench):
     ]
     service = _service()
     try:
-        result = bench.run_cases(service.url, cases, timeout=10.0, order_rounds=2)
+        result = bench.run_cases(bench.http_decider(service.url, 10.0), cases, order_rounds=2)
     finally:
         service.stop()
     # The stub is order-insensitive (it always takes position 0 from the options
@@ -223,7 +223,7 @@ def test_failed_case_is_reported_not_swallowed(bench, monkeypatch):
     import decision.providers.http_transport as transport_module
 
     monkeypatch.setattr(transport_module.HttpDecisionTransport, "post", boom)
-    result = bench.run_cases("http://127.0.0.1:1", [{"id": "c1", "text": "x"}], timeout=1.0, order_rounds=0)
+    result = bench.run_cases(bench.http_decider("http://127.0.0.1:1", 1.0), [{"id": "c1", "text": "x"}], order_rounds=0)
     assert result["failed_cases"]
     assert result["failed_cases"][0]["id"] == "c1"
 

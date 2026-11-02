@@ -19,7 +19,9 @@ checkpoint is installed, and nothing here downloads weights implicitly.
 
 from __future__ import annotations
 
+import os
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from decision.contracts import DecisionRequest, RawDecision
@@ -180,18 +182,39 @@ class TacitDecisionProvider:
         tacit = self._ensure_tacit()
         if tacit is None:
             raise DecisionBackendUnavailable("tacit checkpoint is not available")
+        # One `decide_batch` call, not five: official Tacit batches the questions
+        # of one turn into a single forward, and that is the latency we quote.
+        batch = [
+            {
+                "state": state,
+                "question": spec.text,
+                "options": list(spec.options),
+                "kind": "choice",
+            }
+            for spec in DECISION_QUESTIONS
+        ]
+        try:
+            results = tacit.decide_batch(batch)
+        except Exception as exc:  # a broken engine must not look like a decision
+            raise DecisionBackendUnavailable(
+                f"tacit decide_batch failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        if not isinstance(results, list) or len(results) != len(batch):
+            raise DecisionBackendUnavailable(
+                f"tacit returned {len(results) if isinstance(results, list) else '?'} "
+                f"decisions for {len(batch)} questions"
+            )
+
         answers: dict[str, tuple[str, dict[str, float]]] = {}
         routes: list[str] = []
-        for spec in DECISION_QUESTIONS:
-            result = tacit.decide(
-                state=state,
-                question=spec.text,
-                options=list(spec.options),
-                kind="choice",
-            )
-            answer = result.get("answer") if isinstance(result, dict) else None
-            probabilities = result.get("probs") if isinstance(result, dict) else None
-            if not answer or not isinstance(probabilities, dict):
+        for spec, result in zip(DECISION_QUESTIONS, results):
+            if not isinstance(result, dict):
+                raise DecisionBackendUnavailable(
+                    f"tacit returned {type(result).__name__} for {spec.name!r}"
+                )
+            answer = result.get("answer")
+            probabilities = result.get("probs")
+            if not answer or not isinstance(probabilities, dict) or not probabilities:
                 raise DecisionBackendUnavailable(
                     f"tacit returned an unusable decision for {spec.name!r}"
                 )
@@ -207,14 +230,23 @@ class TacitDecisionProvider:
             return self._tacit
         if not self.model:
             return None
-        looks_local = any(sep in self.model for sep in ("/", "\\")) and not self.model.startswith(
-            ("morriszjm/",)
-        )
-        if not looks_local and not self.allow_model_download:
-            raise DecisionBackendUnavailable(
-                f"decision.model {self.model!r} looks like a Hugging Face repo id; "
-                "set decision.allow_model_download to true or point model at a local path"
-            )
+
+        candidate = Path(self.model).expanduser()
+        is_directory = candidate.is_dir()
+        if not is_directory:
+            if not self.allow_model_download:
+                raise DecisionBackendUnavailable(
+                    f"decision.model {self.model!r} is not a local directory; "
+                    "set decision.allow_model_download to true only if a hub fetch is acceptable, "
+                    "otherwise point decision.model_path at a verified checkpoint"
+                )
+
+        # Offline is enforced before the import, not after: `Tacit.from_pretrained`
+        # calls AutoTokenizer/AutoModelForCausalLM without local_files_only, so the
+        # environment is the only thing that stops a repo id from reaching the hub.
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
         try:
             from anyjev import Tacit
         except Exception as exc:  # pragma: no cover - optional dependency
@@ -222,10 +254,16 @@ class TacitDecisionProvider:
                 f"anyjev[hf] is not installed: {exc}. Install it in an isolated env; "
                 "do not add it to the project .venv."
             ) from exc
-        self._tacit = Tacit.from_pretrained(
-            self.model,
-            adaptive=self.adaptive,
-            tau=self.tau,
-            max_cot_share=self.max_cot_share,
-        )
+        try:
+            self._tacit = Tacit.from_pretrained(
+                str(candidate) if is_directory else self.model,
+                adaptive=self.adaptive,
+                tau=self.tau,
+                max_cot_share=self.max_cot_share,
+            )
+        except Exception as exc:
+            raise DecisionBackendUnavailable(
+                f"tacit checkpoint failed to load: {type(exc).__name__}: {exc}"
+            ) from exc
         return self._tacit
+

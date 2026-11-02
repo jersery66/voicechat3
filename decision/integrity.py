@@ -172,6 +172,35 @@ def structural_problems(model_dir: Path) -> list[str]:
     return problems
 
 
+#: Files a self-distilled Tacit checkpoint ships that a plain causal LM does not.
+_TACIT_MARKERS = ("tacit_decision.py",)
+
+
+def tacit_checkpoint_markers(model_dir: str | Path) -> list[str]:
+    """Evidence that a directory holds a Tacit checkpoint, not a plain causal LM.
+
+    It matters because Tacit was distilled to answer with a position letter read
+    after its own chat template; a different readout gives legal-looking
+    probabilities that mean something else.  Detection is deliberately
+    evidence-based (shipped files, model card, directory name) rather than a
+    guess from ``architectures``, which is unchanged from the base model.
+    """
+    root = Path(model_dir).expanduser()
+    markers = [name for name in _TACIT_MARKERS if (root / name).is_file()]
+    if "tacit" in root.name.lower():
+        markers.append(f"directory_name:{root.name}")
+    readme = root / "README.md"
+    if readme.is_file():
+        try:
+            head = readme.read_text(encoding="utf-8", errors="replace")[:4096].lower()
+        except OSError:
+            head = ""
+        if "anyjev" in head and "tacit" in head:
+            markers.append("model_card:anyjev-tacit")
+    return markers
+
+
+
 # ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
@@ -183,6 +212,9 @@ def build_manifest(
     include_hashes: bool = True,
     max_hash_bytes: Optional[int] = None,
     model_id: Optional[str] = None,
+    source: Optional[str] = None,
+    hash_sources: Optional[Mapping[str, str]] = None,
+    extra: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Fingerprint a trusted directory so it can be re-verified offline.
 
@@ -200,19 +232,22 @@ def build_manifest(
     for path in _iter_files(root):
         size = path.stat().st_size
         total += size
+        rel = path.relative_to(root).as_posix()
         record: dict[str, Any] = {
-            "path": path.relative_to(root).as_posix(),
+            "path": rel,
             "size": size,
         }
         should_hash = include_hashes and (max_hash_bytes is None or size <= max_hash_bytes)
         if should_hash:
             record["sha256"] = sha256_file(path)
+            if hash_sources and rel in hash_sources:
+                record["sha256_source"] = hash_sources[rel]
             hashed += 1
         else:
             record["hashed"] = False
         files.append(record)
 
-    return {
+    payload: dict[str, Any] = {
         "schema": MANIFEST_SCHEMA,
         "kind": "huggingface_causal_lm",
         "model_id": model_id,
@@ -222,6 +257,11 @@ def build_manifest(
         "hashed_count": hashed,
         "files": files,
     }
+    if source:
+        payload["source"] = source
+    if extra:
+        payload.update(dict(extra))
+    return payload
 
 
 def write_manifest(

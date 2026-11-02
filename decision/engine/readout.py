@@ -1,5 +1,14 @@
 """Pure readout logic, independent of torch.
 
+NOT official Tacit.  This reads the probability of the *option label string*
+(" chat", "start_scale") after a prompt this project builds, while AnyJev's
+Tacit reads the probability of a *position letter* (A, B, C) after the
+checkpoint's own chat template, from a model distilled for exactly that.
+Same weights, different estimator: measured on Tacit-1.7B over 24 Chinese
+turns, action accuracy is 0.417 here against 0.708 for the official path, and
+the option-order flip rate is 0.479 against 0.073.  Deploy
+``decision.providers.tacit``; keep this as an experimental method.
+
 The heavy lifting -- one forward pass, log-softmax over the vocabulary -- lives
 in :mod:`decision.engine.scorer`.  This module only decides *which* numbers to
 read and how to normalise them, which means it can be unit-tested against a

@@ -107,7 +107,7 @@ def test_single_decision_shape(service):
     response = post(f"{service.url}/v1/decide", payload)
     assert response["name"] == "action"
     assert response["answer"] in {"chat", "start_scale"}
-    assert response["route"] in {"one_forward", "candidate"}
+    assert response["route"] in {"label_token", "candidate"}  # "one_forward" is Tacit-only
     assert abs(sum(response["probs"].values()) - 1.0) < 1e-6
     assert response["probs"] == response["probabilities"]
 
