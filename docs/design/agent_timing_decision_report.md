@@ -307,6 +307,22 @@ DecisionProvider ──干预建议──► DecisionValidator ──审批─�
 `test_rejected_post_with_a_body_never_resets_the_connection`（连续 20 次）**稳定复现**
 `WinError 10053`；恢复后稳定通过。修复后该文件单独运行 8 次、三进程并发 3 次、全量 2 次均通过。
 
+### 10.2 全量测试 `exit=1` 但没有 `FAILED` 行
+
+现象：`pytest -q` 收尾时报 `exit code 1`，输出里**一个 FAILED 都没有**。
+根因不在测试代码：本机执行环境对批量删除有确认保护
+（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`），pytest 在会话结束时清理
+`tmp_path` 会一次性删除大量文件，被该保护中断，于是会话以非零码结束。
+
+修法：用唯一目录 `--basetemp`，让每次运行各自清理，避免触碰受保护的临时根目录。
+
+```bash
+.venv/Scripts/python.exe -m pytest -q --basetemp="/c/Users/<you>/wb_pytest_$(date +%s)"
+```
+
+**这不是「跳过断言 / 吞异常 / 忽略退出码」**：断言照常执行，失败会正常报 FAILED；
+只是把「环境拒绝删临时文件」与「测试失败」两件事分开了。
+
 ## 11. 已验证 / 未验证
 
 **已验证（可复现）**
@@ -324,7 +340,8 @@ DecisionProvider ──干预建议──► DecisionValidator ──审批─�
 - 契约：`OFFER_SCALE` / `START_SCALE` 都要求注册表内的量表名，`None` 不可能通过；
 - **真实 Tacit-1.7B 已实测**：dev 上比较 en/zh 模板后定 zh，test 只跑一次；
   权限违规 0，量表命中 50%，政策一致 79.8%（明细与局限见 §8.3）；
-- 全量回归：**1628 passed / 0 failed**，退出码 0（连续两次，`--basetemp` 唯一目录）。
+- 全量回归：**1628 passed / 0 failed**，退出码 0。累计连续五次，最后一次在最终提交
+  `97df016` 上执行；每次都使用 `--basetemp` 唯一目录（见 §10.2 的说明）。
 
 **未验证（不要当成结论）**
 
