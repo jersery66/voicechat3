@@ -153,6 +153,23 @@ def test_unknown_paths_return_404(service):
     assert status_of(f"{service.url}/", {"name": "x"}) == 404
 
 
+def test_rejected_post_with_a_body_never_resets_the_connection(service):
+    """A 4xx answer must not leave unread bytes in the receive buffer.
+
+    Closing a socket that still holds request bytes makes the kernel emit RST;
+    urllib then raises ``ConnectionResetError`` (WinError 10053) instead of
+    surfacing the status code.  This failed intermittently until the error path
+    started draining the body, so it is asserted repeatedly, not once.
+    """
+    for _ in range(20):
+        assert status_of(f"{service.url}/v1/unknown", {"name": "x"}) == 404
+
+
+def test_rejected_oversized_payload_still_answers_with_400(service):
+    big = {"state": "x" * (1024 * 1024 + 10), "name": "a", "question": "q", "options": ["a", "b"]}
+    assert status_of(f"{service.url}/v1/decide", big) == 400
+
+
 def test_engine_failure_returns_503():
     class FailingEngine:
         def decide_one(self, state, *, name, question, options):

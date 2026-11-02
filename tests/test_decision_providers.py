@@ -48,13 +48,19 @@ class FakeTransport:
         return {"transport": "fake"}
 
 
-def _five(**answers):
-    """Build five gateway items in DECISION_QUESTIONS order."""
+def _batch(**answers):
+    """Build gateway items in DECISION_QUESTIONS order.
+
+    The primary question is the four-way timing decision; intent and emotion
+    remain in the batch as auxiliary observations only.
+    """
     mapping = {
-        "intent": ("symptom", {"symptom": 0.7, "chat": 0.3}),
+        "intervention": (
+            "Continue interviewing",
+            {"continue_interview": 0.85, "offer_scale": 0.15},
+        ),
         "emotion": ("sad", {"sad": 0.8, "anxious": 0.2}),
-        "action": ("chat", {"chat": 0.85, "start_scale": 0.15}),
-        "clarify": ("no", {"no": 0.9, "yes": 0.1}),
+        "intent": ("symptom", {"symptom": 0.7, "chat": 0.3}),
         "complex_review": ("no", {"no": 0.8, "yes": 0.2}),
     }
     mapping.update(answers)
@@ -141,7 +147,7 @@ def test_legacy_provider_rejects_an_agent_with_no_known_call_shape():
 
 def test_anyjev_batch_request_is_assembled_into_one_decision():
     provider = AnyJevDecisionProvider(endpoint="http://127.0.0.1:8100")
-    provider._http = FakeTransport([_five()])
+    provider._http = FakeTransport([_batch()])
     decision = provider.decide(_request())
     assert decision.provider == "anyjev_decider"
     assert decision.action == "chat"
@@ -156,7 +162,7 @@ def test_anyjev_batch_request_is_assembled_into_one_decision():
 
 def test_anyjev_batch_payload_carries_state_and_options():
     provider = AnyJevDecisionProvider(endpoint="http://127.0.0.1:8100")
-    transport = FakeTransport([_five()])
+    transport = FakeTransport([_batch()])
     provider._http = transport
     provider.decide(_request())
     payload = transport.calls[0]
@@ -170,11 +176,15 @@ def test_anyjev_batch_payload_carries_state_and_options():
 
 def test_anyjev_falls_back_to_sequential_calls_when_batch_is_unsupported():
     provider = AnyJevDecisionProvider(endpoint="http://127.0.0.1:8100")
-    single = {"answer": "chat", "probs": {"chat": 0.9, "start_scale": 0.1}}
+    single = {
+        "answer": "Continue interviewing",
+        "probs": {"Continue interviewing": 0.9, "Offer a scale assessment": 0.1},
+    }
     transport = FakeTransport([single])
     provider._http = transport
     decision = provider.decide(_request())
     assert decision.route == "sequential"
+    assert decision.normalized_intervention() == "continue_interview"
     assert decision.action == "chat"
     assert len(transport.calls) == len(DECISION_QUESTIONS) + 1
 
@@ -225,10 +235,18 @@ def test_tacit_reads_answer_probs_and_route():
         endpoint="http://127.0.0.1:8100", model="morriszjm/Tacit-2B"
     )
     provider._http = FakeTransport(
-        [{"answer": "chat", "probs": {"chat": 0.9, "start_scale": 0.1}, "route": "one_forward"}]
+        [
+            {
+                "answer": "Continue interviewing",
+                "probs": {"Continue interviewing": 0.9, "Offer a scale assessment": 0.1},
+                "route": "one_forward",
+            }
+        ]
     )
     decision = provider.decide(_request())
     assert decision.provider == "tacit"
+    assert decision.intervention == "Continue interviewing"
+    assert decision.normalized_intervention() == "continue_interview"
     assert decision.action == "chat"
     assert decision.route == "one_forward"
 
@@ -236,7 +254,13 @@ def test_tacit_reads_answer_probs_and_route():
 def test_tacit_reports_escalation_when_the_backend_reasoned():
     provider = TacitDecisionProvider(endpoint="http://127.0.0.1:8100")
     provider._http = FakeTransport(
-        [{"answer": "chat", "probs": {"chat": 0.9, "start_scale": 0.1}, "route": "cot"}]
+        [
+            {
+                "answer": "Continue interviewing",
+                "probs": {"Continue interviewing": 0.9, "Clarify before proceeding": 0.1},
+                "route": "cot",
+            }
+        ]
     )
     decision = provider.decide(_request())
     assert decision.route == "cot"

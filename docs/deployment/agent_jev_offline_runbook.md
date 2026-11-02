@@ -291,6 +291,51 @@ python scripts/benchmarks/decision_benchmark.py --compare \
 覆盖 5 个动作与 9 个意图、含 2 条需要澄清的含糊输入），不含任何真实来访者数据。
 真实数据要另建用例集，且不得进仓库。
 
+### 6.1 多轮时机基准（本轮的主要验收）
+
+单句准确率回答不了「第几轮该提量表」。时机基准在**连续轨迹**上跑，
+每个 provider 共用同一状态、同一 `TurnPolicy`、同一 `DecisionValidator`、同一 `ScaleRuntime`。
+
+```bash
+# 不需要模型，先确认链路与守卫：dev 集
+python scripts/benchmarks/timing_benchmark.py --split dev
+
+# 只看链路自检（回放标注；若它都拿不到窗口，坏的是链路不是模型）
+python scripts/benchmarks/timing_benchmark.py --split dev --providers replay --verbose
+```
+
+```bash
+# 真实模型对照：同一 dev 集，三个基线
+python scripts/benchmarks/timing_benchmark.py --split dev \
+    --providers rule,tacit --endpoint http://127.0.0.1:8099 --out test_output/timing
+
+# 配置在 dev 上定好之后，再在未见过的 test 集上跑一次
+python scripts/benchmarks/timing_benchmark.py --split test \
+    --providers rule,tacit --endpoint http://127.0.0.1:8099 --out test_output/timing
+```
+
+产物：`test_output/timing/<split>-<provider>.json|.md`，含逐轨迹的窗口命中表与逐轮明细。
+
+**先 dev 定配置，再 test 报分。** 同一批数据上调参又报成绩的数字不能算结果。
+
+轨迹集共 16 条（dev 7 / test 9，129 轮）。`replay` 是链路自检，`rule` 是确定性下界；
+两者都不是模型成绩。真实 Tacit-1.7B 需要本地权重（官方 `Tacit-1.7B`）与
+`decision/service` 在 8099 上运行，缺一不可——没有它就不要在报告里写第三行。
+
+邀请的生命周期见 `docs/design/agent_decision_layer.md` §10.5：未答复的邀请**没有轮数超时**，
+只有「连续多轮既未答复也未指涉」才会 `EXPIRED`。调 `topic_drift_grace_rounds` 前先读那一节。
+
+基准的三种数字必须区分开：
+
+| provider | 能不能当模型成绩 |
+| --- | --- |
+| `rule` | 不能，是确定性基线（下界参考） |
+| `replay` | 不能，是链路自检（上界参考：它照着标注答） |
+| `tacit` / `anyjev` | 能，但必须与上面两个同时报告 |
+
+`rule` 与 `replay` 的作用是把模型夹在中间：低于 `rule` 说明模型不如规则；高于 `replay`
+说明测试集或统计有问题。
+
 ## 7. 显存预算（RTX 5090 32GB）
 
 | 组件 | 实测 / 估算 |

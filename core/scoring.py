@@ -139,6 +139,12 @@ def is_user_explicit_end_text(text: str) -> bool:
         "不想聊了", "今天不聊了", "今天先这样", "先到这吧", "先这样吧",
         "我要结束", "结束", "结束吧", "不说了", "我想休息了", "我累了想睡了",
         "可以结束了", "聊完了", "退出",
+        # Colloquial closings.  These are how participants actually leave an
+        # interview ("今天就到这儿吧"); missing them made the session ignore an
+        # explicit request to stop, which must never be overridden by a
+        # pending assessment or relaxation suggestion.
+        "到这儿吧", "到这儿了", "就到这里", "聊到这儿", "先聊到这",
+        "今天先到", "今天就这样", "先这样",
     ]
     return any(x in t for x in explicit_end)
 

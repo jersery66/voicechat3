@@ -52,6 +52,54 @@ def make_decision(
     )
 
 
+def make_intervention_decision(
+    intervention: str,
+    *,
+    offer_target: Optional[str] = None,
+    probs: Optional[dict[str, float]] = None,
+    confidence: Optional[float] = None,
+    emotion: str = "calm",
+    intent: str = "chat",
+    needs_complex_review: bool = False,
+    provider: str = "fake",
+    reason: str = "fake_intervention",
+) -> RawDecision:
+    """Build one synthetic four-way timing decision with a valid distribution."""
+    from decision.timing import INTERVENTION_LABELS
+
+    distribution = dict(probs or {})
+    if not distribution:
+        others = [label for label in INTERVENTION_LABELS if label != intervention]
+        if confidence is None:
+            share = 0.12
+            top = 1.0 - share * len(others)
+        else:
+            top = max(0.0, min(1.0, float(confidence)))
+            share = (1.0 - top) / len(others) if others else 0.0
+        distribution = {intervention: top}
+        for label in others:
+            distribution[label] = share
+    if confidence is None:
+        confidence = distribution.get(intervention, 0.0)
+    return RawDecision(
+        provider=provider,
+        intervention=intervention,
+        offer_target=offer_target,
+        scale_name=offer_target,
+        emotion=emotion,
+        intensity=0.4,
+        needs_rag=intervention == "continue_interview",
+        confidence=confidence,
+        reason=reason,
+        intent_jev=intent,
+        intent_legacy=intent,
+        clarify=intervention == "clarify_first",
+        needs_complex_review=needs_complex_review,
+        probabilities=distribution,
+        per_question={"intervention": distribution},
+    )
+
+
 class FakeDecisionProvider:
     """Replay a script of decisions, or compute them with a callable."""
 
@@ -131,4 +179,30 @@ def constant_provider(action: str, confidence: float = 0.9, **kwargs: Any) -> Fa
 def sequence_provider(actions: Sequence[str], confidence: float = 0.9) -> FakeDecisionProvider:
     """One provider that walks through ``actions`` in order, then repeats the last."""
     script = [make_decision(action, confidence=confidence) for action in actions]
+    return FakeDecisionProvider(script=script)
+
+
+def intervention_provider(
+    intervention: str,
+    confidence: float = 0.9,
+    *,
+    offer_target: Optional[str] = None,
+) -> FakeDecisionProvider:
+    """A provider that always answers the same timing decision."""
+
+    def handler(request: DecisionRequest) -> RawDecision:
+        target = offer_target
+        if target is None and intervention == "offer_scale":
+            candidates = request.scale_candidates()
+            target = candidates[0].name if candidates else None
+        return make_intervention_decision(
+            intervention, offer_target=target, confidence=confidence
+        )
+
+    return FakeDecisionProvider(handler=handler)
+
+
+def timing_script_provider(items: Sequence[str], confidence: float = 0.9) -> FakeDecisionProvider:
+    """Walk through a list of intervention labels, then repeat the last one."""
+    script = [make_intervention_decision(item, confidence=confidence) for item in items]
     return FakeDecisionProvider(script=script)

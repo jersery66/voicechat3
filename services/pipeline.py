@@ -16,8 +16,38 @@ from config import (
     AGENT_ROUTE_ENABLED,
     AGENT_ROUTE_COOLDOWN_ROUNDS,
 )
+from conversation.offer_ledger import OfferLedger, offer_snapshot_fields
+from conversation.turn_signals import (
+    detect_offer_question,
+    detect_risk_marker,
+    detect_wants_to_talk,
+)
+from decision.timing import (
+    OUTCOME_BY_REASON,
+    OfferKind,
+    OfferOutcome,
+    OfferState,
+    mentions_offer,
+    rank_scale_candidates,
+)
 
 logger = get_logger(__name__)
+
+
+#: Coarse, deterministic symptom domains.  Used only to describe the interview
+#: state to the decision model and to the rule baseline; never scored, never
+#: reported as severity.
+_SYMPTOM_DOMAIN_KEYWORDS = (
+    ("睡眠", ("睡不着", "失眠", "睡不好", "早醒", "入睡", "睡太多", "多梦")),
+    ("情绪", ("心情不好", "不开心", "低落", "难过", "沮丧", "没希望", "绝望")),
+    ("焦虑", ("焦虑", "紧张", "心慌", "害怕", "担心", "坐立不安")),
+    ("烦躁", ("烦躁", "急躁", "容易生气", "控制不住", "静不下来")),
+    ("精力", ("累", "没力气", "没劲", "疲惫", "乏力", "没活力")),
+    ("食欲", ("吃不下", "没胃口", "吃太多", "食欲", "饭量")),
+    ("注意", ("注意力", "集中不了", "看不进去", "分心")),
+    ("自责", ("自责", "失败", "不够好", "让家人失望")),
+    ("躯体", ("头疼", "胸闷", "胃", "身体不舒服", "乏力感")),
+)
 
 
 _RELAXATION_TYPE_ALIASES = {
@@ -433,6 +463,14 @@ class ConversationPipeline:
             name: 0 for name in self._scale_manager.get_scale_names()
         }
         self.symptom_turns = 0
+        # Session-scoped invitation memory: which scale/relaxation offers were
+        # made, and how the participant answered.  The decision layer reads it
+        # as state; TurnPolicy reads it as a gate.
+        self._offer_ledger = OfferLedger()
+        self._symptom_domains: set[str] = set()
+        # Whether the previous turn left something unclarified.  Read as state
+        # by the decision layer; never used to act on its own.
+        self._clarification_pending: bool = False
         # Read-only policy fact surfaced in TurnStateSnapshot.  It is distinct
         # from ReportService.completed_relaxation: an offer can be rejected or
         # media can fail after the proactive allowance has been consumed.
@@ -477,6 +515,9 @@ class ConversationPipeline:
         self._agent_route_cooldown = 0
         self._proactive_relaxation_offered = False
         self._proactive_relaxation_candidate = None
+        self._offer_ledger.reset()
+        self._symptom_domains = set()
+        self._clarification_pending = False
         self._guard_contexts.clear()
         self._guard_states.clear()
         self._guard_fallbacks.clear()
@@ -561,14 +602,159 @@ class ConversationPipeline:
         """Read explicit completion from the Runtime snapshot."""
         return tuple(self.scale_runtime.snapshot().completed_scales)
 
+    # -- invitation state helpers -----------------------------------------
+
+    def _registered_scale_names(self) -> tuple[str, ...]:
+        """Every scale the runtime can actually start, in registry order."""
+        try:
+            return tuple(self._scale_manager.get_scale_names())
+        except Exception:
+            return ()
+
+    def _offer_state(self) -> OfferState:
+        """Current invitation state, tolerating a partially built host.
+
+        Adapters and tests sometimes construct the pipeline with ``__new__``
+        and only the attributes they need; a missing ledger must read as "no
+        invitations yet", never as an exception in the middle of a turn.
+        """
+        ledger = getattr(self, "_offer_ledger", None)
+        if ledger is None:
+            return OfferState()
+        return ledger.state()
+
+    def _scale_candidate_names(self) -> tuple[str, ...]:
+        """Scales that may still be offered right now.
+
+        Derived from the registry plus the runtime snapshot, so a candidate can
+        never be a name the runtime would refuse to start.
+        """
+        runtime = self.scale_runtime.snapshot()
+        ranked = rank_scale_candidates(
+            registered=self._registered_scale_names(),
+            completed=getattr(runtime, "completed_scales", ()) or (),
+            administered=getattr(runtime, "administered_scales", ()) or (),
+            declined=self._offer_state().declined_scales(),
+        )
+        return tuple(candidate.name for candidate in ranked)
+
+    def _symptom_summary(self) -> str:
+        """Deterministic description of the symptom domains seen so far."""
+        domains = getattr(self, "_symptom_domains", None) or set()
+        if not domains:
+            return ""
+        return "、".join(sorted(domains)) + "方面的主诉"
+
+    def _update_symptom_domains(self, text: str) -> None:
+        normalized = (text or "").strip().lower()
+        if not normalized:
+            return
+        for domain, keywords in _SYMPTOM_DOMAIN_KEYWORDS:
+            if any(keyword in normalized for keyword in keywords):
+                self._symptom_domains.add(domain)
+
+    def _begin_offer_round(self, round_count: int, user_text: str = "") -> None:
+        """Retire invitations only when the conversation has really moved on.
+
+        There is no answer timeout: participants routinely reply two or three
+        turns later, and closing the invitation on a turn count alone would
+        discard a consent that is still coming.  The ledger needs consecutive
+        turns that neither answer nor even mention the invitation.
+        """
+        ledger = getattr(self, "_offer_ledger", None)
+        if ledger is None:
+            return
+        pending = ledger.pending()
+        if pending is None:
+            return
+        engaged = mentions_offer(user_text) or detect_offer_question(user_text)
+        expired = ledger.expire_on_topic_drift(round_count, engaged=engaged)
+        for record in expired:
+            logger.warning(
+                "[Offer] expired kind=%s target=%s made_round=%s last_touched=%s reason=topic_drift",
+                record.kind.value,
+                record.target,
+                record.made_at_round,
+                record.last_touched_round,
+            )
+
+    def _cancel_open_offers(self, round_count: int, reason: str) -> None:
+        """Close every open invitation with an explicit cause."""
+        ledger = getattr(self, "_offer_ledger", None)
+        if ledger is None:
+            return
+        for record in ledger.cancel_all(round_count, reason):
+            logger.warning(
+                "[Offer] cancelled kind=%s target=%s reason=%s round=%s",
+                record.kind.value,
+                record.target,
+                reason,
+                round_count,
+            )
+
+    def _apply_offer_outcome(self, decision: TurnDecision, round_count: int) -> None:
+        """Close an open invitation when the turn answered it.
+
+        Consent bookkeeping lives here rather than in the policy because the
+        policy is pure; the decision already carries the stable reason.
+        """
+        ledger = getattr(self, "_offer_ledger", None)
+        if ledger is None:
+            return
+
+        # A participant who asks for an intervention has answered any related
+        # invitation by acting on it.  That is a *new* request, but the open
+        # record must not stay dangling while the module starts.
+        if decision.reason == "user_scale_request":
+            pending = ledger.pending()
+            if pending is not None and pending.kind is OfferKind.SCALE:
+                ledger.resolve_pending(OfferOutcome.ACCEPTED, round_count, note="explicit_request")
+            elif pending is not None:
+                ledger.resolve_pending(
+                    OfferOutcome.CANCELLED, round_count, note="superseded_by_explicit_scale_request"
+                )
+            return
+        if decision.reason == "user_relaxation_request":
+            pending = ledger.pending()
+            if pending is not None and pending.kind is OfferKind.RELAXATION:
+                ledger.resolve_pending(OfferOutcome.ACCEPTED, round_count, note="explicit_request")
+            elif pending is not None:
+                ledger.resolve_pending(
+                    OfferOutcome.CANCELLED,
+                    round_count,
+                    note="superseded_by_explicit_relaxation_request",
+                )
+            return
+
+        outcome = OUTCOME_BY_REASON.get(decision.reason or "")
+        if outcome is None:
+            return
+        if outcome is OfferOutcome.CLARIFYING:
+            record = ledger.mark_clarifying(round_count)
+        elif outcome is OfferOutcome.PENDING:
+            record = ledger.touch_pending(round_count)
+        else:
+            record = ledger.resolve_pending(outcome, round_count)
+        if record is not None:
+            logger.warning(
+                "[Offer] resolved kind=%s target=%s status=%s round=%s",
+                record.kind.value,
+                record.target,
+                record.status.value,
+                round_count,
+            )
+
     def _build_turn_snapshot(
         self,
         *,
         round_count: int,
         time_limit_reached: bool,
         session_state: str = "CHATTING",
+        risk_marker: bool = False,
     ) -> TurnStateSnapshot:
         runtime = self.scale_runtime.snapshot()
+        offer_fields = offer_snapshot_fields(self._offer_state())
+        offer_fields["scale_candidates"] = self._scale_candidate_names()
         return TurnStateSnapshot(
             session_state=self._session_state_name(session_state),
             round_count=max(0, int(round_count)),
@@ -580,6 +766,8 @@ class ConversationPipeline:
             proactive_relaxation_offered=self._proactive_relaxation_offered,
             game_active=False,
             time_limit_reached=bool(time_limit_reached),
+            risk_marker=bool(risk_marker),
+            **offer_fields,
         )
 
     def _agent_deterministic_fallback(self, user_text: str) -> AgentObservation:
@@ -652,6 +840,21 @@ class ConversationPipeline:
             session_state=str(_safe(self._session_state_name, "CHATTING") or "CHATTING"),
             waiting_for_answer=bool(getattr(snapshot, "waiting_for_answer", False)),
             completed_scales=tuple(_safe(self._completed_scale_names, ()) or ()),
+            # -- multi-turn timing state ---------------------------------
+            offer_state=self._offer_state(),
+            registered_scales=tuple(_safe(self._registered_scale_names, ()) or ()),
+            administered_scales=tuple(
+                getattr(snapshot, "administered_scales", ()) or ()
+            ),
+            relaxation_active=bool(
+                getattr(snapshot, "active_scale", None) is None
+                and getattr(getattr(self, "relaxation", None), "active", False)
+            ),
+            clarification_pending=bool(getattr(self, "_clarification_pending", False)),
+            risk_marker=detect_risk_marker(user_text),
+            participant_wants_to_talk=detect_wants_to_talk(user_text),
+            symptom_turns=int(getattr(self, "symptom_turns", 0) or 0),
+            symptom_summary=self._symptom_summary(),
         )
 
     def _decision_coordinator(self):
@@ -733,8 +936,39 @@ class ConversationPipeline:
         )
         return observation.proposal, observation.proposal.model_dump(mode="json")
 
-    def _apply_turn_decision(self, decision: TurnDecision, result: PipelineResult) -> None:
+    def _apply_turn_decision(
+        self, decision: TurnDecision, result: PipelineResult, round_count: int = 0
+    ) -> None:
         """Apply an already-authoritative decision; never choose another action."""
+        ledger = getattr(self, "_offer_ledger", None)
+        session_state = (
+            self._session_state_name() if hasattr(self, "_session_state_name") else None
+        )
+        if decision.action is TurnAction.OFFER_SCALE:
+            # An invitation changes no assessment state: it only asks.
+            if ledger is not None:
+                ledger.record_offer(
+                    OfferKind.SCALE,
+                    target=decision.scale_name,
+                    round_count=round_count,
+                    session_state=session_state,
+                )
+            logger.warning(
+                "[Offer] scale invitation issued target=%s round=%s",
+                decision.scale_name,
+                round_count,
+            )
+            return
+        if decision.action is TurnAction.OFFER_RELAXATION:
+            if ledger is not None:
+                ledger.record_offer(
+                    OfferKind.RELAXATION,
+                    target=None,
+                    round_count=round_count,
+                    session_state=session_state,
+                )
+            logger.warning("[Offer] relaxation invitation issued round=%s", round_count)
+            return
         if decision.action is TurnAction.START_SCALE:
             update = self.scale_runtime.start(decision.scale_name or "")
             if not update.accepted:
@@ -1161,6 +1395,11 @@ class ConversationPipeline:
         # Evaluate the incoming turn number without mutating the report yet.
         current_rounds = (self.report.get_round_count() + 1) if self.report else 0
 
+        # An invitation is retired only when the conversation has visibly moved
+        # on -- never on a bare turn count.  A participant who answers three
+        # turns later must still be able to consent.
+        self._begin_offer_round(current_rounds, result.user_text)
+
         # --- Save user data ---
         # Defensive: DataManager exposes ``current_subject_id`` (被试编号),
         # not ``current_user_id``. Fall back to ``default_subject`` when unset.
@@ -1212,7 +1451,7 @@ class ConversationPipeline:
             result.router_proposal = proposal
             result.turn_state_snapshot = snapshot
             result.turn_decision = decision
-            self._apply_turn_decision(decision, result)
+            self._apply_turn_decision(decision, result, current_rounds)
             self._commit_user_turn(config, result, emit)
             import random
             _GREETING_REPLIES = [
@@ -1352,7 +1591,17 @@ class ConversationPipeline:
         )
         if compound_relaxation_turn:
             self._apply_scale_answer_transition(result.user_text, decision, result)
-        self._apply_turn_decision(decision, result)
+        # A closed session or a safety escalation cancels every open
+        # invitation: carrying one across either boundary would let a later
+        # "好" start an assessment the participant never agreed to in context.
+        if decision.action is TurnAction.END_SESSION or decision.reason == "session_ending":
+            self._cancel_open_offers(current_rounds, "session_end")
+        elif detect_risk_marker(result.user_text):
+            self._cancel_open_offers(current_rounds, "risk")
+        self._apply_offer_outcome(decision, current_rounds)
+        self._apply_turn_decision(decision, result, current_rounds)
+        self._clarification_pending = decision.action is TurnAction.CLARIFY_INPUT
+        self._update_symptom_domains(result.user_text)
         self._commit_user_turn(config, result, emit)
         runtime = self.scale_runtime.snapshot()
         if not compound_relaxation_turn:
@@ -1941,6 +2190,8 @@ class ConversationPipeline:
         action_text = {
             TurnAction.CHAT: "自然回应来访者",
             TurnAction.CLARIFY_INPUT: "先确认来访者刚才表达中的关键信息",
+            TurnAction.OFFER_SCALE: "询问来访者是否愿意做一份简短的问卷了解",
+            TurnAction.OFFER_RELAXATION: "询问来访者是否愿意尝试一次放松练习",
             TurnAction.START_SCALE: "自然提出系统选定的当前了解问题",
             TurnAction.CONTINUE_SCALE: "自然承接并继续系统选定的当前了解问题",
             TurnAction.PAUSE_SCALE: "温和确认暂停，不继续追问",
@@ -1952,6 +2203,22 @@ class ConversationPipeline:
             "【本轮已确定的表达任务】",
             f"系统已经确定：{action_text}。不要重新选择其他任务，也不要自行推进状态。",
         ]
+        if decision.action is TurnAction.OFFER_SCALE:
+            # The invitation must stay an invitation.  Starting the first item
+            # here would skip the participant's consent entirely.
+            lines.append(
+                "只提出邀请并说明大概需要几分钟，然后等来访者回答。"
+                "不要念出第一道题，不要说出量表名称或评分方式，不要假设对方已经同意。"
+            )
+            lines.append("如果来访者拒绝，就自然回到访谈，不再追问。")
+            return "\n".join(lines)
+        if decision.action is TurnAction.OFFER_RELAXATION:
+            lines.append(
+                "只提出邀请并等来访者回答，不要指定呼吸、肌肉或冥想等具体方式，"
+                "不要描述练习步骤，不要假设对方已经同意。"
+            )
+            lines.append("如果来访者拒绝，就自然回到访谈，不再追问。")
+            return "\n".join(lines)
         if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
             scale_name = runtime.active_scale or decision.scale_name or "当前了解内容"
             item = runtime.current_item

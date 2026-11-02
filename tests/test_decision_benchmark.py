@@ -164,8 +164,7 @@ def test_run_cases_grades_every_question(bench):
             "text": "synthetic one",
             "expected_intent": "chat",
             "expected_emotion": "calm",
-            "expected_action": "chat",
-            "expected_clarify": "no",
+            "expected_intervention": "continue_interview",
             "expected_complex_review": "no",
         },
         {
@@ -173,8 +172,7 @@ def test_run_cases_grades_every_question(bench):
             "text": "synthetic two",
             "expected_intent": "symptom",
             "expected_emotion": "sad",
-            "expected_action": "start_scale",
-            "expected_clarify": "no",
+            "expected_intervention": "offer_scale",
             "expected_complex_review": "no",
         },
     ]
@@ -189,9 +187,9 @@ def test_run_cases_grades_every_question(bench):
     for name, entry in result["per_question"].items():
         assert entry["graded"] == 2, name
         assert "accuracy" in entry and "macro_f1" in entry
-    # 'chat' is the first action option and first intent label, so case 1 is
-    # correct and case 2 is not.
-    assert result["per_question"]["action"]["accuracy"] == pytest.approx(0.5)
+    # "Continue interviewing" is the first intervention option and "chat" the
+    # first intent label, so case 1 is correct and case 2 is not.
+    assert result["per_question"]["intervention"]["accuracy"] == pytest.approx(0.5)
     assert result["per_question"]["intent"]["accuracy"] == pytest.approx(0.5)
     assert result["latency_ms"]["p50"] > 0
 
@@ -201,7 +199,7 @@ def test_order_sensitivity_is_measured(bench):
         {
             "id": "c1",
             "text": "synthetic",
-            "expected_action": "chat",
+            "expected_intervention": "continue_interview",
         }
     ]
     service = _service()
@@ -211,7 +209,7 @@ def test_order_sensitivity_is_measured(bench):
         service.stop()
     # The stub is order-insensitive (it always takes position 0 from the options
     # it was given, and the server maps back by label), so measured flips are 0.
-    entry = result["per_question"]["action"]
+    entry = result["per_question"]["intervention"]
     assert "order_flip_rate" in entry
     assert 0.0 <= entry["order_flip_rate"] <= 1.0
 

@@ -12,6 +12,9 @@ Design notes that matter for clinical safety:
    ``AgentObservation``/``RouterProposal`` contract.  It degrades to a neutral
    CHAT proposal instead of raising, because a malformed decision must never
    take the conversation down.
+4. The decision question is *timing*, not labelling: see
+   :mod:`decision.timing`.  ``RawDecision.intervention`` carries the four-way
+   answer; ``action`` is only the router projection of it.
 """
 
 from __future__ import annotations
@@ -23,6 +26,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from conversation.agent_observation import AgentObservation
 from conversation.contracts import RouterAction, RouterProposal
+from decision.timing import (
+    InterviewPhase,
+    InterventionIntent,
+    OfferKind,
+    OfferState,
+    ScaleCandidate,
+    intervention_to_router_action,
+    interview_phase,
+    normalize_intervention,
+    offer_kind_for,
+    phase_text,
+    rank_scale_candidates,
+)
 
 # ---------------------------------------------------------------------------
 # Modes and backends
@@ -129,7 +145,17 @@ _ENDING_SESSION_STATES = frozenset({"SESSION_ENDING", "SESSION_ENDED"})
 
 
 class DecisionRequest(BaseModel):
-    """Immutable, read-only view of everything one decision may look at."""
+    """Immutable, read-only view of everything one decision may look at.
+
+    This is a *multi-turn* snapshot.  A single utterance is never enough to
+    decide whether an assessment is timely, so the request carries the offer
+    history, the registered scale candidates, and the coarse interview phase.
+
+    Every field is a projection of state the pipeline already owns.  Nothing
+    here is inferred by a language model, which is what keeps the model from
+    "remembering" a scale it never administered or consent the participant
+    never gave.
+    """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
 
@@ -145,6 +171,20 @@ class DecisionRequest(BaseModel):
     game_active: bool = False
     relaxation_used: bool = False
 
+    # -- multi-turn timing state ------------------------------------------
+    offer_state: OfferState = Field(default_factory=OfferState)
+    registered_scales: tuple[str, ...] = ()
+    administered_scales: tuple[str, ...] = ()
+    relaxation_active: bool = False
+    clarification_pending: bool = False
+    risk_marker: bool = False
+    #: The participant asked for the floor this turn.  Read as a wish, not as a
+    #: diagnosis: it tells the model that an invitation would interrupt.
+    participant_wants_to_talk: bool = False
+    symptom_turns: int = Field(default=0, ge=0)
+    symptom_summary: str = ""
+    topic_summary: tuple[str, ...] = ()
+
     def legacy_kwargs(self) -> dict[str, Any]:
         """Argument mapping for the historical ``AgentService`` call shape."""
         return {
@@ -156,6 +196,27 @@ class DecisionRequest(BaseModel):
             "relaxation_done": self.relaxation_done,
         }
 
+    # -- derived, but deterministic ---------------------------------------
+
+    def phase(self) -> InterviewPhase:
+        return interview_phase(
+            round_count=self.current_round,
+            session_state=self.session_state,
+            active_scale=self.active_scale,
+            offers=self.offer_state,
+            relaxation_active=self.relaxation_active,
+        )
+
+    def scale_candidates(self) -> tuple[ScaleCandidate, ...]:
+        """Scales this session may still offer; empty means "offer nothing"."""
+        registered = self.registered_scales or tuple(self.completed_scales)
+        return rank_scale_candidates(
+            registered=registered,
+            completed=self.completed_scales,
+            administered=self.administered_scales,
+            declined=self.offer_state.declined_scales(),
+        )
+
     def state_summary(self) -> str:
         """Textual state block for a decision model.
 
@@ -163,7 +224,11 @@ class DecisionRequest(BaseModel):
         chose to include.  Kept short: the decision model needs the state, not
         a transcript.
         """
-        parts = [f"轮次第{self.current_round}轮", f"会话状态{self.session_state}"]
+        parts = [
+            f"轮次第{self.current_round}轮",
+            f"访谈阶段{phase_text(self.phase())}",
+            f"会话状态{self.session_state}",
+        ]
         if self.active_scale:
             parts.append(f"正在进行量表{self.active_scale}")
         else:
@@ -177,6 +242,8 @@ class DecisionRequest(BaseModel):
             parts.append(summary)
         if self.relaxation_done or self.relaxation_used:
             parts.append("本次会话已完成过放松训练")
+        if self.relaxation_active:
+            parts.append("正在进行放松训练")
         if self.game_active:
             parts.append("正在游戏中")
         return "；".join(parts)
@@ -186,12 +253,16 @@ class DecisionRequest(BaseModel):
         return {
             "round": self.current_round,
             "session_state": self.session_state,
+            "phase": self.phase().value,
             "active_scale": self.active_scale,
             "completed_scales": list(self.completed_scales),
             "text_len": len(self.user_text or ""),
             "history_len": len(self.recent_history or ""),
             "game_active": self.game_active,
             "relaxation_used": self.relaxation_used or self.relaxation_done,
+            "offers": self.offer_state.redacted(),
+            "scale_candidate_count": len(self.scale_candidates()),
+            "risk_marker": self.risk_marker,
         }
 
 
@@ -206,12 +277,23 @@ class RawDecision(BaseModel):
     ``observation`` is only populated by the legacy provider, which already
     speaks the historical contract; reusing it verbatim keeps ``legacy`` mode
     byte-for-byte identical to the pre-experiment behaviour.
+
+    ``intervention`` is the authoritative answer when present.  ``action`` is
+    kept as the router projection so legacy consumers and the existing
+    observation contract keep working, but a provider must not be trusted to
+    set ``action`` consistently with ``intervention`` -- the validator
+    recomputes it.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
 
     provider: str
     observation: Optional[AgentObservation] = None
+
+    intervention: Optional[str] = None
+    offer_target: Optional[str] = None
+    scale_choice: Optional[str] = None
+    intervention_question: Optional[str] = None
 
     action: Optional[str] = None
     scale_name: Optional[str] = None
@@ -233,12 +315,29 @@ class RawDecision(BaseModel):
     error: Optional[str] = None
     fallback_used: bool = False
 
+    # -- derived ----------------------------------------------------------
+
+    def normalized_intervention(self) -> Optional[str]:
+        return normalize_intervention(self.intervention)
+
+    def effective_action(self) -> str:
+        """The router action this decision implies, ignoring self-reported ones."""
+        intervention = self.normalized_intervention()
+        if intervention is not None:
+            return intervention_to_router_action(intervention)
+        return (self.action or "").strip().lower()
+
+    def offer_kind(self) -> Optional[OfferKind]:
+        return offer_kind_for(self.intervention)
+
     def diagnostic(self) -> dict[str, Any]:
         """Metadata-only summary for logs and the decision journal."""
         return {
             "provider": self.provider,
+            "intervention": self.normalized_intervention(),
             "action": self.action,
-            "scale": self.scale_name,
+            "offer_target": self.offer_target,
+            "scale": self.scale_name or self.offer_target,
             "confidence": round(float(self.confidence or 0.0), 4),
             "intent": self.intent_jev or self.intent_legacy,
             "latency_ms": round(float(self.latency_ms or 0.0), 2),
@@ -329,8 +428,12 @@ def build_observation(
 ) -> AgentObservation:
     """Translate one raw decision into the existing observation contract.
 
-    Never raises.  An unusable action degrades to a neutral CHAT proposal whose
-    reason records why, so the policy still gets a well-formed observation.
+    Never raises.  An unusable decision degrades to a neutral CHAT proposal
+    whose reason records why, so the policy still gets a well-formed
+    observation.
+
+    When ``intervention`` is present it wins over ``action``: the four-way
+    timing answer is the decision, the router action is only its projection.
     """
     if decision.observation is not None:
         return decision.observation
@@ -338,24 +441,49 @@ def build_observation(
     reason = decision.reason or ""
     action = RouterAction.CHAT
     scale_name: Optional[str] = None
+    offer: Optional[str] = None
+    clarify = False
+    needs_rag = False
     degraded_reason: Optional[str] = None
 
-    raw_action = (decision.action or "").strip().lower()
-    if raw_action in ACTION_LABELS:
-        action = RouterAction(raw_action)
-    elif raw_action:
-        degraded_reason = "unknown_action"
+    intervention = decision.normalized_intervention()
+    if intervention is not None:
+        if intervention == InterventionIntent.OFFER_SCALE.value:
+            target = (decision.offer_target or decision.scale_name or "").strip()
+            if target:
+                action = RouterAction.START_SCALE
+                offer = OfferKind.SCALE.value
+                scale_name = target
+            else:
+                # An offer with no registered target is not an offer.  Holding
+                # the interview is the only defensible degradation.
+                degraded_reason = "missing_scale_name"
+        elif intervention == InterventionIntent.OFFER_RELAXATION.value:
+            action = RouterAction.RECOMMEND_RELAXATION
+            offer = OfferKind.RELAXATION.value
+        elif intervention == InterventionIntent.CLARIFY_FIRST.value:
+            clarify = True
+        else:
+            needs_rag = True
+    else:
+        raw_action = (decision.action or "").strip().lower()
+        if raw_action in ACTION_LABELS:
+            action = RouterAction(raw_action)
+        elif raw_action:
+            degraded_reason = "unknown_action"
 
-    if action is RouterAction.START_SCALE:
-        scale_name = decision.scale_name
-    if action is RouterAction.START_SCALE and not scale_name:
-        action = RouterAction.CHAT
-        degraded_reason = "missing_scale_name"
+        if action is RouterAction.START_SCALE:
+            scale_name = decision.scale_name
+        if action is RouterAction.START_SCALE and not scale_name:
+            action = RouterAction.CHAT
+            degraded_reason = "missing_scale_name"
 
     try:
         proposal = RouterProposal(
             action=action,
             scale_name=scale_name,
+            offer=offer,
+            clarify=clarify,
             emotion=map_emotion_to_legacy(decision.emotion),
             intensity=clamp_unit(decision.intensity),
             needs_rag=bool(decision.needs_rag) if action is RouterAction.CHAT else False,

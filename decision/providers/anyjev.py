@@ -28,8 +28,12 @@ from decision.providers.base import (
     DECISION_QUESTIONS,
     DecisionBackendUnavailable,
     DecisionTransportError,
+    QuestionSpec,
+    build_scale_choice_question,
     build_state_text,
+    compose_decision,
 )
+from decision.timing import InterventionIntent, normalize_intervention
 from decision.providers.http_transport import HttpDecisionTransport
 
 _PROBABILITY_KEYS = ("probs", "probabilities", "distribution", "probs_by_option")
@@ -134,40 +138,59 @@ class AnyJevDecisionProvider:
         started = time.perf_counter()
 
         if self.transport == "inprocess":
-            answers = self._decide_inprocess(state)
+            answers = self._decide_inprocess(state, DECISION_QUESTIONS)
             route = "inprocess"
         else:
-            answers, route = self._decide_over_http(state)
+            answers, route = self._decide_over_http(state, DECISION_QUESTIONS)
+
+        scale_choice = None
+        if normalize_intervention(answers["intervention"][0]) == InterventionIntent.OFFER_SCALE.value:
+            spec = build_scale_choice_question(request)
+            if spec is not None:
+                if self.transport == "inprocess":
+                    extra = self._decide_inprocess(state, (spec,))
+                else:
+                    extra, _extra_route = self._decide_over_http(state, (spec,))
+                answers.update(extra)
+                scale_choice = extra[spec.name]
 
         latency_ms = (time.perf_counter() - started) * 1000.0
-        return self._assemble(answers, latency_ms=latency_ms, route=route)
+        return compose_decision(
+            provider=self.name,
+            request=request,
+            answers=answers,
+            latency_ms=latency_ms,
+            route=route,
+            reason=f"anyjev:{route}",
+            scale_choice=scale_choice,
+        )
 
     # -- transports --------------------------------------------------------
 
-    def _decide_over_http(self, state: str) -> tuple[dict[str, tuple[str, dict[str, float]]], str]:
+    def _decide_over_http(
+        self, state: str, specs: tuple[QuestionSpec, ...] = DECISION_QUESTIONS
+    ) -> tuple[dict[str, tuple[str, dict[str, float]]], str]:
         assert self._http is not None
         if self.batch:
             try:
                 payload = self._http.post(
-                    {
-                        "items": [
-                            {"state": state, **spec.payload()} for spec in DECISION_QUESTIONS
-                        ]
-                    }
+                    {"items": [{"state": state, **spec.payload()} for spec in specs]}
                 )
-                return self._parse_batch(payload), "batch"
+                return self._parse_batch(payload, specs), "batch"
             except _ShapeError:
                 # The gateway may only implement single decisions.  Falling back
                 # is cheap and local; record which path ran.
                 pass
         answers: dict[str, tuple[str, dict[str, float]]] = {}
-        for spec in DECISION_QUESTIONS:
+        for spec in specs:
             payload = self._http.post({"state": state, **spec.payload()})
             answer, probabilities, _route = _extract_decision(payload)
             answers[spec.name] = (answer, probabilities)
         return answers, "sequential"
 
-    def _parse_batch(self, payload: Any) -> dict[str, tuple[str, dict[str, float]]]:
+    def _parse_batch(
+        self, payload: Any, specs: tuple[QuestionSpec, ...] = DECISION_QUESTIONS
+    ) -> dict[str, tuple[str, dict[str, float]]]:
         if isinstance(payload, dict):
             for key in _LIST_KEYS:
                 value = payload.get(key)
@@ -176,17 +199,19 @@ class AnyJevDecisionProvider:
                     break
         if not isinstance(payload, list):
             raise _ShapeError("batch response is not a list")
-        if len(payload) != len(DECISION_QUESTIONS):
+        if len(payload) != len(specs):
             raise _ShapeError(
-                f"batch response has {len(payload)} items, expected {len(DECISION_QUESTIONS)}"
+                f"batch response has {len(payload)} items, expected {len(specs)}"
             )
         answers: dict[str, tuple[str, dict[str, float]]] = {}
-        for spec, item in zip(DECISION_QUESTIONS, payload):
+        for spec, item in zip(specs, payload):
             answer, probabilities, _route = _extract_decision(item)
             answers[spec.name] = (answer, probabilities)
         return answers
 
-    def _decide_inprocess(self, state: str) -> dict[str, tuple[str, dict[str, float]]]:
+    def _decide_inprocess(
+        self, state: str, specs: tuple[QuestionSpec, ...] = DECISION_QUESTIONS
+    ) -> dict[str, tuple[str, dict[str, float]]]:
         decider = self._ensure_decider()
         if decider is None:
             raise DecisionBackendUnavailable(
@@ -199,11 +224,11 @@ class AnyJevDecisionProvider:
 
         questions = [
             Question.choice(spec.text, list(spec.options), name=spec.name)
-            for spec in DECISION_QUESTIONS
+            for spec in specs
         ]
         results = decider.decide(state, questions)
         answers: dict[str, tuple[str, dict[str, float]]] = {}
-        for spec in DECISION_QUESTIONS:
+        for spec in specs:
             result = results.get(spec.name) if isinstance(results, dict) else None
             if result is None:
                 raise DecisionBackendUnavailable(f"anyjev returned no result for {spec.name!r}")
@@ -240,38 +265,3 @@ class AnyJevDecisionProvider:
             ) from exc
         self._decider = Decider(HFBackend(self.model))
         return self._decider
-
-    # -- assembly ----------------------------------------------------------
-
-    def _assemble(
-        self,
-        answers: dict[str, tuple[str, dict[str, float]]],
-        *,
-        latency_ms: float,
-        route: str,
-    ) -> RawDecision:
-        action, action_probs = answers["action"]
-        intent, _intent_probs = answers["intent"]
-        emotion, _emotion_probs = answers["emotion"]
-        clarify, _clarify_probs = answers["clarify"]
-        complex_review, _complex_probs = answers.get("complex_review", ("no", {}))
-
-        confidence = float(action_probs.get(action, 0.0))
-        return RawDecision(
-            provider=self.name,
-            action=str(action).strip().lower(),
-            scale_name=None,
-            emotion=str(emotion).strip().lower(),
-            intensity=0.0,
-            needs_rag=str(action).strip().lower() == "chat",
-            confidence=confidence,
-            reason=f"anyjev:{route}",
-            intent_jev=str(intent).strip().lower(),
-            intent_legacy=str(intent).strip().lower(),
-            clarify=str(clarify).strip().lower() == "yes",
-            needs_complex_review=str(complex_review).strip().lower() == "yes",
-            probabilities=dict(action_probs),
-            per_question={name: dict(probs) for name, (_answer, probs) in answers.items()},
-            latency_ms=latency_ms,
-            route=route,
-        )

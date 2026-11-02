@@ -506,6 +506,13 @@ MIN_ROUNDS_BEFORE_SCALE = 5
 SCALE_ROUTE_CONFIDENCE = 0.45   # Minimum confidence for scale start/continue
 RELAX_ROUTE_CONFIDENCE = 0.6    # Minimum confidence for relaxation recommendation
 
+# Invitation cooldowns (rounds after a refusal during which the same kind of
+# offer stays suppressed).  These are policy floors only: the decision layer
+# decides whether a moment is appropriate, and these numbers stop it from
+# asking again the very next turn.
+OFFER_SCALE_COOLDOWN_ROUNDS = 4
+OFFER_RELAXATION_COOLDOWN_ROUNDS = 4
+
 # Post-relaxation continue chat timeout (seconds)
 POST_RELAXATION_TIMEOUT = 60
 

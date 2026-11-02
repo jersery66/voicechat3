@@ -38,6 +38,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "decision"))
 
 from decision.providers.base import DECISION_QUESTIONS  # noqa: E402
+from decision.timing import normalize_intervention  # noqa: E402
 from decision.providers.http_transport import HttpDecisionTransport  # noqa: E402
 from service_process import (  # noqa: E402
     LocalDecisionService,
@@ -49,11 +50,13 @@ DEFAULT_CASES = PROJECT_ROOT / "scripts" / "benchmarks" / "cases" / "decision_ca
 DEFAULT_OUT = PROJECT_ROOT / "test_output" / "benchmarks"
 
 #: Which expected field in the case file grades which question.
+#: Question name -> case field.  ``intervention`` is the primary graded
+#: question; intent and emotion stay graded as auxiliary observations, and
+#: ``complex_review`` is only recorded (the case set does not label it).
 EXPECTED_FIELDS = {
-    "intent": "expected_intent",
+    "intervention": "expected_intervention",
     "emotion": "expected_emotion",
-    "action": "expected_action",
-    "clarify": "expected_clarify",
+    "intent": "expected_intent",
     "complex_review": "expected_complex_review",
 }
 
@@ -216,6 +219,11 @@ def run_cases(
         for spec, item in zip(DECISION_QUESTIONS, items):
             distribution = item.get("probs") or item.get("probabilities") or {}
             answer = str(item.get("answer") or _argmax(distribution))
+            if spec.name == "intervention":
+                # Compare in label space: the wire answer is the option text
+                # ("Offer a scale assessment"), the case set is labelled with
+                # the decision vocabulary ("offer_scale").
+                answer = normalize_intervention(answer) or answer
             slot = per_question[spec.name]
             expected_field = EXPECTED_FIELDS[spec.name]
             gold = case.get(expected_field)

@@ -28,9 +28,13 @@ from decision.contracts import DecisionRequest, RawDecision
 from decision.providers.base import (
     DECISION_QUESTIONS,
     DecisionBackendUnavailable,
+    QuestionSpec,
+    build_scale_choice_question,
     build_state_text,
+    compose_decision,
 )
 from decision.providers.http_transport import HttpDecisionTransport
+from decision.timing import InterventionIntent, normalize_intervention
 
 _ROUTE_VALUES = ("one_forward", "cot", "batch", "sequential", "inprocess")
 
@@ -130,46 +134,53 @@ class TacitDecisionProvider:
         state = build_state_text(request)
         started = time.perf_counter()
         if self.transport == "server":
-            answers, routes = self._decide_over_http(state)
+            answers, routes = self._decide_over_http(state, DECISION_QUESTIONS)
         else:
-            answers, routes = self._decide_inprocess(state)
+            answers, routes = self._decide_inprocess(state, DECISION_QUESTIONS)
+
+        intervention = normalize_intervention(answers["intervention"][0])
+
+        # The "which questionnaire" question is only worth a forward pass when
+        # the answer is "offer a scale".  Asking it unconditionally would put a
+        # scale name in front of the model on every turn and invite it to name
+        # one when it should be listening.
+        scale_choice: Optional[tuple[str, dict[str, float]]] = None
+        if intervention == InterventionIntent.OFFER_SCALE.value:
+            spec = build_scale_choice_question(request)
+            if spec is not None:
+                extra_answers, extra_routes = self._ask(state, (spec,))
+                answers.update(extra_answers)
+                routes.extend(extra_routes)
+                scale_choice = extra_answers[spec.name]
+
         latency_ms = (time.perf_counter() - started) * 1000.0
-
-        action, action_probs = answers["action"]
-        intent, _ = answers["intent"]
-        emotion, _ = answers["emotion"]
-        clarify, _ = answers["clarify"]
-        complex_review, _ = answers.get("complex_review", ("no", {}))
         escalated = [value for value in routes if value == "cot"]
-
-        return RawDecision(
+        return compose_decision(
             provider=self.name,
-            action=action.strip().lower(),
-            scale_name=None,
-            emotion=emotion.strip().lower(),
-            intensity=0.0,
-            needs_rag=action.strip().lower() == "chat",
-            confidence=float(action_probs.get(action, 0.0)),
-            reason="tacit" + ("+cot" if escalated else ""),
-            intent_jev=intent.strip().lower(),
-            intent_legacy=intent.strip().lower(),
-            clarify=clarify.strip().lower() == "yes",
-            needs_complex_review=complex_review.strip().lower() == "yes",
-            probabilities=dict(action_probs),
-            per_question={name: dict(probs) for name, (_a, probs) in answers.items()},
+            request=request,
+            answers=answers,
             latency_ms=latency_ms,
             route="cot" if escalated else "one_forward",
+            reason="tacit" + ("+cot" if escalated else ""),
+            scale_choice=scale_choice,
         )
 
     # -- transports --------------------------------------------------------
 
+    def _ask(
+        self, state: str, specs: tuple[QuestionSpec, ...]
+    ) -> tuple[dict[str, tuple[str, dict[str, float]]], list[str]]:
+        if self.transport == "server":
+            return self._decide_over_http(state, specs)
+        return self._decide_inprocess(state, specs)
+
     def _decide_over_http(
-        self, state: str
+        self, state: str, specs: tuple[QuestionSpec, ...]
     ) -> tuple[dict[str, tuple[str, dict[str, float]]], list[str]]:
         assert self._http is not None
         answers: dict[str, tuple[str, dict[str, float]]] = {}
         routes: list[str] = []
-        for spec in DECISION_QUESTIONS:
+        for spec in specs:
             payload = self._http.post({"state": state, **spec.payload()})
             answer, probabilities, route = _parse_tacit_payload(payload)
             answers[spec.name] = (answer, probabilities)
@@ -177,13 +188,14 @@ class TacitDecisionProvider:
         return answers, routes
 
     def _decide_inprocess(
-        self, state: str
+        self, state: str, specs: tuple[QuestionSpec, ...]
     ) -> tuple[dict[str, tuple[str, dict[str, float]]], list[str]]:
         tacit = self._ensure_tacit()
         if tacit is None:
             raise DecisionBackendUnavailable("tacit checkpoint is not available")
-        # One `decide_batch` call, not five: official Tacit batches the questions
-        # of one turn into a single forward, and that is the latency we quote.
+        # One `decide_batch` call, not one per question: official Tacit batches
+        # the questions of one turn into a single forward, and that is the
+        # latency this project quotes.
         batch = [
             {
                 "state": state,
@@ -191,7 +203,7 @@ class TacitDecisionProvider:
                 "options": list(spec.options),
                 "kind": "choice",
             }
-            for spec in DECISION_QUESTIONS
+            for spec in specs
         ]
         try:
             results = tacit.decide_batch(batch)
@@ -207,7 +219,7 @@ class TacitDecisionProvider:
 
         answers: dict[str, tuple[str, dict[str, float]]] = {}
         routes: list[str] = []
-        for spec, result in zip(DECISION_QUESTIONS, results):
+        for spec, result in zip(specs, results):
             if not isinstance(result, dict):
                 raise DecisionBackendUnavailable(
                     f"tacit returned {type(result).__name__} for {spec.name!r}"

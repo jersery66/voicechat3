@@ -20,6 +20,12 @@ from typing import Any, Optional, Sequence
 from urllib.parse import urlparse
 
 MAX_BODY_BYTES = 1024 * 1024
+#: How much of a rejected body may be read back before answering.  Reading it
+#: keeps the connection in a defined state; refusing to read an unbounded body
+#: is the only defence against a client that never stops sending.
+MAX_DRAIN_BYTES = 8 * 1024 * 1024
+#: Seconds to wait for body bytes that were announced but never sent.
+DRAIN_TIMEOUT_SECONDS = 0.3
 MAX_ITEMS_PER_REQUEST = 32
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
@@ -151,9 +157,15 @@ def _make_handler(engine: Any, log: Optional[Any]):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            if self.close_connection:
+                # Without this the client cannot tell whether the connection is
+                # reusable; on Windows the subsequent close() then surfaces as
+                # WinError 10053 instead of a parsed response.
+                self.send_header("Connection", "close")
             self.end_headers()
             try:
                 self.wfile.write(body)
+                self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -162,6 +174,49 @@ def _make_handler(engine: Any, log: Optional[Any]):
             if detail:
                 payload["detail"] = detail
             self._send(status, payload)
+
+        def _drain_body(self) -> None:
+            """Consume an unread request body before answering with an error.
+
+            Closing a socket while the receive buffer still holds request bytes
+            makes the kernel send RST instead of FIN; the client then reports
+            WinError 10053 and never sees the status code.  Every error path
+            that answers *before* reading the body must drain it first.
+
+            The read is bounded twice: by :data:`MAX_DRAIN_BYTES` and by a short
+            socket timeout, so a client that announces a body and never sends it
+            gets its 400 instead of hanging the handler.
+            """
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self.close_connection = True
+                return
+            if length <= 0:
+                return
+            remaining = min(length, MAX_DRAIN_BYTES)
+            if length > MAX_DRAIN_BYTES:
+                self.close_connection = True
+            previous = None
+            try:
+                previous = self.connection.gettimeout()
+                self.connection.settimeout(DRAIN_TIMEOUT_SECONDS)
+                while remaining > 0:
+                    chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except (OSError, ValueError):
+                self.close_connection = True
+            finally:
+                try:
+                    self.connection.settimeout(previous)
+                except OSError:
+                    self.close_connection = True
+            if remaining > 0:
+                # The announced body never fully arrived; the connection cannot
+                # be reused for another request.
+                self.close_connection = True
 
         def _read_json(self) -> Any:
             try:
@@ -193,11 +248,15 @@ def _make_handler(engine: Any, log: Optional[Any]):
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path != "/v1/decide":
+                # The body belongs to a request we refuse; read it anyway so the
+                # connection stays in a well-defined HTTP state.
+                self._drain_body()
                 self._error(HTTPStatus.NOT_FOUND, "unknown_path")
                 return
             try:
                 payload = self._read_json()
             except ValueError as exc:
+                self._drain_body()
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_request", detail=str(exc))
                 return
             try:
