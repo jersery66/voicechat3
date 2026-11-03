@@ -50,9 +50,11 @@ DEFAULT_OUT = PROJECT_ROOT / "test_output" / "timing"
 SPLIT_FILES = {
     "dev": CASES_DIR / "interview_trajectories_dev.jsonl",
     "test": CASES_DIR / "interview_trajectories_test.jsonl",
-    #: Frozen, never used for tuning.  Written before the input fix was run and
-    #: scored exactly once, so its numbers are the only ones that can be read as
-    #: "held out".
+    #: USED EVALUATION SET (see the STATUS header inside the file).  Written
+    #: before the input fix and scored blind, but the Tacit decision layer has
+    #: since been observed on every trajectory here, so it is no longer a clean
+    #: holdout.  Keep the file for regression and forensics only; write a fresh
+    #: frozen split for the next model or policy comparison.
     "holdout": CASES_DIR / "interview_trajectories_holdout.jsonl",
 }
 

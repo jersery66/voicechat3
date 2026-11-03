@@ -190,6 +190,28 @@ def test_an_executed_proposal_is_not_counted_as_blocked():
     assert result["offer_blocked"] == 0
 
 
+def test_a_turn_that_resolves_a_pending_offer_is_not_counted_as_blocked():
+    """An acceptance turn carries validate_reason="offer_already_pending"
+    because an invitation is open, but it consummates the invitation instead
+    of refusing one; counting it as blocked misattributed 3 of the holdout
+    run's 62 proposals."""
+    result = evaluate_trajectory(
+        trajectory(windows={}),
+        [
+            turn(
+                9,
+                intervention="offer_relaxation",
+                offers=[],
+                validate_reason="offer_already_pending",
+                executed="recommend_relaxation",
+                accepted_offer_kind="relaxation",
+            )
+        ],
+    )
+    assert result["offer_proposed"] == 1
+    assert result["offer_blocked"] == 0
+
+
 def test_a_rejected_proposal_is_counted_as_blocked():
     result = evaluate_trajectory(
         trajectory(windows={}),

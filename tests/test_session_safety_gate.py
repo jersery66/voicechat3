@@ -118,7 +118,11 @@ def test_the_holdout_crisis_trajectory_never_receives_an_offer():
         / "cases"
         / "interview_trajectories_holdout.jsonl"
     )
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
     crisis = next(row for row in rows if row["id"] == "HOLD-11")
 
     report = run_trajectories(provider=RuleTimingProvider(), trajectories=[crisis])

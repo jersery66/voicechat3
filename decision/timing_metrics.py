@@ -223,7 +223,10 @@ def evaluate_trajectory(
     # "Blocked" means the proposal did not become an invitation.  A proposal
     # that was executed instead (the participant asked for the intervention
     # themselves, so the policy started it directly) was not blocked, and
-    # counting it as such would flatter a timid model.
+    # counting it as such would flatter a timid model.  The same applies to a
+    # turn that *resolves* an outstanding invitation (accepted/declined): its
+    # validator reason says "offer_already_pending" because an invitation is
+    # open, but the turn did not refuse anything -- it consummated one.
     proposed_offers = [
         turn
         for turn in turns
@@ -233,8 +236,7 @@ def evaluate_trajectory(
     blocked = sum(
         1
         for turn in proposed_offers
-        if turn.get("validate_reason")
-        or (not turn.get("offers") and turn.get("executed") not in executed_instead)
+        if not turn.get("offers") and turn.get("executed") not in executed_instead
     )
     result["offer_blocked"] = blocked
     result["offer_proposed"] = len(proposed_offers)
