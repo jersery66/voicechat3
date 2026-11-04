@@ -294,6 +294,13 @@ class RawDecision(BaseModel):
     offer_target: Optional[str] = None
     scale_choice: Optional[str] = None
     intervention_question: Optional[str] = None
+    #: Stage-2 outcome of the conditional scale-target resolution, set by
+    #: ``compose_decision`` when stage 1 answered OFFER_SCALE.  One of
+    #: ``resolved`` / ``deterministic`` / ``model_abstained`` /
+    #: ``unresolvable`` / ``no_candidates``.  The validator turns this into a
+    #: distinct rejection reason so "timing may be right, instrument
+    #: undecided" never masquerades as "timing inappropriate".
+    scale_target_outcome: Optional[str] = None
 
     action: Optional[str] = None
     scale_name: Optional[str] = None
@@ -507,6 +514,42 @@ def build_observation(
 def action_labels() -> Sequence[str]:
     """Expose the action whitelist for validators and benchmarks."""
     return ACTION_LABELS
+
+
+#: Stage-2 marker: stage 1 offered a scale, stage 2 could not determine which
+#: legal instrument.  Shared by the validator (rejection reason), the eval
+#: harness and the production coordinator (degraded-observation mapping) so
+#: all three spell it identically.
+SCALE_TARGET_UNDETERMINED = "scale_target_undetermined"
+
+
+def rejection_observation(reason: Optional[str], *, source: str) -> Optional[AgentObservation]:
+    """Map a validator rejection reason to its degraded observation, if any.
+
+    Most rejections degrade to a neutral chat in the caller's own fallback
+    path.  One rejection is different: ``scale_target_undetermined`` means the
+    timing may be right but the instrument is undecided -- silently continuing
+    the interview would disguise that as "timing inappropriate", so the
+    degradation is a *clarification* instead.  Both consumers of validator
+    verdicts (the eval harness and the production coordinator) route through
+    here so the two cannot drift.
+    """
+    if reason != SCALE_TARGET_UNDETERMINED:
+        return None
+    try:
+        return AgentObservation(
+            proposal=RouterProposal(
+                action=RouterAction.CHAT,
+                clarify=True,
+                confidence=0.0,
+                reason=SCALE_TARGET_UNDETERMINED,
+            ),
+            intent="counseling",
+            fallback_used=True,
+            source=source,
+        )
+    except Exception:  # pragma: no cover - contract violation guard
+        return None
 
 
 def is_ending_state(session_state: str) -> bool:

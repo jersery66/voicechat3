@@ -368,6 +368,13 @@ class TrajectoryRunner:
 
     @staticmethod
     def _fallback_observation(reason: str):
+        from decision.contracts import rejection_observation
+
+        # A stage-1 offer whose stage-2 target stayed undetermined degrades to
+        # a clarification, not to a silent continue -- see rejection_observation.
+        mapped = rejection_observation(reason, source="jev")
+        if mapped is not None:
+            return mapped
         return build_observation(
             RawDecision(
                 provider="fallback",

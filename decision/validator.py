@@ -44,6 +44,10 @@ from decision.timing import (
     intervention_to_router_action,
     normalize_intervention,
 )
+from decision.providers.base import (
+    SCALE_TARGET_ABSTAINED,
+    SCALE_TARGET_UNRESOLVABLE,
+)
 
 # Reasons are stable strings: tests and the decision journal depend on them.
 REASON_PROVIDER_ERROR = "provider_error"
@@ -57,6 +61,10 @@ REASON_PROBABILITY_OUT_OF_RANGE = "probability_out_of_range"
 REASON_INCONSISTENT_ARGMAX = "inconsistent_argmax"
 REASON_BELOW_THRESHOLD = "below_abstain_threshold"
 REASON_MISSING_SCALE = "missing_scale_name"
+#: Stage 1 wanted an offer, stage 2 could not determine a legal instrument.
+#: Distinct from ``missing_scale_name`` so "timing may be right, instrument
+#: undecided" is observable instead of masquerading as a malformed offer.
+REASON_SCALE_TARGET_UNDETERMINED = "scale_target_undetermined"
 REASON_UNKNOWN_SCALE = "unknown_scale_name"
 REASON_ACTIVE_SCALE_CONFLICT = "state_conflict_active_scale"
 REASON_SESSION_ENDING_CONFLICT = "state_conflict_session_ending"
@@ -233,24 +241,15 @@ class DecisionValidator:
     def _scale_offer_conflict(
         self, decision: RawDecision, request: DecisionRequest
     ) -> Optional[str]:
-        target = (decision.offer_target or decision.scale_name or "").strip()
-        if not target:
-            return REASON_MISSING_SCALE
-        if target not in _known_scale_names():
-            return REASON_UNKNOWN_SCALE
-
+        # Two-stage order: every *timing* question is answered before the
+        # *target* question, so a turn that fails on timing is never reported
+        # as a target failure and vice versa.  The target check comes last
+        # because "which instrument" only matters once "now" is acceptable.
         candidates = {candidate.name for candidate in request.scale_candidates()}
         if not candidates:
             # Nothing registered, nothing incomplete: there is no scale to
             # offer, so a scale offer is a fabrication.
             return REASON_NO_SCALE_CANDIDATE
-        if target not in candidates:
-            if target in request.completed_scales:
-                return REASON_SCALE_ALREADY_COMPLETED
-            if target in request.offer_state.declined_scales():
-                return REASON_SCALE_ALREADY_DECLINED
-            return REASON_SCALE_NOT_A_CANDIDATE
-
         if self._offer_already_pending(request):
             return REASON_OFFER_ALREADY_PENDING
 
@@ -261,6 +260,24 @@ class DecisionValidator:
 
         if request.risk_marker:
             return REASON_RISK_REQUIRES_SAFETY
+
+        target = (decision.offer_target or decision.scale_name or "").strip()
+        if not target:
+            outcome = decision.scale_target_outcome
+            if outcome in (SCALE_TARGET_ABSTAINED, SCALE_TARGET_UNRESOLVABLE):
+                # Stage 1 said offer, stage 2 could not name an instrument.
+                # This is a distinct state from a malformed offer: the timing
+                # may be fine, only the choice is undecided.
+                return REASON_SCALE_TARGET_UNDETERMINED
+            return REASON_MISSING_SCALE
+        if target not in _known_scale_names():
+            return REASON_UNKNOWN_SCALE
+        if target not in candidates:
+            if target in request.completed_scales:
+                return REASON_SCALE_ALREADY_COMPLETED
+            if target in request.offer_state.declined_scales():
+                return REASON_SCALE_ALREADY_DECLINED
+            return REASON_SCALE_NOT_A_CANDIDATE
         return None
 
     def _relaxation_offer_conflict(self, request: DecisionRequest) -> Optional[str]:

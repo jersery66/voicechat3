@@ -187,6 +187,17 @@ class DecisionCoordinator:
 
     def _escalate(self, request: DecisionRequest, reason: str) -> tuple[AgentObservation, str]:
         """Return (observation, source) for a rejected or failed Jev decision."""
+        from decision.contracts import rejection_observation
+
+        # A stage-1 offer whose stage-2 target stayed undetermined degrades to
+        # a clarification rather than a fresh legacy decision: re-asking
+        # another backend "which scale" after this one abstained would be a
+        # main-model choice made without the participant, and the clarify path
+        # keeps the participant in the loop.  Provider failures keep the
+        # legacy escalation below.
+        mapped = rejection_observation(reason, source="jev")
+        if mapped is not None:
+            return mapped, "deterministic"
         if self.escalation is EscalationMode.LEGACY and self.legacy is not None:
             try:
                 fallback = self.legacy.decide(request)

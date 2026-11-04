@@ -240,6 +240,55 @@ def resolve_scale_choice(answer: Any, request: DecisionRequest) -> Optional[str]
     return None
 
 
+#: Stage-2 outcomes for the conditional scale-target resolution.
+SCALE_TARGET_RESOLVED = "resolved"          # the model named a legal candidate
+SCALE_TARGET_DETERMINISTIC = "deterministic"  # unusable answer, one legal candidate
+SCALE_TARGET_ABSTAINED = "model_abstained"  # the model chose "No scale for now"
+SCALE_TARGET_UNRESOLVABLE = "unresolvable"  # unusable answer, several candidates
+SCALE_TARGET_NO_CANDIDATES = "no_candidates"  # nothing legal left to offer
+
+
+def resolve_scale_target(
+    request: "DecisionRequest",
+    scale_choice: Optional[tuple[Any, dict[str, float]]],
+) -> tuple[Optional[str], str]:
+    """Stage 2 of the scale decision: resolve *which* instrument, if any.
+
+    Runs only after stage 1 answered OFFER_SCALE.  The candidate list comes
+    from the same registry production starts instruments from, already
+    filtered by completion, administration and prior declines.
+
+    Returns ``(target, outcome)``:
+
+    ``resolved``        the model named a legal candidate.
+    ``deterministic``   the answer was unusable or absent, but exactly one
+                        legal candidate remains -- the protocol picks it, no
+                        model invention involved.
+    ``model_abstained`` the model explicitly chose "No scale for now".  This
+                        is a real answer, not a failure: it is never
+                        overridden, even when a unique candidate exists,
+                        because replacing a deliberate abstention with a
+                        fabricated target is how consent erodes.
+    ``unresolvable``    unusable answer with several legal candidates and no
+                        basis to pick one -- the caller routes this to
+                        clarification, never to a silent continue.
+    ``no_candidates``   nothing legal left; any offer would be a fabrication.
+    """
+    candidates = request.scale_candidates()
+    if not candidates:
+        return None, SCALE_TARGET_NO_CANDIDATES
+    answer = scale_choice[0] if scale_choice else None
+    target = resolve_scale_choice(answer, request)
+    if target is not None:
+        return target, SCALE_TARGET_RESOLVED
+    text = str(answer).strip() if answer is not None else ""
+    if text == SCALE_CHOICE_NONE:
+        return None, SCALE_TARGET_ABSTAINED
+    if len(candidates) == 1:
+        return candidates[0].name, SCALE_TARGET_DETERMINISTIC
+    return None, SCALE_TARGET_UNRESOLVABLE
+
+
 def compose_decision(
     *,
     provider: str,
@@ -271,8 +320,12 @@ def compose_decision(
         probabilities[normalize_intervention(label) or str(label)] = float(value)
 
     target: Optional[str] = None
-    if intervention == InterventionIntent.OFFER_SCALE.value and scale_choice is not None:
-        target = resolve_scale_choice(scale_choice[0], request)
+    target_outcome: Optional[str] = None
+    if intervention == InterventionIntent.OFFER_SCALE.value:
+        # Stage 2 runs whenever stage 1 says "offer a scale": resolve the
+        # target now so the validator can separate "timing wrong" from
+        # "timing right but instrument undecided".
+        target, target_outcome = resolve_scale_target(request, scale_choice)
 
     intent = str(answers.get("intent", ("counseling", {}))[0]).strip().lower()
     emotion = str(answers.get("emotion", ("uncertain", {}))[0]).strip().lower()
@@ -287,6 +340,7 @@ def compose_decision(
         provider=provider,
         intervention=intervention_raw,
         offer_target=target,
+        scale_target_outcome=target_outcome,
         scale_choice=scale_choice[0] if scale_choice is not None else None,
         action=action,
         scale_name=target,

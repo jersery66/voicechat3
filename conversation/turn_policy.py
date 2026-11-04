@@ -33,6 +33,7 @@ from conversation.contracts import (
     TurnSignals,
     TurnStateSnapshot,
 )
+from decision.contracts import SCALE_TARGET_UNDETERMINED
 from decision.timing import (
     OFFER_REASON_ANSWER_AMBIGUOUS,
     OFFER_REASON_CLARIFYING,
@@ -158,13 +159,20 @@ class TurnPolicy:
             )
 
         # A decision backend may also observe that the turn needs clarifying.
-        # It is an observation like the one above, and equally gated.
+        # It is an observation like the one above, and equally gated.  A
+        # stage-2 target resolution that came back undetermined carries its
+        # own marker; the policy surfaces it verbatim so the journal can tell
+        # "which instrument?" apart from "what do you mean?".
         if proposal.clarify and not snapshot.active_scale:
+            if proposal.reason == SCALE_TARGET_UNDETERMINED:
+                clarify_reason = SCALE_TARGET_UNDETERMINED
+            else:
+                clarify_reason = "router_clarify_first"
             return TurnDecision(
                 action=TurnAction.CLARIFY_INPUT,
                 semantic_target=signals.semantic_target,
                 confidence=proposal.confidence,
-                reason="router_clarify_first",
+                reason=signals.semantic_reason or clarify_reason,
                 needs_rag=False,
             )
 
