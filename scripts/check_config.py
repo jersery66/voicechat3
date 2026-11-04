@@ -49,7 +49,9 @@ def _warn(label: str, detail: str) -> None:
 
 def check_ollama() -> bool:
     """Verify Ollama server is reachable and has at least one model."""
-    from config import OLLAMA_HOST, OLLAMA_MODEL
+    # OLLAMA_MODEL was removed from config.py when the provider matrix moved
+    # to runtime.yaml; the endpoint choice alone decides what matters here.
+    from config import OLLAMA_HOST
     try:
         import ollama
         client = ollama.Client(host=OLLAMA_HOST)
@@ -64,7 +66,7 @@ def check_ollama() -> bool:
         names = [n for n in names if n]
         if not names:
             return _fail("Ollama", f"no models found at {OLLAMA_HOST}")
-        _ok(f"Ollama ({len(names)} models, using '{OLLAMA_MODEL}')")
+        _ok(f"Ollama ({len(names)} models)")
         return True
     except Exception as e:
         return _fail("Ollama", f"cannot reach {OLLAMA_HOST}: {e}")

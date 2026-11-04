@@ -176,7 +176,22 @@ class MainWindow(QMainWindow):
         return getattr(snapshot, "relaxation_type", None)
 
     def _setup_window(self):
-        self.setWindowTitle(APP_NAME)
+        # The window title states the ACTUAL decision mode from the runtime
+        # config, so a demo audience can never mistake a fallback for Jev.
+        try:
+            from deployment.runtime_config import get_runtime_config
+
+            decision = get_runtime_config().decision
+            mode_text = {
+                "jev": "Jev",
+                "shadow": "Shadow",
+                "legacy": "Legacy",
+            }.get(str(decision.mode), str(decision.mode))
+            backend = str(getattr(decision, "backend", "") or "")
+            title_mode = f"{mode_text}/{backend}" if backend else mode_text
+        except Exception:
+            title_mode = "模式未知"
+        self.setWindowTitle(f"{APP_NAME}［决策模式：{title_mode}］")
         self.setMinimumSize(1024, 768)
 
         # Load background image

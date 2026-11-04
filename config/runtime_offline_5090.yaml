@@ -1,0 +1,79 @@
+# ============================================================================
+# voicechat3 离线演示运行配置 —— RTX 5090 32GB 专用（完全离线）
+# ============================================================================
+# 由 start_voicechat3_offline.bat 通过 VOICECHAT_RUNTIME_CONFIG 指定启用；
+# 默认 runtime.yaml 保持不变。本文件与 runtime.yaml 的唯一差异是 decision
+# 段：Jev 模式 + Tacit-1.7B 进程内推理。
+#
+# Jev 模式下的显存策略：
+#   - 主模型 Qwen3.8-27B-Q4_K_S 由 WSL 内 llama-server 提供（:8000），
+#     由既有契约脚本 /root/start_llamacpp_stack.sh 或启动器按需拉起。
+#   - Legacy Agent（Qwen3-4B, :8001）在本模式下仅作 legacy 回退；为不无必要
+#     地占用显存，本配置 escalation_mode: deterministic —— 决策回退为确定性
+#     CHAT，并在日志/结果中显式留痕，绝不冒充 Jev 成功。8001 无需启动。
+#   - Tacit-1.7B 进程内 bf16 加载（约 4GB），allow_model_download=false。
+#
+# 回退可见性：deterministic 回退的观测带 fallback_used=true 与
+# decision_fallback 原因码，GUI/日志可辨识，不与 Jev 正常输出混淆。
+# ============================================================================
+
+dialogue:
+  provider: openai_compatible
+  engine: llamacpp
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen3.8-27B-Q4_K_S
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.35
+  top_p: 0.8
+  top_k: null
+  presence_penalty: null
+  enable_thinking: false
+  request_mode: chat
+  system_role_mode: native
+  system_prompt_override: null
+
+agent:
+  enabled: true
+  provider: openai_compatible
+  engine: llamacpp
+  base_url: http://127.0.0.1:8001/v1
+  model: Qwen3-4B-Instruct-2507
+  api_key: EMPTY
+  timeout: 10
+  temperature: 0.1
+
+asr:
+  provider: funasr
+  model_path: auto
+
+tts:
+  provider: voxcpm
+  model_path: auto
+  voice_prompt_path: auto
+
+runtime:
+  strict_preflight: true
+  immutable_contract: true
+  manage_model_servers: false
+  enable_streaming_tts: true
+
+decision:
+  mode: jev
+  backend: tacit
+  transport: inprocess
+  timeout: 30.0
+  abstain_threshold: 0.55
+  escalation_mode: deterministic   # 不为 legacy 回退启动 8001 / Qwen3-4B
+  shadow_backend: null
+  endpoint: null
+  model: null
+  model_path: D:/models/tacit/Tacit-1.7B
+  model_dtype: bfloat16
+  batch: true
+  allow_remote_endpoint: false
+  allow_model_download: false
+  journal_path: null
+  clinical_review:
+    enabled: false

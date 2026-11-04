@@ -148,12 +148,20 @@ class TTSService:
         if prompt_wav and os.path.exists(prompt_wav):
             logger.info(f"Voice prompt: {prompt_wav}")
             try:
+                # Reference-only cache.  The previous build passed the same wav
+                # as BOTH prompt and reference ("ref_continuation" mode), which
+                # makes the model continue *from the prompt audio*: every
+                # synthesis started by re-singing the prompt sentence (~2-8s
+                # of leaked audio) before the requested text, on the speaker
+                # and in every saved file.  Reference mode conditions on the
+                # voice without carrying the prompt audio into the decode.
                 self.prompt_cache = self.model.tts_model.build_prompt_cache(
-                    prompt_text=prompt_text or "",
-                    prompt_wav_path=prompt_wav,
+                    prompt_text=None,
+                    prompt_wav_path=None,
                     reference_wav_path=prompt_wav,
+                    trim_silence_vad=True,
                 )
-                logger.info("Voice prompt cache built for VoxCPM2 ultimate cloning")
+                logger.info("Voice prompt cache built (reference mode, no continuation leak)")
             except Exception as e:
                 logger.warning(f"Failed to build prompt cache: {e}")
                 self.prompt_cache = None
