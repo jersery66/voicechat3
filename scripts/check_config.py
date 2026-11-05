@@ -119,6 +119,27 @@ def check_agent_backend() -> bool:
         return True
 
     runtime = get_runtime_config()
+    # The legacy agent LLM is only contacted at runtime when the decision
+    # chain can fall back to it: mode=legacy (agent IS the decider) or
+    # escalation_mode=legacy (agent is the escalation target).  With
+    # escalation_mode=deterministic the config contract explicitly says the
+    # agent server (e.g. :8001 / Qwen3-4B) is NOT started, so probing it
+    # must not fail the strict preflight.
+    decision = getattr(runtime, "decision", None)
+    decision_mode = str(getattr(decision, "mode", "legacy") or "legacy")
+    escalation_mode = str(
+        getattr(decision, "escalation_mode", "legacy") or "legacy"
+    )
+    agent_used_at_runtime = (
+        decision_mode == "legacy" or escalation_mode == "legacy"
+    )
+    if not agent_used_at_runtime:
+        _ok(
+            f"Agent (unused: decision={decision_mode}, "
+            f"escalation={escalation_mode} — agent server not started)"
+        )
+        return True
+
     # Every supported provider exposes an OpenAI-compatible /v1/models
     # endpoint (llama.cpp, vLLM, and Ollama's compatibility layer alike).
     available = _check_openai_compatible_model(

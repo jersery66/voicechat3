@@ -52,6 +52,37 @@ def test_unavailable_agent_blocks_strict_runtime_readiness(monkeypatch):
     assert check_config.check_agent_backend() is False
 
 
+def test_deterministic_escalation_skips_agent_probe_under_strict_runtime(monkeypatch):
+    # The config contract says the agent server (:8001) is not started when
+    # the decision chain never falls back to it; the strict preflight must
+    # therefore not probe (and not fail on) the agent endpoint.
+    monkeypatch.setattr("config.AGENT_ENABLED", True)
+    monkeypatch.setattr(
+        check_config, "_check_openai_compatible_model",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not probe")),
+    )
+    monkeypatch.setattr(check_config, "get_runtime_config", lambda: SimpleNamespace(
+        runtime=SimpleNamespace(strict_preflight=True),
+        decision=SimpleNamespace(mode="jev", escalation_mode="deterministic"),
+    ))
+
+    assert check_config.check_agent_backend() is True
+
+
+def test_legacy_escalation_still_probes_agent_endpoint(monkeypatch):
+    monkeypatch.setattr("config.AGENT_ENABLED", True)
+    monkeypatch.setattr(check_config, "_check_openai_compatible_model", lambda *_: False)
+    monkeypatch.setattr(check_config, "get_runtime_config", lambda: SimpleNamespace(
+        runtime=SimpleNamespace(strict_preflight=True),
+        decision=SimpleNamespace(mode="jev", escalation_mode="legacy"),
+    ))
+    monkeypatch.setattr("config.AGENT_PROVIDER", "openai_compatible")
+    monkeypatch.setattr("config.AGENT_MODEL", "agent-model")
+    monkeypatch.setattr("config.AGENT_MODEL_SERVER", "http://agent:8001/v1")
+
+    assert check_config.check_agent_backend() is False
+
+
 def test_disabled_agent_is_reported_and_non_critical(monkeypatch):
     monkeypatch.setattr("config.AGENT_ENABLED", False)
     monkeypatch.setattr(check_config, "_check_openai_compatible_model",
