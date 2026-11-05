@@ -1,17 +1,24 @@
 @echo off
 REM ============================================================
-REM voicechat3 ç¦»çº¿æ¼”ç¤ºå¯åŠ¨å…¥å£ï¼ˆRTX 5090 / Jev / Tacit è¿›ç¨‹å†…ï¼‰
+REM voicechat3 ÀëÏßÑİÊ¾Æô¶¯Èë¿Ú£¨RTX 5090 / Jev / Tacit ½ø³ÌÄÚ£©
 REM
-REM ç”¨æ³•ï¼š
-REM   start_voicechat3_offline.bat                 æ­£å¸¸å¯åŠ¨ï¼ˆå«é¢„æ£€ + GUIï¼‰
-REM   start_voicechat3_offline.bat -PreflightOnly  åªåšé¢„æ£€ä¸å¯åŠ¨ GUI
-REM   start_voicechat3_offline.bat -SkipLlmStart   ä¸å¯åŠ¨ :8000ï¼ˆå·²æ‰‹åŠ¨å¯åŠ¨æ—¶ï¼‰
+REM ÓÃ·¨£º
+REM   start_voicechat3_offline.bat                 Õı³£Æô¶¯£¨º¬Ô¤¼ì + GUI£©
+REM   start_voicechat3_offline.bat -PreflightOnly  Ö»×öÔ¤¼ì²»Æô¶¯ GUI
+REM   start_voicechat3_offline.bat -SkipLlmStart   Ìø¹ıÆô¶¯ :8000 ·şÎñ´°¿Ú
 REM
-REM ä¸»æ¨¡å‹æœåŠ¡ï¼ˆWSL å†… llama-server :8000ï¼‰åœ¨ä¸€ä¸ªç‹¬ç«‹çš„æœ€å°åŒ–çª—å£ä¸­å¸¸é©»è¿è¡Œï¼Œ
-%%REM å…³é—­è¯¥çª—å£æˆ– wsl --shutdown éƒ½ä¼šåœæ‰ä¸»æ¨¡å‹ï¼›å†æ¬¡è¿è¡Œæœ¬è„šæœ¬ä¼šè‡ªåŠ¨é‡æ‹‰ã€‚%%
-REM å®Œæ•´è¯´æ˜è§ docs/deployment/offline_run_guide.md
+REM Ö÷Ä£ĞÍ·şÎñÔÚÒ»¸ö¶ÀÁ¢µÄ×îĞ¡»¯´°¿ÚÖĞ³£×¤ÔËĞĞ£»¹Ø±Õ¸Ã´°¿Ú¼´Í£Ö¹Ö÷Ä£ĞÍ£¬
+REM ÔÙ´ÎÔËĞĞ±¾½Å±¾»á×Ô¶¯ÖØÀ­¡£ÈÎºÎÔ¤¼ìÊ§°Ü¶¼»áÍ£ÁôÏÔÊ¾Ô­Òò£¬²»»áÒ»ÉÁ¶ø¹ı¡£
+REM ÍêÕûËµÃ÷¼û docs\deployment\offline_run_guide.md
 REM ============================================================
 if /i "%~1"=="-SkipLlmStart" goto :llm_skipped
-start "voicechat3 dialogue (llama-server :8000, è¯·å‹¿å…³é—­)" /min wsl.exe -e bash /mnt/d/æˆ’æ¯’æ‰€/voicechat3/scripts/engines/llama_cpp/start_dialogue_only.sh
+start "voicechat3 dialogue (llama-server :8000, ÇëÎğ¹Ø±Õ´Ë´°¿Ú)" /min wsl.exe -e bash /mnt/d/½ä¶¾Ëù/voicechat3/scripts/engines/llama_cpp/start_dialogue_only.sh
 :llm_skipped
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\deployment\start_offline.ps1" %*
+call powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\deployment\start_offline.ps1" %*
+set EC=%ERRORLEVEL%
+if not "%EC%"=="0" (
+    echo.
+    echo Æô¶¯Ê§°Ü£¨ÍË³öÂë %EC%£©¡£ÇëÔÄ¶ÁÉÏ·½ FATAL ĞĞµÄÔ­ÒòËµÃ÷¡£
+    pause
+)
+exit /b %EC%
