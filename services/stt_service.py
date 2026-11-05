@@ -384,36 +384,85 @@ class STTService:
             if best_device_id is None:
                 raise RuntimeError("No microphone found! Please check your audio settings.")
             logger.info(f"[ASRDebug] Selected input device: {reason} (Index {best_device_id})")
-            device_id = best_device_id
+
+            # Candidate order: the preferred device first, then every other
+            # capture endpoint.  On machines whose only capture endpoint is
+            # disabled in Windows sound settings (WDM-KS-only visibility),
+            # every preferred open fails and 内录/loopback becomes the only
+            # workable input for a demo -- better than refusing to record.
+            input_ids = [
+                index
+                for index, device in enumerate(devices)
+                if device.get("max_input_channels", 0) > 0
+            ]
+            candidates = [best_device_id] + [i for i in input_ids if i != best_device_id]
+
+            def _is_loopback(candidate_id: int) -> bool:
+                try:
+                    name = str(devices[candidate_id].get("name", "")).lower()
+                except Exception:
+                    return False
+                return any(marker in name for marker in _LOOPBACK_DEVICE_MARKERS)
 
             # Keep a newly constructed stream local until the complete startup
             # attempt has passed its stale/cancellation checks.  Publishing it
             # early would let a late start thread overwrite a newer recording.
-            candidate_stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype=np.float32,
-                callback=audio_callback,
-                blocksize=1024,
-                device=device_id
-            )
+            candidate_stream = None
+            last_open_error: Optional[Exception] = None
+            for candidate_id in candidates:
+                try:
+                    candidate_stream = sd.InputStream(
+                        samplerate=SAMPLE_RATE,
+                        channels=CHANNELS,
+                        dtype=np.float32,
+                        callback=audio_callback,
+                        blocksize=1024,
+                        device=candidate_id
+                    )
+                except Exception as exc:
+                    last_open_error = exc
+                    self._close_stream_handle(candidate_stream)
+                    candidate_stream = None
+                    logger.warning(
+                        "[ASRDebug] input device %s failed to open: %s; trying next candidate",
+                        candidate_id, exc,
+                    )
+                    continue
+                device_id = candidate_id
+                if candidate_id != best_device_id:
+                    if _is_loopback(candidate_id):
+                        logger.warning(
+                            "[ASRDebug] falling back to 内录/loopback device %s: the "
+                            "recording captures SYSTEM PLAYBACK, not a microphone. "
+                            "Play the participant's voice through the speakers.",
+                            candidate_id,
+                        )
+                    else:
+                        logger.warning(
+                            "[ASRDebug] falling back to input device %s (preferred device "
+                            "could not be opened)", candidate_id,
+                        )
+                break
+
+            if candidate_stream is None or device_id is None:
+                raise RuntimeError(
+                    f"No usable input device could be opened (last error: {last_open_error}). "
+                    "Check Windows sound settings: the recording device may be disabled."
+                )
 
             if not self._startup_attempt_is_current(recording_state):
                 self._close_stream_handle(candidate_stream)
                 return False
 
-            # PortAudio may block here.  The candidate remains unpublished so
-            # a concurrent stop can retire this attempt safely.
+            # Start only after the stale/cancellation checks so a cancelled
+            # startup never activates the device.  A start failure falls into
+            # the outer handler below, which closes the stream and reports
+            # the error.
             candidate_stream.start()
 
-            if not self._startup_attempt_is_current(recording_state):
-                self._close_stream_handle(candidate_stream)
-                return False
-
-            # Start the collector before opening the stream.  A device may
-            # deliver a callback immediately after ``start()``; the recording
-            # queue already exists and the collector is committed atomically
-            # below before startup is reported successful.
+            # A concurrent stop can still retire this attempt safely; the
+            # collector below is committed atomically before startup is
+            # reported successful.
             def collect_audio():
                 while True:
                     audio_chunk = recording_state.audio_queue.get()

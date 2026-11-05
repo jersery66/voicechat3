@@ -69,51 +69,73 @@ except Exception as exc:
     sys.exit(1)
 
 sys.path.insert(0, ".")
-from services.stt_service import select_input_device
+from services.stt_service import select_input_device, _LOOPBACK_DEVICE_MARKERS
 
 devices = sd.query_devices()
 index, reason = select_input_device(devices, default_index=sd.default.device[0])
-if index is None or index < 0:
-    print("FATAL: no usable microphone found (loopback-only machines cannot pick up speech).")
-    sys.exit(1)
 
-try:
+def _probe(device_index, samplerate=16000, channels=1, seconds=0.4):
+    """Callback-based probe in the production format; returns peak amplitude."""
     import numpy as np
     import time
 
     frames = []
 
-    def _cb(indata, n, ti, status):
+    def cb(indata, n, ti, status):
         frames.append(indata.copy())
 
-    # Callback-based, like production recording (the WDM-KS backend rejects
-    # the blocking-read API).
-    with sd.InputStream(device=index, samplerate=16000, channels=1,
-                        dtype="float32", blocksize=1024, callback=_cb):
-        time.sleep(0.4)
+    with sd.InputStream(device=device_index, samplerate=samplerate,
+                        channels=channels, dtype="float32",
+                        blocksize=1024, callback=cb):
+        time.sleep(seconds)
     audio = np.concatenate(frames)
-    peak = float(abs(audio).max())
-    print(f"  input: {reason}")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    return float(abs(audio).max())
+
+def _name_of(i):
+    try:
+        return str(devices[i].get("name", ""))
+    except Exception:
+        return ""
+
+def _is_loopback(i):
+    return any(m in _name_of(i).lower() for m in _LOOPBACK_DEVICE_MARKERS)
+
+if index is None or index < 0:
+    print("FATAL: no microphone found by any audio API.")
+    sys.exit(1)
+
+print(f"  input: {reason}")
+chosen = None
+input_ids = [i for i, d in enumerate(devices) if d.get("max_input_channels", 0) > 0]
+for candidate in [index] + [i for i in input_ids if i != index]:
+    try:
+        peak = _probe(candidate)
+        chosen = candidate
+        break
+    except Exception as exc:
+        print(f"  device {candidate} ({_name_of(candidate)}) not openable: {exc}")
+
+if chosen is None:
+    print("FATAL: no input device could be opened in the production format (16k/mono).")
+    print("  如果『录制』设备已被禁用，请先在 mmsys.cpl -> 录制 中启用并设为默认，")
+    print("  然后重新运行本脚本（内录/立体声混音也可以，启用方法相同）。")
+    sys.exit(1)
+
+if _is_loopback(chosen):
+    print(f"  mode: 内录（{_name_of(chosen)}）——录音捕获系统播放的声音，不是麦克风。")
+    print("  演示方法：GUI 点录音后，用任意播放器把参与者语音 wav 播放到扬声器。")
+    print("  注意：录音期间不要播放其他系统声音（TTS 已由程序自动先停止）。")
+elif chosen != index:
+    print(f"  mode: fallback input device {_name_of(chosen)}")
+else:
     print(f"  probe recorded ok (peak={peak:.4f})")
     if peak == 0.0:
-        print("  WARN: 探测到麦克风打开但采集全静音——请检查：")
+        print("  WARN: 探测到输入打开但采集全静音——请检查：")
         print("    - 设置 -> 隐私和安全性 -> 麦克风 -> 允许桌面应用访问麦克风")
         print("    - 麦克风硬件开关/是否静音")
         print("  （不阻止启动，但语音输入将收不到声音。）")
-except Exception as exc:
-    print(f"FATAL: cannot open microphone (device {index}): {type(exc).__name__}: {exc}")
-    hostapis = {int(d["hostapi"]) for d in devices if d["max_input_channels"] > 0}
-    api_names = {str(sd.query_hostapis(h)["name"]) for h in hostapis}
-    if api_names == {"Windows WDM-KS"}:
-        print()
-        print("  诊断：MME/WASAPI 层看不到任何录音设备，麦克风只存在于内核层 (WDM-KS)。")
-        print("  这几乎总是 Windows 声音设置里『录音设备被禁用/未设为默认』造成的。请：")
-        print("    1. Win+R 运行 mmsys.cpl -> 『录制』选项卡")
-        print("    2. 空白处右键 -> 勾选『显示禁用的设备』和『显示已断开的设备』")
-        print("    3. 右键『麦克风』-> 启用，并『设为默认设备』")
-        print("    4. 或：设置 -> 系统 -> 声音 -> 输入，选择麦克风并允许访问")
-        print("  修好后重新运行本脚本即可。")
-    sys.exit(1)
 print("  audio OK")
 '@
 $tmpAudio = Join-Path $env:TEMP "voicechat_audio_check.py"
@@ -124,9 +146,15 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 # -- 3. relaxation media -----------------------------------------------------
 Write-Host "[3/5] relaxation media..."
 $media = @'
+import sys
+sys.path.insert(0, ".")
 from pathlib import Path
-from relaxation.catalog import build_default_catalog, RelaxationContentRole
-root = Path.cwd()
+try:
+    from relaxation.catalog import build_default_catalog, RelaxationContentRole
+except Exception as exc:
+    print(f"  WARN: relaxation catalog not importable (non-fatal): {exc}")
+    sys.exit(0)
+root = Path.cwd() / "media_library" / "relaxation"
 missing = []
 for item in build_default_catalog().definitions:
     if item.role != RelaxationContentRole.CORE_RELAXATION:
