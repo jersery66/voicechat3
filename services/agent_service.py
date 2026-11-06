@@ -282,20 +282,31 @@ class AgentService:
             return keyword_emotion
 
     def _keyword_detect_emotion(self, text: str) -> Dict[str, Any]:
-        """关键词快速情绪检测 fallback。"""
+        """关键词快速情绪检测 fallback。
+
+        Keywords are matched with a negation guard ("没有很好" must not read as
+        happy).  Bare single-character hedges are deliberately absent: "好" in
+        "也没有很好" previously matched the happy list at intensity 0.75, which
+        also skipped the model-based recheck (>= 0.7 short-circuits).
+        """
         text_lower = text.lower()
         emotion_keywords = {
-            "sad": ["难过", "伤心", "悲伤", "痛苦", "想哭", "委屈", "失落", "绝望"],
+            "sad": ["难过", "伤心", "悲伤", "痛苦", "想哭", "委屈", "失落", "绝望", "难受", "心里堵", "不太好", "不是滋味"],
             "anxious": ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁"],
-            "angry": ["生气", "愤怒", "烦", "恼火", "气愤", "不公平", "受够了"],
-            "depressed": ["抑郁", "低落", "没意思", "无聊", "空虚", "绝望", "崩溃"],
-            "happy": ["开心", "高兴", "快乐", "好", "不错", "满意", "感谢"],
+            "angry": ["生气", "愤怒", "恼火", "气愤", "不公平", "受够了"],
+            "depressed": ["抑郁", "低落", "没意思", "无聊", "空虚", "崩溃", "提不起劲", "没劲"],
+            "happy": ["开心", "高兴", "快乐", "满意", "欣慰", "轻松多了", "好多了", "有希望"],
             "lonely": ["孤独", "寂寞", "没人", "一个人", "无助", "没有朋友"],
         }
+        negations = ("不", "没", "无", "未", "没有", "毫无", "并不", "从不", "从未")
         for emotion, keywords in emotion_keywords.items():
             for kw in keywords:
-                if kw in text_lower:
-                    return {"emotion": emotion, "intensity": 0.75, "keywords": [kw]}
+                start = text_lower.find(kw)
+                while start != -1:
+                    prefix = text_lower[max(0, start - 3):start]
+                    if not any(prefix.endswith(neg) for neg in negations):
+                        return {"emotion": emotion, "intensity": 0.75, "keywords": [kw]}
+                    start = text_lower.find(kw, start + 1)
         return {"emotion": "neutral", "intensity": 0.0, "keywords": []}
 
     # ==================== Conversation Summary ====================

@@ -2085,9 +2085,13 @@ class MainWindow(QMainWindow):
             self._play_tts_async(new_text)
 
     def _play_fill_info_prompt(self):
-        """Play fill-info prompt - dynamically generated or fallback."""
+        """Play fill-info prompt - speak the final text once.
+
+        Same single-speech contract as the opening greeting: speaking the
+        fixed fallback and then the LLM version cancelled the first synthesis
+        mid-flight ("generator already executing" right at startup).
+        """
         fallback = FILL_INFO_PROMPT
-        self._play_tts_async(fallback)
 
         def _try_generate():
             generated = ""
@@ -2101,8 +2105,14 @@ class MainWindow(QMainWindow):
                     )
             except Exception as e:
                 logger.debug(f"Fill-info prompt generation failed: {e}")
-            if generated and len(generated.strip()) > 5:
-                self._play_tts_async(generated.strip()[:50])
+            text = generated.strip()[:50] if generated and len(generated.strip()) > 5 else fallback
+            # The participant may have filled the form and started the session
+            # while this prompt was being generated; stay silent then.
+            if self._lifecycle_state_name() not in (
+                "CHATTING", "SESSION_ENDING", "SESSION_ENDED",
+                "VIDEO_PLAYING", "RELAXATION_PLAYING", "GAME_PLAYING",
+            ):
+                self._play_tts_async(text)
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _start_ollama_keepalive(self):

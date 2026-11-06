@@ -323,7 +323,10 @@ class TTSService:
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
-        logger.debug(f"generate_and_play called with text length: {len(text)}")
+        logger.debug(
+            "generate_and_play called with text length: %s text=%r",
+            len(text), text[:30],
+        )
         self.is_playing = True
         state = _PlaybackState()
         with self._active_playback_lock:

@@ -1082,6 +1082,7 @@ class ConversationPipeline:
                 score=interpretation.score,
             )
             if update.accepted:
+                self._clarification_pending = False
                 result.scale_tags = {scale_name: {current_item: interpretation.score}}
                 if update.completed:
                     result.scale_completed = True
@@ -1098,8 +1099,10 @@ class ConversationPipeline:
                         self._proactive_relaxation_candidate = rec_type
                 return
         if interpretation.status == "ambiguous":
+            self._clarification_pending = True
             self.scale_runtime.request_clarification()
         elif interpretation.status in {"pause", "refusal", "unmatched"}:
+            self._clarification_pending = True
             if not self.scale_runtime.snapshot().paused:
                 self.scale_runtime.request_clarification()
 
@@ -1702,6 +1705,7 @@ class ConversationPipeline:
                 runtime.active_scale or decision.scale_name,
                 runtime.current_item or 1,
                 agent_route or {},
+                clarify=bool(getattr(self, "_clarification_pending", False)),
             )
             if hint:
                 system_suffix += hint
@@ -2176,11 +2180,17 @@ class ConversationPipeline:
         has_frequency = any(w in t for w in FREQUENCY_WORDS)
         return has_positive and not has_frequency
 
-    def _build_scale_context_hint(self, scale_name: str, item: int, agent_route: dict) -> str:
+    def _build_scale_context_hint(self, scale_name: str, item: int, agent_route: dict,
+                                  clarify: bool = False) -> str:
         """Build a detailed scale context hint for the main model.
 
         Uses agent-provided scale_item_text/scoring_target/required_answer_axis
         if available, otherwise falls back to SCALE_ITEM_CORES dict.
+
+        ``clarify`` marks a turn where the previous answer could not be scored
+        (e.g. "对啊" without a frequency).  Without the explicit directive the
+        model drifts to a different topic and the Runtime item stays pending
+        forever, so the scale can never complete.
         """
         # Always use SCALE_ITEM_CORES as single source of truth
         cores = SCALE_ITEM_CORES.get(scale_name, {})
@@ -2196,7 +2206,7 @@ class ConversationPipeline:
                 return f"\n【隐性症状采样】如果语境自然，顺手了解：{natural}\n不要说量表、问卷、题目、评分。每轮最多一个问题。\n"
             return ""
 
-        return f"""
+        hint = f"""
 【隐性症状采样】当前仍有一个状态点没了解完整。继续正常聊天。
 [内部采样目标，不要直接暴露给用户]
 量表：{scale_name}
@@ -2212,6 +2222,14 @@ class ConversationPipeline:
 - 不要同时问多个维度
 - 本轮回复最后必须包含一个可回答的问题
 """
+        if clarify:
+            hint += (
+                "- 上一轮回答还不足以判断程度或频率（例如只说了“有”“对”）。"
+                "本轮只能围绕当前这个状态点追问：这段时间大概有几天是这样——"
+                "几乎每天、一半以上、有几天，还是完全没有？"
+                "不要换话题，不要同时问别的内容。\n"
+            )
+        return hint
 
     def _get_relaxation_done(self) -> bool:
         """Check if relaxation training was completed this session."""
