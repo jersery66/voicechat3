@@ -49,7 +49,7 @@ class ChatPanel(FrostedPanel):
         super().__init__(alpha=0.76, radius=20, parent=None)
         self.setObjectName("chatPanel")
         self.setMinimumWidth(400)
-        self.setMaximumWidth(560)
+        self.setMaximumWidth(760)
         self._messages = []
         self._current_streaming_bubble = None
         self._active_generation_id = None

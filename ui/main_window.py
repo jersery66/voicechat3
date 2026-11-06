@@ -295,12 +295,22 @@ class MainWindow(QMainWindow):
         super().paintEvent(event)
 
     def resizeEvent(self, event):  # noqa: N802 - Qt naming
-        """Keep the chat column a readable width without swallowing the photo."""
+        """Keep the chat column readable and the overlays window-sized."""
         super().resizeEvent(event)
+        # The loading overlay was sized once from the 640x480 default central
+        # rect and never followed the window, so it stayed as a small card in
+        # the top-left corner while the rest of the UI was already laid out.
+        overlay = getattr(self, "loading_screen", None)
+        central = self.centralWidget()
+        if overlay is not None and central is not None:
+            overlay.setGeometry(central.rect())
+
         panel = getattr(self, "chat_panel", None)
         if panel is None:
             return
-        target = max(400, min(560, int(self.width() * 0.40)))
+        # Wider screens get a wider conversation column (up to 760px) instead
+        # of staying pinned at the 560px phone-like width.
+        target = max(400, min(760, int(self.width() * 0.38)))
         if panel.width() != target:
             panel.setFixedWidth(target)
 

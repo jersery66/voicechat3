@@ -14,6 +14,9 @@ class LoadingScreen(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("loadingOverlay")
+        # A plain QWidget ignores the QSS background unless styled painting is
+        # enabled, so the dim scrim never appeared over the photo.
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._dot_index = 0
         self._setup_ui()
         self._start_dot_animation()
