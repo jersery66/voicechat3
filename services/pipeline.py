@@ -482,6 +482,14 @@ class ConversationPipeline:
         # turn. It is an observation, not an approved intervention.
         self._proactive_relaxation_candidate: Optional[str] = None
         self._agent_route_cooldown: int = 0         # cooldown after agent route failure
+        # Last decision-layer outcome, kept so the language layer can reflect
+        # the decision model's own read of the turn (intent/emotion/confidence)
+        # instead of discarding everything below the action.
+        self._last_decision_outcome: Optional[Any] = None
+        # Per-session participation counters for the decision layer.
+        self._jev_stats: dict[str, int] = {
+            "turns": 0, "accepted": 0, "abstained": 0, "fallback": 0,
+        }
 
         # Shared executor for parallel intent / emotion classification.
         # Created once and reused across pipeline executions to avoid
@@ -510,12 +518,21 @@ class ConversationPipeline:
 
     def reset_session(self):
         """Reset per-session state without touching unrelated services."""
+        stats = getattr(self, "_jev_stats", None)
+        if stats and stats.get("turns"):
+            logger.info(
+                "[DecisionParticipation] turns=%s jev_accepted=%s jev_abstained=%s "
+                "route_fallback=%s",
+                stats["turns"], stats["accepted"], stats["abstained"], stats["fallback"],
+            )
+        self._jev_stats = {"turns": 0, "accepted": 0, "abstained": 0, "fallback": 0}
         self.scale_runtime.reset()
         self.symptom_scores = {
             name: 0 for name in self._scale_manager.get_scale_names()
         }
         self.symptom_turns = 0
         self._agent_route_cooldown = 0
+        self._last_decision_outcome = None
         self._proactive_relaxation_offered = False
         self._proactive_relaxation_candidate = None
         self._offer_ledger.reset()
@@ -797,6 +814,9 @@ class ConversationPipeline:
 
     def _agent_deterministic_fallback(self, user_text: str) -> AgentObservation:
         """Build local observations without invoking a secondary Agent call."""
+        stats = getattr(self, "_jev_stats", None)
+        if stats is not None:
+            stats["fallback"] += 1
         intent = "counseling"
         emotion = "neutral"
         intensity = 0.0
@@ -921,10 +941,12 @@ class ConversationPipeline:
         """
         if not AGENT_ROUTE_ENABLED:
             logger.warning("[AgentRoute] skipped: AGENT_ROUTE_ENABLED=False")
+            self._last_decision_outcome = None
             return self._agent_deterministic_fallback(user_text)
         if self._agent_route_cooldown > 0:
             self._agent_route_cooldown -= 1
             logger.warning(f"[AgentRoute] cooldown remaining={self._agent_route_cooldown}")
+            self._last_decision_outcome = None
             return self._agent_deterministic_fallback(user_text)
 
         # The Jev/shadow decision layers own an independent primary backend
@@ -944,11 +966,13 @@ class ConversationPipeline:
         except Exception:
             agent_needed = True
         if agent_needed and (not self.agent or not self.agent.is_available()):
+            self._last_decision_outcome = None
             return self._agent_deterministic_fallback(user_text)
 
         observation = self._observe_via_coordinator(user_text, current_rounds)
         if observation is not None:
             return observation
+        self._last_decision_outcome = None
         return self._agent_deterministic_fallback(user_text)
 
     def _observe_via_coordinator(self, user_text: str, current_rounds: int):
@@ -958,6 +982,14 @@ class ConversationPipeline:
             outcome = self._decision_coordinator().observe_turn(request)
             observation = outcome.observation
             self._agent_route_cooldown = 0
+            self._last_decision_outcome = outcome
+            stats = getattr(self, "_jev_stats", None)
+            if stats is not None:
+                stats["turns"] += 1
+                if getattr(outcome, "escalated", False):
+                    stats["abstained"] += 1
+                else:
+                    stats["accepted"] += 1
             logger.warning(
                 f"[AgentRoute] action={observation.proposal.action.value} "
                 f"scale={observation.proposal.scale_name} confidence={observation.proposal.confidence} "
@@ -969,6 +1001,7 @@ class ConversationPipeline:
         except Exception as exc:
             logger.warning(f"[AgentRoute] failed: {exc}")
             self._agent_route_cooldown = AGENT_ROUTE_COOLDOWN_ROUNDS
+            self._last_decision_outcome = None
             return None
 
     def _request_router_proposal(
@@ -1695,9 +1728,13 @@ class ConversationPipeline:
             result.timing["rag_ms"] = (time.perf_counter() - rag_started) * 1000.0
 
         decision_context = self._build_decision_language_context(decision, runtime)
-        if decision_context:
+        # The decision layer's own read of the turn (intent/emotion/confidence)
+        # travels with the task instruction so Jev participates in the wording,
+        # not just in the action gate.
+        jev_context = self._build_jev_judgement_context()
+        if decision_context or jev_context:
             system_suffix = "\n".join(
-                part for part in (decision_context, system_suffix) if part
+                part for part in (jev_context, decision_context, system_suffix) if part
             )
 
         if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
@@ -2250,6 +2287,72 @@ class ConversationPipeline:
         if not self.llm or not hasattr(self.llm, 'conversation_history'):
             return ""
         return format_history(self.llm.conversation_history, max_turns=max_turns)
+
+    def _build_jev_judgement_context(self) -> str:
+        """Surface the decision model's own read of the turn to the language model.
+
+        The Jev/Tacit checkpoint answers four questions per turn; only the
+        action used to survive into the reply, so the decision layer looked
+        idle even when it ran.  Its intent/emotion read is evidence about the
+        participant, so it is passed to the writer -- marked as reference when
+        the turn escalated, never presented as an accepted decision.
+        """
+        outcome = getattr(self, "_last_decision_outcome", None)
+        raw = getattr(outcome, "decision", None) if outcome is not None else None
+        if raw is None:
+            return ""
+
+        intent_zh = {
+            "chat": "想聊聊天",
+            "symptom": "在描述症状或身体感受",
+            "emotion": "在表达情绪",
+            "help_seeking": "在寻求帮助或建议",
+            "scale": "在问评估/问卷相关的事",
+            "relaxation": "想放松一下",
+            "game": "想玩点什么",
+            "end": "想结束这次谈话",
+        }
+        emotion_zh = {
+            "calm": "平静",
+            "sad": "低落",
+            "anxious": "焦虑",
+            "angry": "愤怒",
+            "irritable": "烦躁",
+            "positive": "积极",
+        }
+
+        intent = str(getattr(raw, "intent_jev", "") or "").strip().lower()
+        emotion = str(getattr(raw, "emotion", "") or "").strip().lower()
+        intensity = float(getattr(raw, "intensity", 0.0) or 0.0)
+        confidence = float(getattr(raw, "confidence", 0.0) or 0.0)
+        action = str(getattr(raw, "action", "") or "").strip()
+
+        parts = []
+        if intent and intent != "unclear":
+            parts.append(f"来访者这一轮{intent_zh.get(intent, intent)}")
+        if emotion and emotion not in ("uncertain", ""):
+            label = emotion_zh.get(emotion, emotion)
+            # Tacit answers emotion as a class; intensity stays 0 unless the
+            # provider supplies one, so only mention it when it exists.
+            parts.append(
+                f"情绪偏向{label}（强度 {intensity:.1f}）" if intensity > 0 else f"情绪偏向{label}"
+            )
+        if not parts:
+            return ""
+
+        accepted = bool(outcome is not None and not getattr(outcome, "escalated", False))
+        stance = (
+            f"决策层已采纳（动作 {action or 'chat'}，置信度 {confidence:.2f}）"
+            if accepted
+            else f"决策层判断仅供参考（置信度 {confidence:.2f}，本轮动作按保守流程执行）"
+        )
+        return (
+            "\n【决策层判断（仅供表达参考，不要把这段原文说出来）】\n"
+            + "；".join(parts)
+            + f"。{stance}。\n"
+            + "请让回应贴合这个判断：顺着来访者此刻真正在意的东西往下走，"
+            + "不要把话题带到与他无关的方向。\n"
+        )
 
     def _build_decision_language_context(
         self, decision: TurnDecision, runtime: Any
