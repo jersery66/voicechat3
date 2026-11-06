@@ -30,6 +30,8 @@ def main() -> int:
     parser.add_argument("--adaptive", type=int, default=0)
     parser.add_argument("--tau", type=float, default=0.5)
     parser.add_argument("--max-cot-share", type=float, default=0.2)
+    parser.add_argument("--device", default="auto",
+                        help="auto | cpu | cuda (auto falls back to cpu on OOM)")
     args = parser.parse_args()
 
     # Offline is enforced before any transformers import touches the hub.
@@ -42,16 +44,36 @@ def main() -> int:
         print(json.dumps({"ready": False, "error": f"anyjev import failed: {exc}"}), flush=True)
         return 1
 
-    try:
-        tacit = Tacit.from_pretrained(
+    def _load(device: str):
+        return Tacit.from_pretrained(
             args.model,
+            device_map=device,
+            dtype="float32" if device == "cpu" else "bfloat16",
             adaptive=bool(args.adaptive),
             tau=float(args.tau),
             max_cot_share=float(args.max_cot_share),
         )
+
+    device = (args.device or "auto").strip().lower()
+    try:
+        tacit = _load("auto" if device == "auto" else device)
     except Exception as exc:
-        print(json.dumps({"ready": False, "error": f"{type(exc).__name__}: {exc}"}), flush=True)
-        return 1
+        message = f"{type(exc).__name__}: {exc}"
+        # The dialogue/TTS/ASR stack can leave only a few GB of VRAM; the
+        # decision needs ~4GB, so a busy GPU is the common case, not an error.
+        # Fall back to CPU (slower per turn, identical decisions) instead of
+        # letting the whole decision layer look unavailable.
+        if device == "cpu" or "out of memory" not in message.lower():
+            print(json.dumps({"ready": False, "error": message}), flush=True)
+            return 1
+        print(f"cuda load failed ({message}); retrying on cpu", file=sys.stderr, flush=True)
+        try:
+            tacit = _load("cpu")
+        except Exception as exc2:
+            print(json.dumps({"ready": False,
+                              "error": f"cpu fallback failed: {type(exc2).__name__}: {exc2}"}),
+                  flush=True)
+            return 1
 
     print(json.dumps({"ready": True}), flush=True)
 

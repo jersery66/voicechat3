@@ -336,6 +336,7 @@ class TacitDecisionProvider:
             "--adaptive", "1" if self.adaptive else "0",
             "--tau", str(self.tau),
             "--max-cot-share", str(self.max_cot_share),
+            "--device", os.environ.get("VOICECHAT_TACIT_DEVICE", "auto"),
         ]
 
         class _SubprocessTacit:

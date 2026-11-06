@@ -144,9 +144,10 @@ class DecisionCoordinator:
         except Exception as exc:
             failure_reason = "provider_error"
             logger.warning(
-                "[Decision] provider failed: provider=%s error=%s",
+                "[Decision] provider failed: provider=%s error=%s: %s",
                 self.primary.name,
                 type(exc).__name__,
+                exc,
             )
 
         if candidate is not None:
