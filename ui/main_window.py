@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QApplication, QLabel
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QPixmap, QPainter, QColor, QBrush
+from PySide6.QtGui import QFont, QPixmap, QPainter, QColor, QBrush, QLinearGradient
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -208,27 +208,21 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
 
-        # Main horizontal layout with bottom margin for logo
+        # Main horizontal layout: a fixed control rail on the left and a
+        # conversation surface that takes the remaining width.  The old
+        # 100px spacers plus fixed 280/380 panels left ~700px of empty photo
+        # at 1440px, so the layout now stretches with the window.
         main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 20, 0, 50)
-        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(24, 24, 24, 24)
+        main_layout.setSpacing(18)
 
-        # Left spacer
-        main_layout.addSpacing(100)
-
-        # Left control panel
+        # Left control panel (fixed rail)
         self.control_panel = ControlPanel()
-        main_layout.addWidget(self.control_panel)
+        main_layout.addWidget(self.control_panel, 0)
 
-        # Center spacer (smaller - push panels closer to center)
-        main_layout.addStretch(1)
-
-        # Right chat panel
+        # Right chat panel (fills the rest of the window)
         self.chat_panel = ChatPanel()
-        main_layout.addWidget(self.chat_panel)
-
-        # Right spacer (smaller to let panel sit closer to edge)
-        main_layout.addSpacing(100)
+        main_layout.addWidget(self.chat_panel, 1)
 
         # Loading screen (overlay on top)
         self.loading_screen = LoadingScreen(central)
@@ -262,19 +256,35 @@ class MainWindow(QMainWindow):
                 panel.set_theme(self._dark_mode)
 
     def paintEvent(self, event):
-        """Paint the background image."""
+        """Paint the background photo full-bleed with a readability scrim.
+
+        The old path letterboxed the photo (KeepAspectRatio) over a light grey
+        fill, which produced pale bars above and below the window and left
+        white cards floating on a bright image.  The photo now covers the
+        window and a vertical gradient keeps text contrast without hiding it.
+        """
         if self._bg_pixmap:
             painter = QPainter(self)
-            # Scale to fit within window, keep aspect ratio, no cropping
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            # Cover: fill the window, crop the overflow instead of adding bars.
             scaled = self._bg_pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
             )
-            # Center the image
             x = (self.width() - scaled.width()) // 2
             y = (self.height() - scaled.height()) // 2
-            # Fill edges with dominant background color
-            painter.fillRect(0, 0, self.width(), self.height(), QColor(245, 245, 245))
             painter.drawPixmap(x, y, scaled)
+
+            # Scrim: darker at the edges, lighter in the middle so the
+            # participant-facing portrait stays visible.
+            scrim = QLinearGradient(0, 0, 0, self.height())
+            scrim.setColorAt(0.0, QColor(9, 18, 28, 150))
+            scrim.setColorAt(0.45, QColor(9, 18, 28, 55))
+            scrim.setColorAt(1.0, QColor(9, 18, 28, 175))
+            painter.fillRect(self.rect(), QBrush(scrim))
+            painter.end()
+        else:
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(9, 18, 28))
             painter.end()
         super().paintEvent(event)
 

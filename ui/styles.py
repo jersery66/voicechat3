@@ -19,7 +19,7 @@ GLOBAL_STYLE = """
 }
 
 QMainWindow {
-    background-color: #f5f5f5;
+    background-color: #0B1220;
 }
 
 /* Left control panel */
@@ -38,30 +38,32 @@ QMainWindow {
 
 /* Section titles */
 #sectionTitle {
-    font-size: 14px;
-    font-weight: bold;
-    color: #2d5a27;
-    padding: 4px 0;
+    font-size: 13px;
+    font-weight: 700;
+    color: #2F6B4F;
+    padding: 6px 0 2px 0;
 }
 
 /* Form labels */
 QLabel {
-    color: #2c3e50;
+    color: #3D4A52;
     font-size: 12px;
 }
 
 /* Input fields */
 QLineEdit, QComboBox, QSpinBox {
-    background-color: rgba(255, 255, 255, 0.9);
-    border: 1px solid #d0d0d0;
-    border-radius: 6px;
-    padding: 5px 8px;
+    background-color: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(30, 42, 50, 0.14);
+    border-radius: 8px;
+    padding: 7px 10px;
     font-size: 12px;
-    color: #2c3e50;
+    color: #1E2A32;
+    selection-background-color: rgba(47, 107, 79, 0.25);
 }
 
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
-    border: 1px solid #2d5a27;
+    border: 1px solid #2F6B4F;
+    background-color: #FFFFFF;
 }
 
 QComboBox::drop-down {
@@ -71,67 +73,89 @@ QComboBox::drop-down {
 
 /* Buttons */
 QPushButton {
-    background-color: #f0f0f0;
-    border: 1px solid #d0d0d0;
-    border-radius: 8px;
-    padding: 6px 14px;
+    background-color: rgba(255, 255, 255, 0.78);
+    border: 1px solid rgba(30, 42, 50, 0.12);
+    border-radius: 9px;
+    padding: 7px 14px;
     font-size: 12px;
-    color: #2c3e50;
+    color: #1E2A32;
 }
 
 QPushButton:hover {
-    background-color: #e0e0e0;
-    border: 1px solid #b0b0b0;
+    background-color: #FFFFFF;
+    border: 1px solid rgba(47, 107, 79, 0.35);
 }
 
 QPushButton:pressed {
-    background-color: #d0d0d0;
+    background-color: rgba(47, 107, 79, 0.12);
+}
+
+QPushButton:disabled {
+    background-color: rgba(255, 255, 255, 0.45);
+    color: rgba(30, 42, 50, 0.38);
 }
 
 /* Primary button */
 #primaryButton {
-    background-color: #4CAF50;
-    color: white;
-    border: 1px solid #388E3C;
-    font-weight: bold;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2F6B4F, stop:1 #3C8163);
+    color: #FFFFFF;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 700;
 }
 
 #primaryButton:hover {
-    background-color: #388E3C;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #275C43, stop:1 #337257);
+}
+
+#primaryButton:pressed {
+    background: #23503B;
 }
 
 /* Danger button */
 #dangerButton {
-    background-color: #EF5350;
-    color: white;
-    border: 1px solid #C62828;
+    background-color: #C0503C;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 10px;
+    padding: 8px 14px;
 }
 
 #dangerButton:hover {
-    background-color: #C62828;
+    background-color: #A94432;
 }
 
 /* Record button special styling handled in widget */
 
 /* Relaxation buttons */
 #relaxButton {
+    background-color: rgba(47, 107, 79, 0.10);
+    border: 1px solid rgba(47, 107, 79, 0.18);
     border-radius: 10px;
-    padding: 8px 12px;
+    padding: 9px 12px;
     font-size: 12px;
-    font-weight: bold;
-    color: white;
-    border: none;
+    font-weight: 600;
+    color: #2F6B4F;
 }
 
 #relaxButton:hover {
-    opacity: 0.85;
+    background-color: rgba(47, 107, 79, 0.18);
+    border: 1px solid rgba(47, 107, 79, 0.32);
+}
+
+#relaxButton:pressed {
+    background-color: rgba(47, 107, 79, 0.26);
 }
 
 /* Status label */
 #statusLabel {
-    color: #1565C0;
+    color: #2F6B4F;
     font-size: 11px;
-    padding: 4px;
+    padding: 6px 10px;
+    background-color: rgba(47, 107, 79, 0.08);
+    border-radius: 8px;
 }
 
 /* Chat area */
@@ -147,9 +171,13 @@ QPushButton:pressed {
 }
 
 #chatScrollArea QScrollBar::handle:vertical {
-    background: rgba(0, 0, 0, 0.15);
+    background: rgba(30, 42, 50, 0.18);
     border-radius: 4px;
     min-height: 30px;
+}
+
+#chatScrollArea QScrollBar::handle:vertical:hover {
+    background: rgba(30, 42, 50, 0.30);
 }
 
 #chatScrollArea QScrollBar::add-line:vertical,
@@ -164,10 +192,10 @@ QPushButton:pressed {
 
 /* Chat title */
 #chatTitle {
-    font-size: 16px;
-    font-weight: bold;
-    color: #2d5a27;
-    padding: 8px;
+    font-size: 17px;
+    font-weight: 700;
+    color: #1E2A32;
+    padding: 6px 8px;
 }
 
 /* Loading screen */
@@ -206,7 +234,7 @@ QProgressBar {
 }
 
 QProgressBar::chunk {
-    background-color: #2d5a27;
+    background-color: #2F6B4F;
     border-radius: 3px;
 }
 """

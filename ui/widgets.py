@@ -18,8 +18,8 @@ from PySide6.QtGui import (
 class FrostedPanel(QFrame):
     """Semi-transparent frosted glass panel with rounded corners."""
 
-    def __init__(self, alpha=0.85, radius=16, parent=None,
-                 bg_color=(255, 255, 255), border_alpha=0.3):
+    def __init__(self, alpha=0.85, radius=20, parent=None,
+                 bg_color=(255, 255, 255), border_alpha=0.60):
         super().__init__(parent)
         self._alpha = alpha
         self._radius = radius
@@ -29,11 +29,12 @@ class FrostedPanel(QFrame):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self._rebuild_style()
 
-        # Drop shadow
+        # Drop shadow: wide and soft so the card reads as lifted off the photo
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(30)
-        shadow.setOffset(0, 4)
-        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setBlurRadius(48)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(6, 14, 24, 90))
+        self._shadow = shadow
         self.setGraphicsEffect(shadow)
 
     def _rebuild_style(self):
@@ -52,9 +53,13 @@ class FrostedPanel(QFrame):
         if dark:
             self._bg_color = (30, 30, 60)
             self._border_alpha = 0.08
+            if getattr(self, "_shadow", None) is not None:
+                self._shadow.setColor(QColor(0, 0, 0, 140))
         else:
             self._bg_color = (255, 255, 255)
-            self._border_alpha = 0.3
+            self._border_alpha = 0.60
+            if getattr(self, "_shadow", None) is not None:
+                self._shadow.setColor(QColor(6, 14, 24, 90))
         self._rebuild_style()
 
 
@@ -157,11 +162,11 @@ class RecordButton(QPushButton):
             self.setText("⏹")
             self.setStyleSheet("""
                 QPushButton {
-                    background-color: #E53935;
-                    color: white;
+                    background-color: #C0503C;
+                    color: #FFFFFF;
                     border-radius: 40px;
-                    font-size: 28px;
-                    border: 3px solid #C62828;
+                    font-size: 24px;
+                    border: 3px solid rgba(255, 255, 255, 0.65);
                 }
                 QPushButton:hover {
                     background-color: #C62828;
@@ -171,11 +176,11 @@ class RecordButton(QPushButton):
             self.setText("🎤")
             self.setStyleSheet("""
                 QPushButton {
-                    background-color: #4CAF50;
-                    color: white;
+                    background-color: #2F6B4F;
+                    color: #F7FBF8;
                     border-radius: 40px;
-                    font-size: 28px;
-                    border: 3px solid #388E3C;
+                    font-size: 26px;
+                    border: 3px solid rgba(255, 255, 255, 0.65);
                 }
                 QPushButton:hover {
                     background-color: #388E3C;
@@ -315,26 +320,28 @@ class MessageBubble(QFrame):
                 layout.setAlignment(Qt.AlignCenter)
         elif self._is_user:
             self.setStyleSheet(f"""
-                background-color: {'#2d5a27' if dark else '#DCF8C6'};
-                border-radius: 12px 12px 4px 12px;
+                background-color: {'#2d5a27' if dark else '#2F6B4F'};
+                border-radius: 16px 16px 5px 16px;
             """)
             self.text_label.setAlignment(Qt.AlignRight)
             self.text_label.setStyleSheet(f"""
-                color: {'#e0e0e0' if dark else '#2c3e50'};
-                padding: 10px 14px;
+                color: {'#e0e0e0' if dark else '#F7FBF8'};
+                padding: 11px 15px;
                 background: transparent;
+                font-size: 13px;
             """)
         else:
             self.setStyleSheet(f"""
-                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.95)'};
-                border: 1px solid {'#3a3a5c' if dark else '#e0e0e0'};
-                border-radius: 12px 12px 12px 4px;
+                background-color: {'rgba(40, 40, 70, 0.95)' if dark else 'rgba(255, 255, 255, 0.97)'};
+                border: 1px solid {'#3a3a5c' if dark else 'rgba(47, 107, 79, 0.16)'};
+                border-radius: 16px 16px 16px 5px;
             """)
             self.text_label.setAlignment(Qt.AlignLeft)
             self.text_label.setStyleSheet(f"""
-                color: {'#e0e0e0' if dark else '#2c3e50'};
-                padding: 10px 14px;
+                color: {'#e0e0e0' if dark else '#1E2A32'};
+                padding: 11px 15px;
                 background: transparent;
+                font-size: 13px;
             """)
 
     def refresh_style(self):

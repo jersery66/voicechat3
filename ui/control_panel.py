@@ -27,9 +27,9 @@ class ControlPanel(FrostedPanel):
     open_relaxation_center = Signal()
 
     def __init__(self, parent=None):
-        super().__init__(alpha=0.65, radius=16, parent=None)
+        super().__init__(alpha=0.90, radius=20, parent=None)
         self.setObjectName("controlPanel")
-        self.setFixedWidth(280)
+        self.setFixedWidth(348)
         self._info_confirmed = False
         self._setup_ui()
 
@@ -50,13 +50,13 @@ class ControlPanel(FrostedPanel):
         logo_org = QLabel("南昌市强制隔离戒毒所\n心理矫治中心")
         logo_org.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
         logo_org.setAlignment(Qt.AlignCenter)
-        logo_org.setStyleSheet("color: #6d5a3a; padding: 6px 2px 2px 2px;")
+        logo_org.setStyleSheet("color: #2F6B4F; padding: 4px 2px 0 2px; font-size: 13px; font-weight: 700;")
         layout.addWidget(logo_org)
 
         subtitle = QLabel("AI 心理咨询语音系统")
         subtitle.setFont(QFont("Microsoft YaHei", 9))
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("color: #9a8a6a; padding-bottom: 6px;")
+        subtitle.setStyleSheet("color: #7C8A82; padding-bottom: 8px; font-size: 11px;")
         layout.addWidget(subtitle)
 
         # Separator
@@ -69,7 +69,7 @@ class ControlPanel(FrostedPanel):
         info_title = QLabel("基本信息（必填）")
         info_title.setObjectName("sectionTitle")
         info_title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
-        info_title.setStyleSheet("color: #2d5a27; padding: 4px 0;")
+        info_title.setStyleSheet("color: #2F6B4F; padding: 6px 0 2px 0;")
         layout.addWidget(info_title)
 
         # Form
@@ -83,14 +83,14 @@ class ControlPanel(FrostedPanel):
 
         combo_style = """
             QComboBox {
-                background-color: rgba(255, 248, 235, 0.9);
-                border: 1px solid #c4a96a;
-                border-radius: 6px;
-                padding: 4px 8px;
+                background-color: rgba(255, 255, 255, 0.96);
+                border: 1px solid rgba(30, 42, 50, 0.14);
+                border-radius: 8px;
+                padding: 6px 9px;
                 font-size: 12px;
-                color: #4a3c1e;
+                color: #1E2A32;
             }
-            QComboBox:focus { border: 1px solid #8b7355; }
+            QComboBox:focus { border: 1px solid #2F6B4F; background-color: #FFFFFF; }
             QComboBox::drop-down {
                 border: none;
                 width: 22px;
@@ -99,20 +99,20 @@ class ControlPanel(FrostedPanel):
                 image: none;
                 border-left: 5px solid transparent;
                 border-right: 5px solid transparent;
-                border-top: 6px solid #8b7355;
+                border-top: 6px solid #2F6B4F;
                 margin-right: 6px;
             }
             QComboBox QAbstractItemView {
-                background-color: #fdf6e3;
-                border: 1px solid #c4a96a;
-                selection-background-color: #d4b87a;
-                selection-color: #3a2e14;
-                color: #4a3c1e;
+                background-color: #FFFFFF;
+                border: 1px solid rgba(30, 42, 50, 0.14);
+                selection-background-color: rgba(47, 107, 79, 0.16);
+                selection-color: #1E2A32;
+                color: #1E2A32;
                 outline: none;
                 padding: 2px;
             }
             QComboBox QAbstractItemView::item {
-                padding: 4px 8px;
+                padding: 5px 8px;
                 min-height: 22px;
             }
         """
@@ -148,8 +148,8 @@ class ControlPanel(FrostedPanel):
         self.btn_confirm.setObjectName("primaryButton")
         self.btn_confirm.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50; color: white;
-                border: 1px solid #388E3C; border-radius: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2F6B4F, stop:1 #3C8163);
+                color: #FFFFFF; border: none; border-radius: 10px;
                 padding: 6px; font-weight: bold; font-size: 12px;
             }
             QPushButton:hover { background-color: #388E3C; }
@@ -161,8 +161,8 @@ class ControlPanel(FrostedPanel):
         self.btn_modify.setEnabled(False)
         self.btn_modify.setStyleSheet("""
             QPushButton {
-                background-color: #ddd; color: #999;
-                border: 1px solid #ccc; border-radius: 8px;
+                background-color: rgba(255, 255, 255, 0.55); color: #8C979D;
+                border: 1px solid rgba(30, 42, 50, 0.10); border-radius: 10px;
                 padding: 5px; font-size: 11px;
             }
         """)
@@ -211,76 +211,76 @@ class ControlPanel(FrostedPanel):
 
         self.btn_breathing = BlinkButton("🌬 呼吸放松训练")
         self.btn_breathing.setObjectName("relaxButton")
-        self.btn_breathing._base_color = "#64B5F6"
+        self.btn_breathing._base_color = "#2F6B4F"
         self.btn_breathing.setStyleSheet("""
             QPushButton {
-                background-color: #64B5F6; color: white;
-                border: none; border-radius: 8px;
-                padding: 7px; font-size: 12px; font-weight: bold;
+                background-color: rgba(47, 107, 79, 0.10); color: #2F6B4F;
+                border: 1px solid rgba(47, 107, 79, 0.18); border-radius: 10px;
+                padding: 9px; font-size: 12px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #42A5F5; }
-            QPushButton:disabled { background-color: #64B5F6; color: rgba(255,255,255,0.7); }
+            QPushButton:hover { background-color: rgba(47, 107, 79, 0.18); }
+            QPushButton:disabled { background-color: rgba(47, 107, 79, 0.06); color: rgba(47, 107, 79, 0.45); }
         """)
         self.btn_breathing.clicked.connect(self.play_breathing.emit)
         layout.addWidget(self.btn_breathing)
 
         self.btn_muscle = BlinkButton("💪 肌肉放松训练")
         self.btn_muscle.setObjectName("relaxButton")
-        self.btn_muscle._base_color = "#4DD0E1"
+        self.btn_muscle._base_color = "#2F6B4F"
         self.btn_muscle.setStyleSheet("""
             QPushButton {
-                background-color: #4DD0E1; color: white;
-                border: none; border-radius: 8px;
-                padding: 7px; font-size: 12px; font-weight: bold;
+                background-color: rgba(47, 107, 79, 0.10); color: #2F6B4F;
+                border: 1px solid rgba(47, 107, 79, 0.18); border-radius: 10px;
+                padding: 9px; font-size: 12px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #26C6DA; }
-            QPushButton:disabled { background-color: #4DD0E1; color: rgba(255,255,255,0.7); }
+            QPushButton:hover { background-color: rgba(47, 107, 79, 0.18); }
+            QPushButton:disabled { background-color: rgba(47, 107, 79, 0.06); color: rgba(47, 107, 79, 0.45); }
         """)
         self.btn_muscle.clicked.connect(self.play_muscle.emit)
         layout.addWidget(self.btn_muscle)
 
         self.btn_meditation = BlinkButton("🧘 冥想放松训练")
         self.btn_meditation.setObjectName("relaxButton")
-        self.btn_meditation._base_color = "#9575CD"
+        self.btn_meditation._base_color = "#2F6B4F"
         self.btn_meditation.setStyleSheet("""
             QPushButton {
-                background-color: #9575CD; color: white;
-                border: none; border-radius: 8px;
-                padding: 7px; font-size: 12px; font-weight: bold;
+                background-color: rgba(47, 107, 79, 0.10); color: #2F6B4F;
+                border: 1px solid rgba(47, 107, 79, 0.18); border-radius: 10px;
+                padding: 9px; font-size: 12px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #7E57C2; }
-            QPushButton:disabled { background-color: #9575CD; color: rgba(255,255,255,0.7); }
+            QPushButton:hover { background-color: rgba(47, 107, 79, 0.18); }
+            QPushButton:disabled { background-color: rgba(47, 107, 79, 0.06); color: rgba(47, 107, 79, 0.45); }
         """)
         self.btn_meditation.clicked.connect(self.play_meditation.emit)
         layout.addWidget(self.btn_meditation)
 
         leisure_title = QLabel("轻松一下")
         leisure_title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
-        leisure_title.setStyleSheet("color: #6d5a3a; padding: 8px 4px 0;")
+        leisure_title.setStyleSheet("color: #4A5A52; padding: 10px 2px 0;")
         layout.addWidget(leisure_title)
 
         leisure_hint = QLabel("如果只是想休息一会儿，也可以看看内容或玩点简单的。")
         leisure_hint.setWordWrap(True)
-        leisure_hint.setStyleSheet("color: #8b8175; font-size: 10px; padding: 0 4px 2px;")
+        leisure_hint.setStyleSheet("color: #7C8A82; font-size: 10px; padding: 0 2px 2px;")
         layout.addWidget(leisure_hint)
 
         self.btn_relaxation_center = QPushButton("轻松一下")
         self.btn_relaxation_center.setObjectName("relaxationCenterButton")
         self.btn_relaxation_center.setStyleSheet("""
             QPushButton {
-                background-color: #e0c58f; color: #4a3c2a;
-                border: 1px solid #c4a96a; border-radius: 8px;
-                padding: 7px; font-size: 12px; font-weight: bold;
+                background-color: rgba(196, 169, 106, 0.16); color: #6B5230;
+                border: 1px solid rgba(196, 169, 106, 0.32); border-radius: 10px;
+                padding: 9px; font-size: 12px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #d4b477; }
-            QPushButton:disabled { background-color: #d8d0c2; color: #9a9287; }
+            QPushButton:hover { background-color: rgba(196, 169, 106, 0.26); }
+            QPushButton:disabled { background-color: rgba(196, 169, 106, 0.08); color: rgba(107, 82, 48, 0.45); }
         """)
         self.btn_relaxation_center.clicked.connect(self.open_relaxation_center.emit)
         layout.addWidget(self.btn_relaxation_center)
 
         self.btn_game = BlinkButton("🎮 心理互动游戏")
         self.btn_game.setObjectName("relaxButton")
-        self.btn_game._base_color = "#FF8A65"
+        self.btn_game._base_color = "#2F6B4F"
         self.btn_game.setStyleSheet("""
             QPushButton {
                 background-color: #FF8A65; color: white;
@@ -295,7 +295,7 @@ class ControlPanel(FrostedPanel):
 
         self.btn_media = BlinkButton("🎵 影视音乐")
         self.btn_media.setObjectName("relaxButton")
-        self.btn_media._base_color = "#26A69A"
+        self.btn_media._base_color = "#2F6B4F"
         self.btn_media.setStyleSheet("""
             QPushButton {
                 background-color: #26A69A; color: white;

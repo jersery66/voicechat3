@@ -46,10 +46,9 @@ class ChatPanel(FrostedPanel):
     text_submitted = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__(alpha=0.60, radius=16, parent=None)
+        super().__init__(alpha=0.86, radius=20, parent=None)
         self.setObjectName("chatPanel")
-        self.setFixedWidth(380)
-        self.setMaximumHeight(600)
+        self.setMinimumWidth(560)
         self._messages = []
         self._current_streaming_bubble = None
         self._active_generation_id = None
@@ -61,13 +60,22 @@ class ChatPanel(FrostedPanel):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(0)
 
-        # Header
+        # Header: title block (name + role) on the left, quiet action on the right
         header = QHBoxLayout()
+        title_block = QVBoxLayout()
+        title_block.setContentsMargins(2, 0, 0, 0)
+        title_block.setSpacing(0)
+
         title = QLabel("对话记录")
         title.setObjectName("chatTitle")
         title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
-        title.setStyleSheet("color: #2d5a27;")
-        header.addWidget(title)
+        title.setStyleSheet("color: #1E2A32;")
+        title_block.addWidget(title)
+
+        subtitle = QLabel("小薇 · 心理支持访谈")
+        subtitle.setStyleSheet("color: #7C8A82; font-size: 11px; padding: 0 0 4px 9px;")
+        title_block.addWidget(subtitle)
+        header.addLayout(title_block)
 
         header.addStretch()
 
@@ -75,15 +83,16 @@ class ChatPanel(FrostedPanel):
         self.btn_clear_header.setStyleSheet("""
             QPushButton {
                 background: transparent;
-                border: 1px solid #d0d0d0;
-                border-radius: 6px;
-                padding: 4px 10px;
+                border: 1px solid rgba(30, 42, 50, 0.14);
+                border-radius: 8px;
+                padding: 5px 12px;
                 font-size: 11px;
-                color: #7f8c8d;
+                color: #5C6B73;
             }
             QPushButton:hover {
-                background-color: #f0f0f0;
-                border: 1px solid #b0b0b0;
+                background-color: rgba(255, 255, 255, 0.9);
+                border: 1px solid rgba(47, 107, 79, 0.30);
+                color: #2F6B4F;
             }
         """)
         self.btn_clear_header.setCursor(Qt.PointingHandCursor)
@@ -161,11 +170,14 @@ class ChatPanel(FrostedPanel):
         self.btn_send.setFixedSize(50, 60)
         self.btn_send.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50; color: white;
-                border: 1px solid #388E3C; border-radius: 8px;
-                font-size: 12px; font-weight: bold;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2F6B4F, stop:1 #3C8163);
+                color: #FFFFFF; border: none; border-radius: 12px;
+                font-size: 12px; font-weight: 700;
             }
-            QPushButton:hover { background-color: #388E3C; }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #275C43, stop:1 #337257);
+            }
+            QPushButton:disabled { background: rgba(47, 107, 79, 0.35); }
         """)
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self._on_send)
@@ -181,13 +193,13 @@ class ChatPanel(FrostedPanel):
         self.btn_clear.setStyleSheet("""
             QPushButton {
                 background: transparent;
-                border: 1px solid #d0d0d0;
-                border-radius: 6px;
-                padding: 5px 10px;
+                border: 1px solid rgba(30, 42, 50, 0.14);
+                border-radius: 8px;
+                padding: 6px 12px;
                 font-size: 11px;
-                color: #7f8c8d;
+                color: #5C6B73;
             }
-            QPushButton:hover { background-color: #f0f0f0; border: 1px solid #b0b0b0; }
+            QPushButton:hover { background-color: rgba(255, 255, 255, 0.9); border: 1px solid rgba(47, 107, 79, 0.30); }
         """)
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         self.btn_clear.clicked.connect(self.clear_clicked.emit)
@@ -196,11 +208,11 @@ class ChatPanel(FrostedPanel):
         self.btn_end_session = QPushButton("结束会话")
         self.btn_end_session.setStyleSheet("""
             QPushButton {
-                background-color: #FF9800; color: white;
-                border: 1px solid #F57C00; border-radius: 6px;
-                padding: 5px 10px; font-size: 11px; font-weight: bold;
+                background-color: rgba(196, 169, 106, 0.18); color: #6B5230;
+                border: 1px solid rgba(196, 169, 106, 0.35); border-radius: 8px;
+                padding: 6px 12px; font-size: 11px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #F57C00; }
+            QPushButton:hover { background-color: rgba(196, 169, 106, 0.30); }
         """)
         self.btn_end_session.setCursor(Qt.PointingHandCursor)
         self.btn_end_session.clicked.connect(self.end_session_clicked.emit)
@@ -209,11 +221,11 @@ class ChatPanel(FrostedPanel):
         self.btn_exit = QPushButton("退出")
         self.btn_exit.setStyleSheet("""
             QPushButton {
-                background-color: #EF5350; color: white;
-                border: 1px solid #C62828; border-radius: 6px;
-                padding: 5px 10px; font-size: 11px; font-weight: bold;
+                background-color: rgba(192, 80, 60, 0.10); color: #A94432;
+                border: 1px solid rgba(192, 80, 60, 0.28); border-radius: 8px;
+                padding: 6px 12px; font-size: 11px; font-weight: 600;
             }
-            QPushButton:hover { background-color: #C62828; }
+            QPushButton:hover { background-color: rgba(192, 80, 60, 0.20); }
         """)
         self.btn_exit.setCursor(Qt.PointingHandCursor)
         self.btn_exit.clicked.connect(self.exit_clicked.emit)
@@ -286,9 +298,56 @@ class ChatPanel(FrostedPanel):
         self.status_indicator.set_state(status)
 
     def _add_bubble(self, bubble):
-        """Append bubble after the top spacer, so messages stay at the bottom."""
-        self._msg_layout.addWidget(bubble)
+        """Append one message row (bubble + stretch) after the top spacer.
+
+        Bubbles used to be added straight into the vertical layout, so they
+        stretched to the full panel width and long replies looked like bars.
+        Each bubble now sits in its own row, capped at 72% of the viewport.
+        """
+        if getattr(bubble, "_is_system", False):
+            self._msg_layout.addWidget(bubble)
+        else:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(0)
+            text = getattr(bubble, "_full_text", "") or ""
+            bubble.setMinimumWidth(self._bubble_width_for(text))
+            bubble.setMaximumWidth(self._bubble_max_width())
+            if getattr(bubble, "_is_user", False):
+                row_layout.addStretch(1)
+                row_layout.addWidget(bubble)
+            else:
+                row_layout.addWidget(bubble)
+                row_layout.addStretch(1)
+            self._msg_layout.addWidget(row)
         self._scroll_to_bottom()
+
+    def _bubble_max_width(self) -> int:
+        """Widest a single message may grow, relative to the viewport."""
+        width = self.scroll_area.viewport().width() if getattr(self, "scroll_area", None) else 600
+        return max(320, int(width * 0.68))
+
+    def _bubble_width_for(self, text: str) -> int:
+        """Comfortable width for one message: long text gets room, short stays tight.
+
+        A word-wrapped label reports a narrow size hint, so without a floor a
+        two-line reply collapsed into a thin column; without the ceiling a long
+        paragraph spanned the whole panel.
+        """
+        limit = self._bubble_max_width()
+        preferred = int(len(text) * 14) + 36
+        return max(240, min(limit, preferred))
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        limit = self._bubble_max_width()
+        for msg in getattr(self, "_messages", []):
+            bubble = msg.get("bubble")
+            if bubble is not None:
+                bubble.setMinimumWidth(self._bubble_width_for(getattr(bubble, "_full_text", "") or ""))
+                bubble.setMaximumWidth(limit)
 
     def _scroll_to_bottom(self):
         """Keep newest message visible at the bottom.
