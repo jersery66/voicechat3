@@ -22,6 +22,12 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $root
 
+# Local endpoints must bypass any system HTTP proxy (Clash/v2ray on :7890 etc.).
+# Without this, openai-client requests to 127.0.0.1 are routed through the proxy,
+# which returned 502 for the unused agent port and adds avoidable fragility.
+$env:NO_PROXY = "127.0.0.1,localhost"
+$env:no_proxy = $env:NO_PROXY
+
 $env:VOICECHAT_RUNTIME_CONFIG = Join-Path $root "config\runtime_offline_5090.yaml"
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) { $python = "python" }
@@ -137,6 +143,20 @@ else:
         print("    - 麦克风硬件开关/是否静音")
         print("  （不阻止启动，但语音输入将收不到声音。）")
 print("  audio OK")
+
+# Output side: a virtual-audio-cable default output silently swallows all TTS
+# playback (stream plays fine, no sound from speakers).
+try:
+    out_idx = sd.default.device[1]
+    out_name = str(sd.query_devices(out_idx).get("name", "")) if out_idx >= 0 else ""
+    print(f"  output: {out_name} (default)")
+    lowered = out_name.lower()
+    if any(m in lowered for m in ("cable", "vb-audio", "virtual")):
+        print("  WARN: 默认播放设备是虚拟声卡（VB-Cable 等）——TTS 声音会播进虚拟线缆，")
+        print("  音箱/耳机听不到。请到 mmsys.cpl -> 播放，把真实扬声器设为默认设备。")
+        print("  （不阻止启动，但语音回复将没有可听见的声音。）")
+except Exception as exc:
+    print(f"  WARN: cannot inspect default output device: {exc}")
 '@
 $tmpAudio = Join-Path $env:TEMP "voicechat_audio_check.py"
 [System.IO.File]::WriteAllText($tmpAudio, $audioCheck, [System.Text.UTF8Encoding]::new($false))
