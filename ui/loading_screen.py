@@ -22,7 +22,7 @@ class LoadingScreen(QWidget):
         # Full overlay - semi-transparent background
         self.setStyleSheet("""
             #loadingOverlay {
-                background-color: rgba(0, 0, 0, 0.15);
+                background-color: rgba(8, 16, 26, 0.55);
             }
         """)
 
@@ -33,12 +33,12 @@ class LoadingScreen(QWidget):
         # Frosted card
         self.card = QFrame()
         self.card.setObjectName("loadingCard")
-        self.card.setFixedSize(420, 300)
+        self.card.setFixedSize(400, 268)
         self.card.setStyleSheet("""
             #loadingCard {
-                background-color: rgba(245, 245, 247, 0.95);
-                border-radius: 20px;
-                border: 1px solid rgba(208, 208, 213, 0.5);
+                background-color: rgba(252, 252, 250, 0.97);
+                border-radius: 22px;
+                border: 1px solid rgba(47, 107, 79, 0.12);
             }
         """)
 
@@ -67,7 +67,7 @@ class LoadingScreen(QWidget):
         layout.addWidget(self.title_label)
 
         # Subtitle
-        self.subtitle_label = QLabel("AI 语音对话助手")
+        self.subtitle_label = QLabel("心医生 · 心理支持访谈")
         self.subtitle_label.setObjectName("loadingSubtitle")
         self.subtitle_label.setFont(QFont("Microsoft YaHei", 10))
         self.subtitle_label.setStyleSheet("color: #7f8c8d;")

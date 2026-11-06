@@ -46,9 +46,9 @@ class ChatPanel(FrostedPanel):
     text_submitted = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__(alpha=0.86, radius=20, parent=None)
+        super().__init__(alpha=0.82, radius=20, parent=None)
         self.setObjectName("chatPanel")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(440)
         self._messages = []
         self._current_streaming_bubble = None
         self._active_generation_id = None
@@ -117,13 +117,16 @@ class ChatPanel(FrostedPanel):
             QScrollArea { background: transparent; border: none; }
             QScrollBar:vertical {
                 background: transparent;
-                width: 6px;
-                margin: 0;
+                width: 8px;
+                margin: 4px 2px 4px 0;
             }
             QScrollBar::handle:vertical {
-                background: rgba(0, 0, 0, 0.12);
+                background: rgba(30, 42, 50, 0.16);
                 border-radius: 3px;
-                min-height: 30px;
+                min-height: 32px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(30, 42, 50, 0.28);
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0;
@@ -203,7 +206,9 @@ class ChatPanel(FrostedPanel):
         """)
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         self.btn_clear.clicked.connect(self.clear_clicked.emit)
+        self.btn_clear.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         btn_layout.addWidget(self.btn_clear)
+        btn_layout.addStretch(1)
 
         self.btn_end_session = QPushButton("结束会话")
         self.btn_end_session.setStyleSheet("""
@@ -216,6 +221,7 @@ class ChatPanel(FrostedPanel):
         """)
         self.btn_end_session.setCursor(Qt.PointingHandCursor)
         self.btn_end_session.clicked.connect(self.end_session_clicked.emit)
+        self.btn_end_session.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         btn_layout.addWidget(self.btn_end_session)
 
         self.btn_exit = QPushButton("退出")
@@ -229,6 +235,7 @@ class ChatPanel(FrostedPanel):
         """)
         self.btn_exit.setCursor(Qt.PointingHandCursor)
         self.btn_exit.clicked.connect(self.exit_clicked.emit)
+        self.btn_exit.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         btn_layout.addWidget(self.btn_exit)
 
         layout.addLayout(btn_layout)

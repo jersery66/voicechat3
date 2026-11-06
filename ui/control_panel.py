@@ -43,7 +43,7 @@ class ControlPanel(FrostedPanel):
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(14, 10, 14, 22)
         layout.setSpacing(6)
 
         # Logo
@@ -161,8 +161,8 @@ class ControlPanel(FrostedPanel):
         self.btn_modify.setEnabled(False)
         self.btn_modify.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.55); color: #8C979D;
-                border: 1px solid rgba(30, 42, 50, 0.10); border-radius: 10px;
+                background-color: rgba(255, 255, 255, 0.78); color: #4A5A52;
+                border: 1px solid rgba(30, 42, 50, 0.12); border-radius: 10px;
                 padding: 5px; font-size: 11px;
             }
         """)
@@ -171,7 +171,10 @@ class ControlPanel(FrostedPanel):
 
         # Status label for user info
         self.user_status_label = QLabel("请填写基本信息后开始对话")
-        self.user_status_label.setStyleSheet("color: #E53935; font-size: 11px; padding: 2px;")
+        self.user_status_label.setStyleSheet(
+            "color: #A94432; font-size: 11px; padding: 5px 8px;"
+            "background-color: rgba(192, 80, 60, 0.08); border-radius: 6px;"
+        )
         layout.addWidget(self.user_status_label)
 
         # Separator
@@ -393,7 +396,7 @@ class ControlPanel(FrostedPanel):
         """)
         self.record_button.setEnabled(False)
         self.user_status_label.setText("请填写基本信息后开始对话")
-        self.user_status_label.setStyleSheet("color: #E53935; font-size: 11px; padding: 2px;")
+        self.user_status_label.setStyleSheet("color: #A94432; font-size: 11px; padding: 2px 0;")
         self.modify_user.emit()
 
     def get_user_info(self):
@@ -445,7 +448,7 @@ class ControlPanel(FrostedPanel):
         self.btn_confirm.setEnabled(True)
         self.btn_modify.setEnabled(False)
         self.user_status_label.setText("请填写基本信息后开始对话")
-        self.user_status_label.setStyleSheet("color: #E53935; font-size: 11px; padding: 2px;")
+        self.user_status_label.setStyleSheet("color: #A94432; font-size: 11px; padding: 2px 0;")
         # Stop any active blink highlights and recording
         self.stop_all_blinks()
         self.reset_recording()
