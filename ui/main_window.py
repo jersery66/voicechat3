@@ -882,6 +882,15 @@ class MainWindow(QMainWindow):
                         if not self.delivery_controller.is_current(generation_id):
                             continue
                         self._replace_last_system(replacement, generation_id)
+
+                elif msg_type == "speak_greeting_fallback":
+                    # Greeting generation failed/timed out: speak the
+                    # already-displayed fallback text once, still stale-gated.
+                    if isinstance(content, tuple) and len(content) == 2:
+                        generation_id, fallback_text = content
+                        if not self.delivery_controller.is_current(generation_id):
+                            continue
+                        self._play_tts_async(fallback_text)
                     else:
                         self._replace_last_system(content)
 
@@ -1983,10 +1992,20 @@ class MainWindow(QMainWindow):
         return record.generation_id
 
     def _play_opening_greeting(self):
-        """Play the opening greeting - dynamically generated or fallback."""
+        """Play the opening greeting - dynamically generated or fallback.
+
+        Single-speech contract: the fallback text is shown in the bubble
+        immediately but only the FINAL greeting is spoken.  Speaking the
+        fallback first and re-speaking the generated text made every session
+        start trigger two TTS calls -- the second call's stop_playing()
+        cancelled the first synthesis mid-flight ("generator already
+        executing"), wasting GPU time and cutting the audio off.
+        """
         fallback = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
         self.chat_panel.add_system_message(fallback, as_ai=True)
-        greeting_generation = self._play_tts_async(fallback)
+        # Staleness token only (no audio enqueued): a newer generation from
+        # the real dialogue pipeline supersedes this greeting automatically.
+        token = self.delivery_controller.start_generation().generation_id
 
         def _try_generate():
             generated = ""
@@ -2004,8 +2023,9 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 60:
                     generated = generated[:60]
-                if greeting_generation is not None:
-                    self.processing_queue.put(("replace_greeting", (greeting_generation, generated)))
+                self.processing_queue.put(("replace_greeting", (token, generated)))
+            else:
+                self.processing_queue.put(("speak_greeting_fallback", (token, fallback)))
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _replace_greeting(self, new_greeting, generation_id=None):
@@ -2020,10 +2040,14 @@ class MainWindow(QMainWindow):
             self._play_tts_async(new_greeting)
 
     def _play_post_relaxation_greeting(self):
-        """Play post-relaxation greeting - dynamically generated or fallback."""
+        """Play post-relaxation greeting - dynamically generated or fallback.
+
+        Same single-speech contract as _play_opening_greeting: show the
+        fallback instantly, speak only the final text.
+        """
         fallback = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "做完啦，身上有没有舒服点呀？"
         self.chat_panel.add_system_message(fallback)
-        greeting_generation = self._play_tts_async(fallback)
+        token = self.delivery_controller.start_generation().generation_id
 
         relax_type = self._engine_relaxation_type() or ""
         relax_name = {"breathing": "呼吸放松", "muscle": "肌肉放松", "meditation": "冥想"}.get(relax_type, "放松训练")
@@ -2044,8 +2068,9 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 50:
                     generated = generated[:50]
-                if greeting_generation is not None:
-                    self.processing_queue.put(("replace_last_system", (greeting_generation, generated)))
+                self.processing_queue.put(("replace_last_system", (token, generated)))
+            else:
+                self.processing_queue.put(("speak_greeting_fallback", (token, fallback)))
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _replace_last_system(self, new_text, generation_id=None):
