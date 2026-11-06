@@ -347,6 +347,11 @@ class TacitDecisionProvider:
                 self._timeout = float(timeout)
                 self._lock = threading.Lock()
                 self._proc = None
+                # Consecutive double-failures (after the retry) trip a short
+                # cooldown: restarting a 1.7B worker every turn would cost
+                # more than running without the decision layer.
+                self._consecutive_failures = 0
+                self._blocked_until = 0.0
 
             def _start(self):
                 self._proc = subprocess.Popen(
@@ -399,28 +404,55 @@ class TacitDecisionProvider:
 
             def decide_batch(self, batch):
                 with self._lock:
-                    if self._proc is None:
-                        self._start()
-                    payload = json.dumps({"batch": batch}, ensure_ascii=False)
-                    try:
-                        self._proc.stdin.write(payload + "\n")
-                        self._proc.stdin.flush()
-                    except Exception as exc:
-                        self._stop()
+                    # One automatic retry on a fresh worker: a long-lived
+                    # worker occasionally returns an engine-level error, and a
+                    # single lost decision should not silence the layer for
+                    # the rest of the session.
+                    now = time.monotonic()
+                    if now < self._blocked_until:
                         raise DecisionBackendUnavailable(
-                            f"tacit worker stdin failed: {type(exc).__name__}: {exc}"
-                        ) from exc
-                    reply = self._read_line(timeout=self._timeout)
-                    if reply is None:
-                        self._stop()
-                        raise DecisionBackendUnavailable(
-                            "tacit worker did not answer within the decision timeout"
+                            "tacit worker cooling down after repeated failures"
                         )
-                    if not reply.get("ok"):
-                        raise DecisionBackendUnavailable(
-                            f"tacit worker error: {reply.get('error')}"
+                    last_error = None
+                    for attempt in (1, 2):
+                        if self._proc is None:
+                            self._start()
+                        payload = json.dumps({"batch": batch}, ensure_ascii=False)
+                        try:
+                            self._proc.stdin.write(payload + "\n")
+                            self._proc.stdin.flush()
+                        except Exception as exc:
+                            self._stop()
+                            last_error = DecisionBackendUnavailable(
+                                f"tacit worker stdin failed: {type(exc).__name__}: {exc}"
+                            )
+                            continue
+                        reply = self._read_line(timeout=self._timeout)
+                        if reply is None:
+                            self._stop()
+                            last_error = DecisionBackendUnavailable(
+                                "tacit worker did not answer within the decision timeout"
+                            )
+                            continue
+                        if reply.get("ok"):
+                            self._consecutive_failures = 0
+                            return reply.get("results")
+                        # Engine error: discard the process so the retry starts
+                        # from a clean state, and keep the message for the log.
+                        detail = str(reply.get("error") or "")
+                        last_error = DecisionBackendUnavailable(
+                            f"tacit worker error: {detail}"
                         )
-                    return reply.get("results")
+                        self._stop()
+                        # A ValueError means the payload itself is invalid;
+                        # paying another 7s worker start cannot change that.
+                        if detail.startswith("ValueError"):
+                            raise last_error
+                    self._consecutive_failures += 1
+                    if self._consecutive_failures >= 2:
+                        self._blocked_until = time.monotonic() + 180.0
+                        self._consecutive_failures = 0
+                    raise last_error or DecisionBackendUnavailable("tacit worker failed")
 
         self._worker_proc_holder = _SubprocessTacit(cmd, self.timeout)
         return self._worker_proc_holder

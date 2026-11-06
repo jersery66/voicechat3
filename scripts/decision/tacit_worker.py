@@ -91,8 +91,35 @@ def main() -> int:
                 raise ValueError(f"decide_batch returned {type(results).__name__}")
             print(json.dumps({"ok": True, "results": results}), flush=True)
         except Exception as exc:
+            _dump_failure(request, exc)
             print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), flush=True)
     return 0
+
+
+def _dump_failure(request, exc) -> None:
+    """Keep the exact payload that broke a decision, for offline diagnosis."""
+    try:
+        batch = request.get("batch") if isinstance(request, dict) else None
+        summary = []
+        if isinstance(batch, list):
+            for item in batch[:8]:
+                if isinstance(item, dict):
+                    summary.append({
+                        "keys": sorted(item),
+                        "state_type": type(item.get("state")).__name__,
+                        "state_len": len(item.get("state") or ""),
+                        "question": str(item.get("question"))[:80],
+                        "options_type": type(item.get("options")).__name__,
+                        "n_options": len(item.get("options") or []),
+                        "kind": item.get("kind"),
+                    })
+        path = os.environ.get("VOICECHAT_TACIT_FAILURE_DUMP", "logs/tacit_failed_payload.json")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"error": f"{type(exc).__name__}: {exc}",
+                       "summary": summary, "request": request}, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
