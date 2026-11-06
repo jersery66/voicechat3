@@ -46,14 +46,22 @@ class ChatPanel(FrostedPanel):
     text_submitted = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__(alpha=0.82, radius=20, parent=None)
+        super().__init__(alpha=0.76, radius=20, parent=None)
         self.setObjectName("chatPanel")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(400)
+        self.setMaximumWidth(560)
         self._messages = []
         self._current_streaming_bubble = None
         self._active_generation_id = None
         self._next_generation_seq = 0
+        # Typewriter reveal: text appears at roughly speaking pace instead of
+        # as instant token bursts, so the bubble keeps up with the voice.
+        self._type_buffer = ""
+        self._type_bubble = None
+        self._type_finished = False
         self._setup_ui()
+        self._type_ticker = QTimer(self)
+        self._type_ticker.timeout.connect(self._reveal_tick)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -255,6 +263,7 @@ class ChatPanel(FrostedPanel):
 
     def replace_last_ai_message(self, text):
         """Replace the text of the last AI message bubble (for dynamic greeting updates)."""
+        self._flush_typing()
         for msg in reversed(self._messages):
             if msg["type"] == "ai":
                 msg["bubble"].set_text(text)
@@ -264,6 +273,7 @@ class ChatPanel(FrostedPanel):
 
     def start_ai_message(self, generation_id=None):
         """Start a new AI message bubble for streaming."""
+        self._flush_typing()
         self._active_generation_id = generation_id
         self._next_generation_seq = 0
         bubble = MessageBubble("", is_user=False)
@@ -282,22 +292,70 @@ class ChatPanel(FrostedPanel):
                     return False
                 self._next_generation_seq += 1
         if self._current_streaming_bubble:
-            self._current_streaming_bubble.append_text(chunk)
+            bubble = self._current_streaming_bubble
+            self._type_bubble = bubble
+            self._type_buffer += chunk
+            # History keeps the full received text; the bubble reveals it at
+            # speaking pace.
             if self._messages:
-                self._messages[-1]["text"] = self._current_streaming_bubble.full_text
-            self._scroll_to_bottom()
+                self._messages[-1]["text"] = bubble.full_text + self._type_buffer
+            if not self._type_ticker.isActive():
+                self._type_ticker.start(self.TYPE_TICK_MS)
             return True
         return False
 
+    # ~4.5 characters per second matches the TTS pace; a large backlog speeds
+    # up so the text never falls far behind the voice.
+    TYPE_TICK_MS = 220
+
+    def _reveal_tick(self):
+        """Move a few buffered characters into the bubble (typewriter)."""
+        bubble = self._type_bubble
+        if bubble is None:
+            self._type_ticker.stop()
+            return
+        backlog = len(self._type_buffer)
+        if backlog:
+            step = 1
+            if backlog > 160:
+                step = 4
+            elif backlog > 80:
+                step = 2
+            bubble.append_text(self._type_buffer[:step])
+            self._type_buffer = self._type_buffer[step:]
+            self._scroll_to_bottom()
+        if not self._type_buffer and self._type_finished:
+            self._type_finished = False
+            self._type_bubble = None
+            self._type_ticker.stop()
+            self.status_indicator.set_state("idle")
+            self._scroll_to_bottom()
+
+    def _flush_typing(self):
+        """Reveal everything still buffered and stop the ticker."""
+        if self._type_bubble is not None and self._type_buffer:
+            self._type_bubble.append_text(self._type_buffer)
+        self._type_buffer = ""
+        self._type_finished = False
+        self._type_bubble = None
+        if getattr(self, "_type_ticker", None) is not None:
+            self._type_ticker.stop()
+
     def finish_streaming(self, generation_id=None):
-        """Mark streaming as complete."""
+        """Mark streaming as complete; buffered text keeps revealing."""
         if generation_id is not None and generation_id != self._active_generation_id:
             return False
         self._current_streaming_bubble = None
         self._active_generation_id = None
         self._next_generation_seq = 0
-        self.status_indicator.set_state("idle")
-        self._scroll_to_bottom()
+        self._type_finished = True
+        if not self._type_buffer:
+            # Nothing left to type out (e.g. a cancelled or empty reply).
+            self._type_finished = False
+            self._type_bubble = None
+            self._type_ticker.stop()
+            self.status_indicator.set_state("idle")
+            self._scroll_to_bottom()
         return True
 
     def set_ai_status(self, status):
@@ -395,10 +453,17 @@ class ChatPanel(FrostedPanel):
         self.clear_clicked.emit()
 
     def clear_chat(self):
-        """Remove all message bubbles."""
-        for msg in self._messages:
-            bubble = msg.get("bubble")
-            if bubble:
-                bubble.deleteLater()
+        """Remove every message row (bubbles now live inside wrapper rows)."""
+        self._flush_typing()
+        # Deleting only the bubble left its row alive with a stale snapshot,
+        # so clear the layout itself and keep the leading spacer.
+        while self._msg_layout.count() > 1:
+            item = self._msg_layout.takeAt(1)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
         self._messages.clear()
         self._current_streaming_bubble = None
+        self._active_generation_id = None
+        self.status_indicator.set_state("idle")

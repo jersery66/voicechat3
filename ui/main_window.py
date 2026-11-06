@@ -220,9 +220,12 @@ class MainWindow(QMainWindow):
         self.control_panel = ControlPanel()
         main_layout.addWidget(self.control_panel, 0)
 
-        # Right chat panel (fills the rest of the window)
+        # Right chat column: a bounded floating card, right-aligned.  It used
+        # to stretch across the whole window and hid the counsellor portrait
+        # that is the visual anchor of this screen.
+        main_layout.addStretch(1)
         self.chat_panel = ChatPanel()
-        main_layout.addWidget(self.chat_panel, 1)
+        main_layout.addWidget(self.chat_panel, 0)
 
         # Loading screen (overlay on top)
         self.loading_screen = LoadingScreen(central)
@@ -270,8 +273,11 @@ class MainWindow(QMainWindow):
             scaled = self._bg_pixmap.scaled(
                 self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
             )
-            x = (self.width() - scaled.width()) // 2
             y = (self.height() - scaled.height()) // 2
+            # Anchor the portrait (subject at ~50% of the photo) in the band
+            # left visible between the control rail and the chat column, so
+            # resizing widens or narrows the photo band but never hides her.
+            x = self._background_offset_x(scaled.width())
             painter.drawPixmap(x, y, scaled)
 
             # Scrim: darker at the edges, lighter in the middle so the
@@ -287,6 +293,29 @@ class MainWindow(QMainWindow):
             painter.fillRect(self.rect(), QColor(9, 18, 28))
             painter.end()
         super().paintEvent(event)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt naming
+        """Keep the chat column a readable width without swallowing the photo."""
+        super().resizeEvent(event)
+        panel = getattr(self, "chat_panel", None)
+        if panel is None:
+            return
+        target = max(400, min(560, int(self.width() * 0.40)))
+        if panel.width() != target:
+            panel.setFixedWidth(target)
+
+    def _background_offset_x(self, scaled_width: int) -> int:
+        """Horizontal offset that keeps the portrait inside the visible band."""
+        try:
+            left = self.control_panel.geometry().right() + 18
+            right = self.chat_panel.geometry().left()
+        except Exception:
+            left, right = 0, self.width()
+        band_center = (left + right) // 2 if right > left else self.width() // 2
+        offset = band_center - scaled_width // 2
+        # Never show empty space at either edge of the window.
+        min_offset = self.width() - scaled_width
+        return max(min_offset, min(0, offset))
 
     def _connect_signals(self):
         # Control panel signals
