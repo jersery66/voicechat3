@@ -2193,9 +2193,13 @@ class MainWindow(QMainWindow):
             return
 
         self._end_request_in_progress = True
-        self._handle_session_end(
+        # Route the button through the readiness check: an unfinished scale or
+        # a session without relaxation must offer "先做个放松再结束" instead
+        # of jumping straight to the farewell/report (the old direct call
+        # bypassed the whole pre-end flow).
+        self._request_end_with_readiness_check(
             EndType.GOAL_ACHIEVED,
-            allow_force_relaxation=False,
+            allow_force_relaxation=True,
             source="user_button",
         )
 

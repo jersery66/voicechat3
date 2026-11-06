@@ -146,7 +146,7 @@ def clean_for_display(text: str) -> str:
     # Remove internal strategy terms that leaked into spoken output
     for term in _FORBIDDEN_INTERNAL_TERMS:
         text = text.replace(term, "")
-    return text.strip()
+    return _collapse_spoken_breaks(text)
 
 
 def clean_for_tts(text: str) -> str:
@@ -162,4 +162,16 @@ def clean_for_tts(text: str) -> str:
     text = _RE_SCALE_TAG.sub('', text)
     text = _RE_PIPE_TAG.sub('', text)
     text = _RE_BRACKETS_CN.sub('', text)
+    return _collapse_spoken_breaks(text)
+
+
+def _collapse_spoken_breaks(text: str) -> str:
+    """Join model-introduced newlines so one turn is one spoken utterance.
+
+    Chat models habitually answer with paragraph breaks ("……烦躁。\\n\\n最近
+    睡眠怎么样？"); the TTS engine reads the raw string, so the break has to
+    disappear before playback, and the bubble must not show the blank line.
+    """
+    text = re.sub(r"[ \t]*\r?\n+[ \t]*", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
