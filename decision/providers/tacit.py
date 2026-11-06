@@ -19,6 +19,7 @@ checkpoint is installed, and nothing here downloads weights implicitly.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -266,6 +267,20 @@ class TacitDecisionProvider:
 
         try:
             from anyjev import Tacit
+        except ImportError:
+            # The project venv deliberately ships without the decision stack
+            # (its torch build conflicts with the project's).  Fall back to a
+            # persistent worker process in the isolated decision venv.
+            tacit = self._ensure_subprocess_tacit(candidate, is_directory)
+            if tacit is not None:
+                self._tacit = tacit
+                return self._tacit
+            raise DecisionBackendUnavailable(
+                "anyjev is not installed in this environment and no isolated "
+                "decision python was found; set VOICECHAT_TACIT_PYTHON to the "
+                "python inside the decision bundle venv (e.g. "
+                "D:/offline/tacit-bundle/venv-decision/Scripts/python.exe)"
+            )
         except Exception as exc:  # pragma: no cover - optional dependency
             raise DecisionBackendUnavailable(
                 f"anyjev[hf] is not installed: {exc}. Install it in an isolated env; "
@@ -283,4 +298,129 @@ class TacitDecisionProvider:
                 f"tacit checkpoint failed to load: {type(exc).__name__}: {exc}"
             ) from exc
         return self._tacit
+
+    def _isolated_tacit_python(self) -> Optional[str]:
+        """Locate a python that can import anyjev (the decision bundle venv)."""
+        import shutil
+
+        configured = os.environ.get("VOICECHAT_TACIT_PYTHON")
+        if configured and Path(configured).is_file():
+            return configured
+        default = Path(r"D:/offline/tacit-bundle/venv-decision/Scripts/python.exe")
+        if default.is_file():
+            return str(default)
+        found = shutil.which("tacit-decision-python")
+        return found
+
+    def _ensure_subprocess_tacit(self, candidate: Path, is_directory: bool):
+        """Spawn the isolated-env worker once; returns a decide_batch client.
+
+        Returns None when no isolated python can be located (the caller then
+        raises the explanatory DecisionBackendUnavailable).
+        """
+        import subprocess
+        import threading
+
+        python = self._isolated_tacit_python()
+        if not python:
+            return None
+        worker = Path(__file__).resolve().parents[2] / "scripts" / "decision" / "tacit_worker.py"
+        if not worker.is_file():
+            return None
+        if not is_directory and not self.allow_model_download:
+            return None
+
+        cmd = [
+            python, str(worker),
+            "--model", str(candidate) if is_directory else self.model,
+            "--adaptive", "1" if self.adaptive else "0",
+            "--tau", str(self.tau),
+            "--max-cot-share", str(self.max_cot_share),
+        ]
+
+        class _SubprocessTacit:
+            """JSON-line client exposing the same decide_batch interface."""
+
+            def __init__(self, cmd, timeout):
+                self._cmd = cmd
+                self._timeout = float(timeout)
+                self._lock = threading.Lock()
+                self._proc = None
+
+            def _start(self):
+                self._proc = subprocess.Popen(
+                    self._cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    encoding="utf-8",
+                )
+                ready = self._read_line(timeout=max(self._timeout, 180.0))
+                if ready is None or not ready.get("ready"):
+                    reason = (ready or {}).get("error", "worker did not report ready")
+                    self._stop()
+                    raise DecisionBackendUnavailable(f"tacit worker failed to start: {reason}")
+
+            def _read_line(self, timeout):
+                # Windows selectors cannot select() on pipes (sockets only),
+                # so the read runs in a helper thread with a join timeout.
+                import threading
+                import time as _time
+
+                proc = self._proc
+                result: dict = {}
+
+                def _consume():
+                    try:
+                        result["line"] = proc.stdout.readline()
+                    except Exception as exc:  # pragma: no cover - broken pipe
+                        result["error"] = exc
+
+                reader = threading.Thread(target=_consume, daemon=True)
+                reader.start()
+                reader.join(timeout)
+                if reader.is_alive() or "line" not in result:
+                    return None
+                line = result["line"]
+                if not line:
+                    return None
+                return json.loads(line)
+
+            def _stop(self):
+                try:
+                    if self._proc is not None:
+                        self._proc.stdin.close()
+                        self._proc.terminate()
+                except Exception:
+                    pass
+                self._proc = None
+
+            def decide_batch(self, batch):
+                with self._lock:
+                    if self._proc is None:
+                        self._start()
+                    payload = json.dumps({"batch": batch}, ensure_ascii=False)
+                    try:
+                        self._proc.stdin.write(payload + "\n")
+                        self._proc.stdin.flush()
+                    except Exception as exc:
+                        self._stop()
+                        raise DecisionBackendUnavailable(
+                            f"tacit worker stdin failed: {type(exc).__name__}: {exc}"
+                        ) from exc
+                    reply = self._read_line(timeout=self._timeout)
+                    if reply is None:
+                        self._stop()
+                        raise DecisionBackendUnavailable(
+                            "tacit worker did not answer within the decision timeout"
+                        )
+                    if not reply.get("ok"):
+                        raise DecisionBackendUnavailable(
+                            f"tacit worker error: {reply.get('error')}"
+                        )
+                    return reply.get("results")
+
+        self._worker_proc_holder = _SubprocessTacit(cmd, self.timeout)
+        return self._worker_proc_holder
 

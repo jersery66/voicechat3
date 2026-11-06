@@ -66,10 +66,19 @@ def _build_backend(name: str, decision_config: Any) -> Any:
         if kind == DecisionBackend.TACIT.value:
             from decision.providers.tacit import TacitDecisionProvider
 
+            model_ref = getattr(decision_config, "model", None)
+            if not model_ref:
+                # ``model`` names a served model for the server transport;
+                # inprocess inference needs the checkpoint directory from
+                # ``model_path`` instead (offline configs keep model: null
+                # precisely because no server is started).
+                if str(getattr(decision_config, "transport", "") or "") == "inprocess":
+                    model_ref = getattr(decision_config, "model_path", None)
+
             return TacitDecisionProvider(
                 transport=str(getattr(decision_config, "transport", "server") or "server"),
                 endpoint=getattr(decision_config, "endpoint", None),
-                model=getattr(decision_config, "model", None),
+                model=model_ref,
                 timeout=getattr(decision_config, "timeout", 5.0),
                 allow_remote_endpoint=getattr(decision_config, "allow_remote_endpoint", False),
                 allow_model_download=getattr(decision_config, "allow_model_download", False),

@@ -926,9 +926,33 @@ class ConversationPipeline:
             self._agent_route_cooldown -= 1
             logger.warning(f"[AgentRoute] cooldown remaining={self._agent_route_cooldown}")
             return self._agent_deterministic_fallback(user_text)
-        if not self.agent or not self.agent.is_available():
+
+        # The Jev/shadow decision layers own an independent primary backend
+        # (e.g. Tacit-1.7B inprocess) and never consult the legacy agent, so
+        # the agent endpoint being unreachable must not silence the decision
+        # layer: with mode != legacy the coordinator runs without the agent
+        # and its own escalation_mode handles failure.  (Previously this gate
+        # skipped Jev/Tacit on every turn while the runtime contract said the
+        # agent server is intentionally not started.)
+        agent_needed = True
+        try:
+            from decision.contracts import DecisionMode
+
+            agent_needed = (
+                self._decision_coordinator().mode is DecisionMode.LEGACY
+            )
+        except Exception:
+            agent_needed = True
+        if agent_needed and (not self.agent or not self.agent.is_available()):
             return self._agent_deterministic_fallback(user_text)
 
+        observation = self._observe_via_coordinator(user_text, current_rounds)
+        if observation is not None:
+            return observation
+        return self._agent_deterministic_fallback(user_text)
+
+    def _observe_via_coordinator(self, user_text: str, current_rounds: int):
+        """Run one coordinator turn; returns None on failure (caller falls back)."""
         try:
             request = self._build_decision_request(user_text, current_rounds)
             outcome = self._decision_coordinator().observe_turn(request)
@@ -945,7 +969,7 @@ class ConversationPipeline:
         except Exception as exc:
             logger.warning(f"[AgentRoute] failed: {exc}")
             self._agent_route_cooldown = AGENT_ROUTE_COOLDOWN_ROUNDS
-            return self._agent_deterministic_fallback(user_text)
+            return None
 
     def _request_router_proposal(
         self,
