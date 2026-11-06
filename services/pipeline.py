@@ -486,6 +486,10 @@ class ConversationPipeline:
         # the decision model's own read of the turn (intent/emotion/confidence)
         # instead of discarding everything below the action.
         self._last_decision_outcome: Optional[Any] = None
+        # Consecutive ultra-short replies ("哦哦", "好的") mean the participant
+        # has run out of things to say about the current topic; tracked here
+        # so the writer can be told to move on instead of asking again.
+        self._minimal_reply_streak: int = 0
         # Per-session participation counters for the decision layer.
         self._jev_stats: dict[str, int] = {
             "turns": 0, "accepted": 0, "abstained": 0, "fallback": 0,
@@ -533,6 +537,7 @@ class ConversationPipeline:
         self.symptom_turns = 0
         self._agent_route_cooldown = 0
         self._last_decision_outcome = None
+        self._minimal_reply_streak = 0
         self._proactive_relaxation_offered = False
         self._proactive_relaxation_candidate = None
         self._offer_ledger.reset()
@@ -1468,6 +1473,9 @@ class ConversationPipeline:
         raw_text = result.user_text
         semantic_flags = inspect_input_semantics(raw_text)
         result.user_text, _asr_corrections = correct_asr_text(raw_text)
+        # Engagement is judged on the corrected text, once per turn, before
+        # any context is built for this turn's reply.
+        self._update_engagement(result.user_text)
         if _asr_corrections:
             logger.warning(
                 "[ASRCorrect] "
@@ -1732,9 +1740,12 @@ class ConversationPipeline:
         # travels with the task instruction so Jev participates in the wording,
         # not just in the action gate.
         jev_context = self._build_jev_judgement_context()
-        if decision_context or jev_context:
+        engagement_context = self._build_engagement_context()
+        if decision_context or jev_context or engagement_context:
             system_suffix = "\n".join(
-                part for part in (jev_context, decision_context, system_suffix) if part
+                part for part in (
+                    jev_context, engagement_context, decision_context, system_suffix
+                ) if part
             )
 
         if decision.action in (TurnAction.START_SCALE, TurnAction.CONTINUE_SCALE):
@@ -2287,6 +2298,46 @@ class ConversationPipeline:
         if not self.llm or not hasattr(self.llm, 'conversation_history'):
             return ""
         return format_history(self.llm.conversation_history, max_turns=max_turns)
+
+    _MINIMAL_REPLY_WORDS = frozenset({
+        "嗯", "嗯嗯", "嗯呢", "哦", "哦哦", "噢", "好", "好的", "好吧", "好的吧",
+        "行", "行吧", "可以", "还行", "对", "对啊", "是", "是的", "随便", "不知道",
+        "没什么", "没事", "没事儿", "差不多", "就那样", "一般", "还好",
+    })
+
+    @classmethod
+    def _is_minimal_reply(cls, text: str) -> bool:
+        """True when the turn carries no new content (bare acknowledgement)."""
+        cleaned = re.sub(r"[\s，,。.！!？?、；;~～…]+", "", str(text or ""))
+        if not cleaned:
+            return True
+        if len(cleaned) <= 2:
+            return True
+        return cleaned in cls._MINIMAL_REPLY_WORDS
+
+    def _update_engagement(self, user_text: str) -> None:
+        if self._is_minimal_reply(user_text):
+            self._minimal_reply_streak += 1
+        else:
+            self._minimal_reply_streak = 0
+
+    def _build_engagement_context(self) -> str:
+        """Tell the writer the current topic is exhausted."""
+        streak = getattr(self, "_minimal_reply_streak", 0)
+        if streak < 2:
+            return ""
+        if streak >= 4:
+            return (
+                "\n【话题已经聊完】来访者连续几轮只是应声，话题明显说尽了。"
+                "本轮不要再追问原来的事情，也不要重复之前的建议；先简短回应一句，"
+                "然后主动给出两个新方向让来访者挑（例如最近吃饭、身体状态、和同屋相处、"
+                "平时怎么打发时间、家里人的事），或者邀请先做个放松休息一下。\n"
+            )
+        return (
+            "\n【话题已经聊完】来访者连续两轮只是应声（如“哦哦”“好的”），说明刚才的话题说尽了。"
+            "本轮不要再追问同一件事，也不要重复上一轮说过的话；先简短回应，"
+            "然后换一个新方向，给一个来访者容易接话的具体问题。\n"
+        )
 
     def _build_jev_judgement_context(self) -> str:
         """Surface the decision model's own read of the turn to the language model.
