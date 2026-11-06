@@ -82,13 +82,21 @@ class ScaleAnswerInterpreter:
         if score is None and scale_name in ("PHQ-9", "GAD-7"):
             # The current scale question supplies the symptom context, so a
             # standalone clear frequency answer is sufficient here.
-            if answer_text in {"没有", "没", "完全不会", "不会"}:
+            if answer_text in {"没有", "没", "完全不会", "不会"} or any(
+                k in answer_text for k in ("完全没有", "从来没有", "一点没有", "几乎没有", "几乎不")
+            ):
                 score = 0
-            elif "几乎每天" in answer_text or "每天" in answer_text or "天天" in answer_text:
+            elif any(k in answer_text for k in ("几乎每天", "每一天", "每天", "天天")):
                 score = 3
-            elif "一半以上" in answer_text or "大多数" in answer_text or "超过一半" in answer_text:
+            elif any(k in answer_text for k in ("一半以上", "大多数", "超过一半", "多半", "大部分")):
                 score = 2
-            elif "几天" in answer_text or "偶尔" in answer_text:
+            elif any(k in answer_text for k in ("一半", "经常", "时常", "常常")):
+                # "一半吧" is how participants actually answer a frequency
+                # probe; without this the item stayed pending for ten turns.
+                score = 2
+            elif any(k in answer_text for k in ("几天", "偶尔")):
+                score = 1
+            elif any(k in answer_text for k in ("很少", "难得")):
                 score = 1
         if score is not None and self._manager.validate_answer(
             scale_name, item=item, score=score

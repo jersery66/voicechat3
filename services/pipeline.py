@@ -490,6 +490,13 @@ class ConversationPipeline:
         # has run out of things to say about the current topic; tracked here
         # so the writer can be told to move on instead of asking again.
         self._minimal_reply_streak: int = 0
+        # Questions already asked in recent turns.  Injected as an explicit
+        # do-not-repeat list: the model otherwise copies its own previous
+        # question when the scale hint pushes the same interview item again.
+        self._recent_questions: list[str] = []
+        # How many clarification turns an unanswered scale item has consumed.
+        # Without a budget the same item is re-asked indefinitely.
+        self._clarify_attempts: dict[tuple[str, int], int] = {}
         # Per-session participation counters for the decision layer.
         self._jev_stats: dict[str, int] = {
             "turns": 0, "accepted": 0, "abstained": 0, "fallback": 0,
@@ -538,6 +545,8 @@ class ConversationPipeline:
         self._agent_route_cooldown = 0
         self._last_decision_outcome = None
         self._minimal_reply_streak = 0
+        self._recent_questions = []
+        self._clarify_attempts = {}
         self._proactive_relaxation_offered = False
         self._proactive_relaxation_candidate = None
         self._offer_ledger.reset()
@@ -1121,6 +1130,7 @@ class ConversationPipeline:
             )
             if update.accepted:
                 self._clarification_pending = False
+                self._clarify_attempts.pop((scale_name, current_item), None)
                 result.scale_tags = {scale_name: {current_item: interpretation.score}}
                 if update.completed:
                     result.scale_completed = True
@@ -1136,12 +1146,18 @@ class ConversationPipeline:
                     if rec_type:
                         self._proactive_relaxation_candidate = rec_type
                 return
-        if interpretation.status == "ambiguous":
-            self._clarification_pending = True
-            self.scale_runtime.request_clarification()
-        elif interpretation.status in {"pause", "refusal", "unmatched"}:
-            self._clarification_pending = True
-            if not self.scale_runtime.snapshot().paused:
+        if interpretation.status == "ambiguous" or interpretation.status in {
+            "pause", "refusal", "unmatched"
+        }:
+            key = (scale_name, current_item)
+            attempts = self._clarify_attempts.get(key, 0) + 1
+            self._clarify_attempts[key] = attempts
+            # Two failed clarifications are enough: keep asking the same item
+            # and the participant hears one question forever.
+            self._clarification_pending = attempts < 2
+            if interpretation.status == "ambiguous":
+                self.scale_runtime.request_clarification()
+            elif not self.scale_runtime.snapshot().paused:
                 self.scale_runtime.request_clarification()
 
     def _decision_end_type(self, decision: TurnDecision | None) -> Optional[str]:
@@ -1741,10 +1757,12 @@ class ConversationPipeline:
         # not just in the action gate.
         jev_context = self._build_jev_judgement_context()
         engagement_context = self._build_engagement_context()
-        if decision_context or jev_context or engagement_context:
+        no_repeat_context = self._build_no_repeat_context()
+        if decision_context or jev_context or engagement_context or no_repeat_context:
             system_suffix = "\n".join(
                 part for part in (
-                    jev_context, engagement_context, decision_context, system_suffix
+                    jev_context, engagement_context, no_repeat_context,
+                    decision_context, system_suffix,
                 ) if part
             )
 
@@ -1891,6 +1909,7 @@ class ConversationPipeline:
         # --- Prepare TTS text immediately ---
         # Limit to one question per reply to prevent rapid-fire questioning
         result.spoken_text = limit_to_one_question(result.spoken_text)
+        self._record_questions(result.spoken_text)
 
         # Check for internal strategy term leak before display/TTS
         if _contains_internal_leak(result.spoken_text):
@@ -2337,6 +2356,38 @@ class ConversationPipeline:
             "\n【话题已经聊完】来访者连续两轮只是应声（如“哦哦”“好的”），说明刚才的话题说尽了。"
             "本轮不要再追问同一件事，也不要重复上一轮说过的话；先简短回应，"
             "然后换一个新方向，给一个来访者容易接话的具体问题。\n"
+        )
+
+    _QUESTION_RE = re.compile(r"[^。！？!?\n]*[？?]")
+
+    def _record_questions(self, reply_text: str) -> None:
+        """Remember the questions of one reply so they are not asked again."""
+        questions = []
+        for match in self._QUESTION_RE.findall(str(reply_text or "")):
+            cleaned = re.sub(r"^[\s，,、。.!！?？~～…]+", "", match).strip()
+            if len(cleaned) >= 6:  # ignore fragments like "不舒服吗？"
+                questions.append(cleaned)
+        if not questions:
+            return
+        merged = self._recent_questions + questions
+        # keep order, drop duplicates, cap at three
+        seen = []
+        for q in merged:
+            if q not in seen:
+                seen.append(q)
+        self._recent_questions = seen[-3:]
+
+    def _build_no_repeat_context(self) -> str:
+        recent = getattr(self, "_recent_questions", []) or []
+        if not recent:
+            return ""
+        lines = "\n".join(f"- {q}" for q in recent)
+        return (
+            "\n【不要重复提问】下面这些问题最近已经问过，来访者已回应或已表示不想说，"
+            "本轮不要再问同一件事（换个说法再问一遍也算重复）：\n"
+            f"{lines}\n"
+            "要继续时只允许换一个具体角度（问影响、问当时的场景、问别人怎么看），"
+            "否则直接换一个新方向。\n"
         )
 
     def _build_jev_judgement_context(self) -> str:
