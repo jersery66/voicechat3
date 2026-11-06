@@ -25,7 +25,7 @@ class LoadingScreen(QWidget):
         # Full overlay - semi-transparent background
         self.setStyleSheet("""
             #loadingOverlay {
-                background-color: rgba(8, 16, 26, 0.55);
+                background-color: rgba(250, 248, 244, 0.62);
             }
         """)
 

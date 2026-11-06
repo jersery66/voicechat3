@@ -46,7 +46,7 @@ class ChatPanel(FrostedPanel):
     text_submitted = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__(alpha=0.76, radius=20, parent=None)
+        super().__init__(alpha=0.94, radius=20, parent=None)
         self.setObjectName("chatPanel")
         self.setMinimumWidth(400)
         self.setMaximumWidth(760)
@@ -194,7 +194,23 @@ class ChatPanel(FrostedPanel):
         self.btn_send.clicked.connect(self._on_send)
         input_layout.addWidget(self.btn_send)
 
-        layout.addLayout(input_layout)
+        # Opaque composer base: keeps typed text readable and hides the
+        # photo's own bottom-right watermark that bled through the glass card.
+        footer = QFrame()
+        footer.setObjectName("chatFooter")
+        footer.setStyleSheet("""
+            #chatFooter {
+                background-color: rgba(255, 255, 255, 0.97);
+                border-top: 1px solid rgba(30, 42, 50, 0.08);
+                border-bottom-left-radius: 20px;
+                border-bottom-right-radius: 20px;
+            }
+        """)
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(10, 8, 10, 10)
+        footer_layout.setSpacing(6)
+        footer_layout.addLayout(input_layout)
+        layout.addWidget(footer)
 
         # Bottom buttons (clear + exit)
         btn_layout = QHBoxLayout()
@@ -246,7 +262,7 @@ class ChatPanel(FrostedPanel):
         self.btn_exit.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         btn_layout.addWidget(self.btn_exit)
 
-        layout.addLayout(btn_layout)
+        footer_layout.addLayout(btn_layout)
 
     def add_user_message(self, text):
         """Add a user message bubble."""

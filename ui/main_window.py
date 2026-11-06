@@ -14,8 +14,8 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QApplication, QLabel
 )
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QPixmap, QPainter, QColor, QBrush, QLinearGradient
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QRect
+from PySide6.QtGui import QFont, QPixmap, QPainter, QColor, QBrush
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -198,7 +198,15 @@ class MainWindow(QMainWindow):
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         bg_path = os.path.join(app_dir, "ui", "background.jpg")
         if os.path.exists(bg_path):
-            self._bg_pixmap = QPixmap(bg_path)
+            loaded = QPixmap(bg_path)
+            if not loaded.isNull():
+                # The photo carries an institutional watermark along its
+                # bottom edge; cropping that strip (floor/chair base only)
+                # keeps every window shape free of a clipped, half-covered
+                # watermark.  The UI paints the same credit as a clean chip.
+                self._bg_pixmap = loaded.copy(
+                    0, 0, loaded.width(), int(loaded.height() * 0.92)
+                )
 
         # Apply global stylesheet
         self.setStyleSheet(get_style())
@@ -259,40 +267,90 @@ class MainWindow(QMainWindow):
                 panel.set_theme(self._dark_mode)
 
     def paintEvent(self, event):
-        """Paint the background photo full-bleed with a readability scrim.
+        """Paint the photo without any dark veil, adapted to the window aspect.
 
-        The old path letterboxed the photo (KeepAspectRatio) over a light grey
-        fill, which produced pale bars above and below the window and left
-        white cards floating on a bright image.  The photo now covers the
-        window and a vertical gradient keeps text contrast without hiding it.
+        Normal windows cover-fit the photo and anchor the portrait in the band
+        between the panels.  Ultra-wide windows would crop most of the frame
+        (and its institutional watermark), so they show the complete photo over
+        a blurred, self-generated backdrop instead of black bars.
         """
-        if self._bg_pixmap:
+        if not self._bg_pixmap:
             painter = QPainter(self)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            # Cover: fill the window, crop the overflow instead of adding bars.
+            painter.fillRect(self.rect(), QColor(247, 244, 238))
+            painter.end()
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        aspect = self.width() / max(1, self.height())
+        wide = aspect > 2.05
+
+        if wide:
+            # Cheap blur: shrink then stretch the cover copy for the backdrop,
+            # then draw the whole frame on top so nothing is cropped away.
+            cover = self._bg_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            )
+            tiny = cover.scaled(
+                max(1, cover.width() // 60), max(1, cover.height() // 60),
+                Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
+            )
+            painter.drawPixmap(0, 0, tiny.scaled(self.size(), Qt.IgnoreAspectRatio,
+                                                 Qt.SmoothTransformation))
+            # A light wash keeps the backdrop soft and free of text smears.
+            painter.fillRect(self.rect(), QColor(255, 255, 255, 46))
+            frame = self._bg_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            painter.drawPixmap((self.width() - frame.width()) // 2,
+                               (self.height() - frame.height()) // 2, frame)
+        else:
             scaled = self._bg_pixmap.scaled(
                 self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
             )
-            y = (self.height() - scaled.height()) // 2
-            # Anchor the portrait (subject at ~50% of the photo) in the band
-            # left visible between the control rail and the chat column, so
-            # resizing widens or narrows the photo band but never hides her.
             x = self._background_offset_x(scaled.width())
+            y = (self.height() - scaled.height()) // 2
             painter.drawPixmap(x, y, scaled)
 
-            # Scrim: darker at the edges, lighter in the middle so the
-            # participant-facing portrait stays visible.
-            scrim = QLinearGradient(0, 0, 0, self.height())
-            scrim.setColorAt(0.0, QColor(9, 18, 28, 150))
-            scrim.setColorAt(0.45, QColor(9, 18, 28, 55))
-            scrim.setColorAt(1.0, QColor(9, 18, 28, 175))
-            painter.fillRect(self.rect(), QBrush(scrim))
-            painter.end()
-        else:
-            painter = QPainter(self)
-            painter.fillRect(self.rect(), QColor(9, 18, 28))
-            painter.end()
+        self._paint_watermark(painter)
+        painter.end()
         super().paintEvent(event)
+
+    def _paint_watermark(self, painter: QPainter) -> None:
+        """Keep the institution credit visible whatever the crop does.
+
+        The photo's own watermark sits in its bottom-right corner, which the
+        chat column covers; this draws the same credit in the visible band so
+        it survives any window shape.
+        """
+        text = "南昌市强制隔离戒毒所 · 心理矫治中心"
+        try:
+            left = self.control_panel.geometry().right() + 18
+            right = self.chat_panel.geometry().left()
+        except Exception:
+            left, right = 0, self.width()
+        if right - left < 220:
+            left, right = 0, self.width()
+        font = QFont("Microsoft YaHei", 9)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(text)
+        x = left + max(0, (right - left - text_width) // 2)
+        y = self.height() - 22
+        # A quiet chip keeps the credit legible on any photo without a veil.
+        pad_x, pad_y = 10, 4
+        chip = QRect(
+            x - pad_x,
+            y - metrics.ascent() - pad_y,
+            text_width + pad_x * 2,
+            metrics.height() + pad_y * 2,
+        )
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 168))
+        painter.drawRoundedRect(chip, 9, 9)
+        painter.setPen(QColor(44, 58, 66, 200))
+        painter.drawText(x, y, text)
 
     def resizeEvent(self, event):  # noqa: N802 - Qt naming
         """Keep the chat column readable and the overlays window-sized."""
