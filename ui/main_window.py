@@ -1829,8 +1829,28 @@ class MainWindow(QMainWindow):
         self._pre_end_relax_prompted = False
 
         if not completed:
+            # A failed video is not a completed relaxation; keep the session
+            # open rather than ending on a broken intervention.
+            self._auto_ending_after_relaxation = False
             self.chat_panel.add_system_message("放松内容暂时无法打开，可以稍后再试。")
             self.control_panel.set_status("放松内容暂时不可用")
+            return
+
+        # "End session → do relaxation first" flow: the exercise was the last
+        # step the participant chose, so end now instead of resuming chat.
+        if getattr(self, "_auto_ending_after_relaxation", False):
+            self._auto_ending_after_relaxation = False
+            closing = "这节练习做完了，那今天就先到这儿。"
+            self.chat_panel.add_system_message(closing, as_ai=True)
+            self.control_panel.set_status("放松完成，正在结束会话…")
+            QTimer.singleShot(
+                1200,
+                lambda: self._handle_session_end(
+                    EndType.GOAL_ACHIEVED,
+                    allow_force_relaxation=True,
+                    source="auto_end_after_relaxation",
+                ),
+            )
             return
 
         # A paused Runtime scale resumes after the next feedback turn.
@@ -2465,17 +2485,46 @@ class MainWindow(QMainWindow):
         )
 
     def _end_session_with_relaxation(self):
-        """User chose 'do relaxation first' — recommend training, no report yet."""
+        """User chose 'do relaxation first' — start it now, end after it finishes.
+
+        The old path only spoke '点左边的放松训练' and highlighted the button,
+        so the participant had to click twice for something they had already
+        chosen.  The recommended item now starts immediately and the session
+        ends by itself once the video completes.
+        """
         self._cancel_active_pipeline(reason="end with relaxation chosen")
 
         tag = self._get_end_relaxation_tag()
-        tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
-        rec_text = f"行，结束前咱们先做个短放松。[breath]你可以点左边的{tag_cn}放松训练。"
-        self.chat_panel.add_system_message(rec_text, as_ai=True)
-        self._play_tts_async(rec_text)
+        content_id = {
+            "breathing": "breathing",
+            "muscle": "muscle_relaxation",
+            "meditation": "meditation",
+        }.get(tag, "breathing")
+        definition = self.relaxation_catalog.get(content_id)
+        name = definition.display_name if definition is not None else "放松训练"
 
-        QTimer.singleShot(1000, lambda: self.control_panel.highlight_relax_button(tag))
-        self.control_panel.set_status("请先完成放松训练")
+        self._auto_ending_after_relaxation = True
+        self.chat_panel.add_system_message(
+            f"行，那咱们现在开始{name}，做完这一节就结束今天的会话。", as_ai=True
+        )
+        # This slot runs while the decision dialog is still closing; give the
+        # event loop one turn so the video surface owns the screen.
+        QTimer.singleShot(
+            120, lambda cid=content_id, nm=name: self._begin_end_relaxation(cid, nm)
+        )
+
+    def _begin_end_relaxation(self, content_id: str, name: str) -> None:
+        """Start the chosen relaxation; fall back to a manual nudge on failure."""
+        self.control_panel.set_status(f"正在进行{name}…")
+        if self._start_core_relaxation(content_id, entry_source="END_FLOW"):
+            return
+        self._auto_ending_after_relaxation = False
+        self.chat_panel.add_system_message(
+            "这段放松内容没能打开，你可以点左边对应的放松按钮再试一次。", as_ai=True
+        )
+        tag = {"muscle_relaxation": "muscle"}.get(content_id, content_id)
+        QTimer.singleShot(300, lambda: self.control_panel.highlight_relax_button(tag))
+        self.control_panel.set_status("放松内容暂时不可用")
 
     def _on_session_finished(self, report_ok: bool = True, exit_after: bool = False):
         """Session ended — keep chat visible until operator confirms next subject."""
