@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    心医生 Heart Doctor 一键启动：环境自检、自动修复、服务就绪、启动程序。
+    小微老师 一键启动：环境自检、自动修复、服务就绪、启动程序。
 
 .DESCRIPTION
     按顺序完成下列步骤，任一步失败都会给出可读原因而不是直接闪退：
@@ -58,7 +58,7 @@ $script:Started = (Get-Date)
 function Write-Banner {
     Write-Host ''
     Write-Host '==================================================' -ForegroundColor DarkCyan
-    Write-Host '  心医生 Heart Doctor  ·  一键启动' -ForegroundColor Cyan
+    Write-Host '  小微老师  ·  一键启动' -ForegroundColor Cyan
     Write-Host "  项目目录: $script:Root" -ForegroundColor DarkGray
     Write-Host '==================================================' -ForegroundColor DarkCyan
 }
@@ -587,7 +587,7 @@ if (-not $servicesOk) {
 
 Write-Step '6/6 启动图形界面'
 Write-Host ''
-Write-Host '>>> 一切就绪，正在打开心医生...' -ForegroundColor Green
+Write-Host '>>> 一切就绪，正在打开小微老师...' -ForegroundColor Green
 $exitCode = Start-Application $configPath
 Write-Host ''
 Write-Host ("程序已退出，返回码 {0}" -f $exitCode) -ForegroundColor DarkGray

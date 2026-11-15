@@ -666,7 +666,7 @@ cd voicechat3
 #### ⚡ 一键启动（推荐）
 
 不想逐条执行下面 5.3–5.9 的步骤时，直接双击项目根目录的
-`Start-HeartDoctor.bat`，或在桌面创建快捷方式后点「心医生」：
+`Start-HeartDoctor.bat`，或在桌面创建「小微老师」快捷方式后双击它：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\launch\install_shortcut.ps1
@@ -1744,7 +1744,7 @@ cd voicechat3
 
 Instead of walking through steps 5.3–5.9 below, double-click
 `Start-HeartDoctor.bat` in the project root, or create a desktop shortcut first
-and click 「心医生」:
+and click 「小微老师」:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\launch\install_shortcut.ps1

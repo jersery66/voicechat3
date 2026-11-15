@@ -1,14 +1,15 @@
 ﻿<#
 .SYNOPSIS
-    在桌面创建「心医生」一键启动快捷方式。
+    在桌面创建「小微老师」一键启动快捷方式。
 
 .DESCRIPTION
     快捷方式指向项目根目录的 Start-HeartDoctor.bat，工作目录即项目目录，
     因此换机器、换盘符后重建一次即可，不写死绝对路径。
-    首次运行会在 scripts\launch\heartdoctor.ico 生成一个绿色圆底「心」字图标。
+    图标使用随仓库提供的 scripts\launch\xiaowei.ico（红心箭头，背景透明）；
+    该文件缺失时退化为现场绘制的绿色圆底「心」字图标。
 
 .PARAMETER Name
-    快捷方式显示名，默认「心医生」。
+    快捷方式显示名，默认「小微老师」。
 
 .PARAMETER Hotkey
     全局快捷键，默认 Ctrl+Alt+H；传空字符串表示不设置。
@@ -23,7 +24,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Name = '心医生',
+    [string]$Name = '小微老师',
     [string]$Hotkey = 'Ctrl+Alt+H',
     [switch]$Remove
 )
@@ -32,9 +33,10 @@ $ErrorActionPreference = 'Stop'
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Target = Join-Path $Root 'Start-HeartDoctor.bat'
-$IconPath = Join-Path $PSScriptRoot 'heartdoctor.ico'
+$IconPath = Join-Path $PSScriptRoot 'xiaowei.ico'
 $Desktop = [Environment]::GetFolderPath('Desktop')
 $ShortcutPath = Join-Path $Desktop ("{0}.lnk" -f $Name)
+$LegacyShortcuts = @('心医生.lnk') | ForEach-Object { Join-Path $Desktop $_ }
 
 if ($Remove) {
     if (Test-Path $ShortcutPath) {
@@ -100,7 +102,7 @@ $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($ShortcutPath)
 $shortcut.TargetPath = $Target
 $shortcut.WorkingDirectory = $Root
-$shortcut.Description = '心医生 Heart Doctor - 一键启动（自检 / 修复 / 启动）'
+$shortcut.Description = '小微老师 - 一键启动（自检 / 修复 / 启动）'
 $shortcut.WindowStyle = 1
 if ($Hotkey) { $shortcut.Hotkey = $Hotkey }
 if (Test-Path $IconPath) {
@@ -109,6 +111,14 @@ if (Test-Path $IconPath) {
     $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,3"
 }
 $shortcut.Save()
+
+# 旧版本桌面快捷方式名为「心医生」，改名后会被同名逻辑漏掉，这里一并清掉。
+foreach ($legacy in $LegacyShortcuts) {
+    if ((Test-Path $legacy) -and ($legacy -ne $ShortcutPath)) {
+        Remove-Item $legacy -Force
+        Write-Host "[OK] 已移除旧快捷方式: $legacy" -ForegroundColor Green
+    }
+}
 
 Write-Host ''
 Write-Host '[OK] 桌面快捷方式已创建' -ForegroundColor Green
