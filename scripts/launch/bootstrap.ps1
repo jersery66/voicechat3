@@ -142,8 +142,6 @@ function Get-BaseUrls([string]$ConfigPath) {
 
 # ---------------------------------------------------------------- 1. Python
 function Initialize-Python {
-    Write-Step '1/6 Python 与虚拟环境'
-
     if (Test-Path $script:VenvPython) {
         $ver = Test-PythonExe $script:VenvPython
         if ($ver -and (Test-MinVersion $ver 3 10)) {
@@ -157,7 +155,7 @@ function Initialize-Python {
     }
 
     if ($NoRepair) {
-        Add-Check 'FAIL' '依赖修复' 'NoRepair 模式，未创建虚拟环境'
+        Add-Check 'WARN' '虚拟环境' 'NoRepair 模式，未创建'
         return $false
     }
 
@@ -204,8 +202,6 @@ function Initialize-Python {
 
 # ------------------------------------------------------------ 2. Dependencies
 function Repair-Dependencies {
-    Write-Step '2/6 Python 依赖'
-
     if (-not $script:PyExe) {
         Add-Check 'SKIP' '依赖检查' '没有可用 Python'
         return
@@ -301,8 +297,6 @@ print(json.dumps({"core": missing_core, "heavy": missing_heavy}))
 
 # ------------------------------------------------------------- 3. 目录/.env
 function Repair-Layout {
-    Write-Step '3/6 运行目录与环境变量'
-
     $dirs = @('logs', 'test_output', 'data', 'cache', 'media_library\relaxation\temp')
     $created = @()
     foreach ($d in $dirs) {
@@ -333,8 +327,6 @@ function Repair-Layout {
 
 # ------------------------------------------------------------- 4. 资源文件
 function Test-Resources {
-    Write-Step '4/6 模型 / 知识库 / 媒体'
-
     $kb = Join-Path $script:Root 'knowledge_base\knowledge.json'
     if (Test-Path $kb) {
         $size = [math]::Round((Get-Item $kb).Length / 1KB, 1)
@@ -370,8 +362,6 @@ function Test-Resources {
 
 # --------------------------------------------------------------- 5. 推理服务
 function Initialize-Services([string]$ConfigPath) {
-    Write-Step '5/6 推理服务'
-
     if (-not $ConfigPath) {
         Add-Check 'FAIL' 'runtime 配置' '未找到 config\runtime*.yaml'
         return $false
@@ -472,8 +462,6 @@ function Initialize-Services([string]$ConfigPath) {
 
 # ----------------------------------------------------------------- 6. 启动
 function Start-Application([string]$ConfigPath) {
-    Write-Step '6/6 启动图形界面'
-
     if (-not $script:PyExe) {
         Add-Check 'FAIL' '启动' '没有可用 Python'
         return 2
@@ -529,13 +517,29 @@ try { Start-Transcript -Path $script:LogPath -Force | Out-Null } catch { $script
 
 $configPath = Resolve-ConfigPath
 
+Write-Step '1/6 Python 与虚拟环境'
 $pythonOk = Initialize-Python
+
+Write-Step '2/6 Python 依赖'
 if ($pythonOk) {
     Repair-Dependencies
-    Repair-Layout
-    Test-Resources
+} else {
+    Add-Check 'SKIP' '依赖检查' '无可用 Python，已跳过'
+}
+
+# Layout and resources do not need Python; keep reporting them so a broken
+# machine shows every gap in one pass instead of one at a time.
+Write-Step '3/6 运行目录与环境变量'
+Repair-Layout
+
+Write-Step '4/6 模型 / 知识库 / 媒体'
+Test-Resources
+
+Write-Step '5/6 推理服务'
+if ($pythonOk) {
     $servicesOk = Initialize-Services $configPath
 } else {
+    Add-Check 'SKIP' '推理服务' '环境未就绪，已跳过'
     $servicesOk = $false
 }
 
@@ -581,6 +585,7 @@ if (-not $servicesOk) {
     exit 3
 }
 
+Write-Step '6/6 启动图形界面'
 Write-Host ''
 Write-Host '>>> 一切就绪，正在打开心医生...' -ForegroundColor Green
 $exitCode = Start-Application $configPath
