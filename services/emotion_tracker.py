@@ -22,6 +22,8 @@ class EmotionTracker:
         self._session_emotions: List[Dict] = []  # Full session history for persistence
         self._negative_streak: int = 0
         self._peak_negative_intensity: float = 0.0
+        self._session_negative_streak_peak: int = 0
+        self._session_peak_negative_intensity: float = 0.0
         # Re-entrant lock: the pipeline writes and the UI reads from other
         # threads; compound reads (get_trend) may nest inside other methods.
         self._lock = threading.RLock()
@@ -39,6 +41,14 @@ class EmotionTracker:
             if emotion in self.NEGATIVE_EMOTIONS:
                 self._negative_streak += 1
                 self._peak_negative_intensity = max(self._peak_negative_intensity, intensity)
+                self._session_negative_streak_peak = max(
+                    self._session_negative_streak_peak,
+                    self._negative_streak,
+                )
+                self._session_peak_negative_intensity = max(
+                    self._session_peak_negative_intensity,
+                    intensity,
+                )
             else:
                 self._negative_streak = 0
                 self._peak_negative_intensity = 0.0
@@ -129,8 +139,8 @@ class EmotionTracker:
                 "dominant_emotion": dominant_emotion,
                 "avg_intensity": round(sum(intensities) / len(intensities), 3),
                 "trend": self.get_trend(),
-                "negative_streak_peak": self._negative_streak,
-                "peak_intensity": self._peak_negative_intensity,
+                "negative_streak_peak": self._session_negative_streak_peak,
+                "peak_intensity": self._session_peak_negative_intensity,
             }
 
     def get_emotion_summary(self) -> str:
@@ -155,7 +165,12 @@ class EmotionTracker:
             )
 
     def get_intervention_hint(self) -> Optional[str]:
-        """Return an intervention hint for the system prompt, or None."""
+        """Return style-only guidance for the system prompt, or ``None``.
+
+        Concrete interventions are business actions owned by TurnPolicy.  The
+        method name remains for compatibility, but its output must never
+        authorize breathing, relaxation, meditation, or another activity.
+        """
         with self._lock:
             if not self.should_intervene():
                 return None
@@ -163,12 +178,15 @@ class EmotionTracker:
             current = self._history[-1]
             trend = self.get_trend()
 
+            # Style only: describe rhythm and sentence shape, never ask for
+            # reassurance or "normalising" -- those instructions are what
+            # produced "确实挺不容易的" on every distressed turn.
             hints = {
-                "anxious": "来访者焦虑持续上升，请放慢节奏，多使用反映性倾听，避免追问。适时引导深呼吸。",
-                "depressed": "来访者情绪低落加重，请增加肯定和支持性语言，帮助其找到微小的积极变化。",
-                "angry": "来访者愤怒在积累，请注意降低对抗感，使用双面反映技术，不要直接挑战其观点。",
-                "fearful": "来访者恐惧感增强，请提供安全感，使用正常化技术，避免深入探讨创伤细节。",
-                "stressed": "来访者压力水平上升，可考虑引导简单的放松技巧，减轻认知负荷。",
+                "anxious": "来访者焦虑持续上升：放慢节奏，句子变短，一轮只问一个问题。",
+                "depressed": "来访者情绪低落加重：不要用安慰或评价式回应，把话题留在他提过的那件具体的事上。",
+                "angry": "来访者愤怒在积累：不解释、不劝说，先承认他说的那件事本身。",
+                "fearful": "来访者恐惧感增强：先给确定感（可以不答、可以停），不追问细节。",
+                "stressed": "来访者压力水平上升：减少信息量，一轮只说一件事，不连续提问。",
             }
 
             base = hints.get(current["emotion"],
@@ -184,4 +202,6 @@ class EmotionTracker:
             self._session_emotions.clear()
             self._negative_streak = 0
             self._peak_negative_intensity = 0.0
+            self._session_negative_streak_peak = 0
+            self._session_peak_negative_intensity = 0.0
             return data

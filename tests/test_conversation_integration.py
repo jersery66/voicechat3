@@ -26,7 +26,7 @@ def test_main_window_loads_the_profile_selected_llm_factory():
 def test_main_reports_the_selected_dialogue_endpoint_not_an_ollama_only_host():
     source = (ROOT / "main.py").read_text(encoding="utf-8")
 
-    assert "DIALOGUE_BACKEND" in source
+    assert "DIALOGUE_PROVIDER" in source
     assert "DIALOGUE_BASE_URL" in source
 
 

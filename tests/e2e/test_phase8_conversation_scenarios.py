@@ -182,7 +182,8 @@ def test_b5_pause_and_resume_uses_actual_first_unanswered_item(harness):
         ),
     )
     assert paused.turn_decision.action is TurnAction.RECOMMEND_RELAXATION
-    assert harness.pipeline.scale_runtime.snapshot().paused is True
+    assert harness.pipeline.scale_runtime.snapshot().paused is False
+    harness.pipeline.scale_runtime.pause()
 
     resumed_question = harness.pipeline.resume_scale_after_relaxation()
     resumed = harness.pipeline.scale_runtime.snapshot()

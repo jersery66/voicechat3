@@ -6,6 +6,7 @@ import ast
 from collections import deque
 from pathlib import Path
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -422,3 +423,43 @@ def _capture_start_result(service, result):
         result["returned"] = service.start_recording()
     except Exception as exc:  # pragma: no cover - assertion reports the value
         result["error"] = exc
+
+
+def _wait_until(predicate, timeout: float = 2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
+
+
+def test_asr15_cancel_discards_captured_audio(monkeypatch):
+    """The unified cancel interface stops capture without producing audio."""
+    service, stream = _start_service(monkeypatch)
+    state = service._recording_state
+
+    frame = np.full((1024, 1), 3.0, dtype=np.float32)
+    stream.callback(frame, len(frame), None, None)
+    assert _wait_until(lambda: len(state.recorded_audio) == 1)
+
+    service.cancel()
+    audio = service.stop_recording()
+
+    assert state.cancelled is True
+    assert audio.size == 0
+    assert service.is_recording is False
+    _assert_collector_exited(state)
+
+
+def test_asr16_cancel_without_active_recording_is_safe(monkeypatch):
+    service, stream = _start_service(monkeypatch)
+    state = service._recording_state
+    service.stop_recording()
+    _assert_collector_exited(state)
+
+    # A second cancel after the recording was consumed must be a no-op.
+    service.cancel()
+
+    assert service.is_recording is False
+    assert service.stop_recording().size == 0

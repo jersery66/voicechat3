@@ -29,7 +29,7 @@ class StatsPanelDialog(QDialog):
 
     def __init__(self, data_root: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("治疗效果统计分析")
+        self.setWindowTitle("会话与评估趋势")
         self.setMinimumSize(1100, 750)
         self.data_root = data_root
         self.stats_service = StatsService(data_root)
@@ -42,7 +42,7 @@ class StatsPanelDialog(QDialog):
         layout.setSpacing(12)
 
         # Header
-        header = QLabel("治疗效果统计分析")
+        header = QLabel("会话与评估趋势")
         header.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
         header.setAlignment(Qt.AlignCenter)
         layout.addWidget(header)
@@ -69,9 +69,9 @@ class StatsPanelDialog(QDialog):
 
         # Subject table
         self._subject_table = QTableWidget()
-        self._subject_table.setColumnCount(7)
+        self._subject_table.setColumnCount(6)
         self._subject_table.setHorizontalHeaderLabels([
-            "被试编号", "会话数", "最近情绪", "情绪趋势", "最新量表", "总时长(分)", "最近会话"
+            "被试编号", "会话数", "最近模型观察", "最新量表", "总时长(分)", "最近会话"
         ])
         self._subject_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._subject_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -158,7 +158,7 @@ class StatsPanelDialog(QDialog):
             f"总会话数: {group['total_sessions']}  |  "
             f"平均时长: {group['avg_duration']}分钟  |  "
             f"危机事件: {group['crisis_count']}次  |  "
-            f"好转率: {group['improvement_rate']*100:.1f}%"
+            f"量表变化: 描述性统计"
         )
 
         # Subject table
@@ -167,26 +167,19 @@ class StatsPanelDialog(QDialog):
         for i, s in enumerate(subjects):
             self._subject_table.setItem(i, 0, QTableWidgetItem(s["subject_id"]))
             self._subject_table.setItem(i, 1, QTableWidgetItem(str(s["session_count"])))
-            self._subject_table.setItem(i, 2, QTableWidgetItem(s["latest_emotion"]))
-
-            trend = s["latest_emotion_trend"]
-            trend_item = QTableWidgetItem(trend)
-            if trend == "improving":
-                trend_item.setForeground(Qt.darkGreen)
-            elif trend == "worsening":
-                trend_item.setForeground(Qt.red)
-            self._subject_table.setItem(i, 3, trend_item)
+            observation = f"{s['latest_emotion']} / 强度 {s['latest_intensity']:.2f}"
+            self._subject_table.setItem(i, 2, QTableWidgetItem(observation))
 
             # Latest scale scores summary
             scales = s.get("latest_scale_scores", {})
             if scales:
                 scale_strs = [f"{k}:{v.get('total','?')}" for k, v in scales.items()]
-                self._subject_table.setItem(i, 4, QTableWidgetItem(", ".join(scale_strs)))
+                self._subject_table.setItem(i, 3, QTableWidgetItem(", ".join(scale_strs)))
             else:
-                self._subject_table.setItem(i, 4, QTableWidgetItem("--"))
+                self._subject_table.setItem(i, 3, QTableWidgetItem("--"))
 
-            self._subject_table.setItem(i, 5, QTableWidgetItem(f"{s['total_duration']:.0f}"))
-            self._subject_table.setItem(i, 6, QTableWidgetItem(s["last_session_date"]))
+            self._subject_table.setItem(i, 4, QTableWidgetItem(f"{s['total_duration']:.0f}"))
+            self._subject_table.setItem(i, 5, QTableWidgetItem(s["last_session_date"]))
 
         # Charts
         if MATPLOTLIB_AVAILABLE:
@@ -277,7 +270,7 @@ class StatsPanelDialog(QDialog):
 
         ax3.set_xlabel("会话序号")
         ax3.set_ylabel("情绪强度")
-        ax3.set_title("各被试情绪强度变化趋势")
+        ax3.set_title("各被试模型情绪观察（描述性）")
         ax3.legend(fontsize=8, loc='upper right')
         ax3.grid(True, alpha=0.3)
 

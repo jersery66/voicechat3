@@ -28,14 +28,18 @@ class VideoPlayTool:
 
     def execute(self, relaxation_type: str = None, filename: str = None) -> str:
         """
-        Play a relaxation video. Blocks until video finishes.
+        Play a relaxation video. Blocks until video finishes or is stopped.
 
         Args:
             relaxation_type: One of 'breathing', 'muscle', 'meditation'
             filename: Direct filename (overrides relaxation_type)
 
         Returns:
-            Chinese relaxation name (e.g. "呼吸训练") or None on failure
+            The Chinese relaxation name when the clip played to its end, an
+            empty string when the participant stopped it early, and ``None``
+            when it could not be played at all.  The three cases are kept
+            apart on purpose: an abandoned exercise is neither a failure nor
+            a completed intervention.
         """
         if filename is None:
             filename = self.FILE_MAP.get(relaxation_type)
@@ -52,5 +56,9 @@ class VideoPlayTool:
             return None
 
         player = get_video_player()
-        player.play_video(video_path)
+        # ``play_video`` returns True when the clip ran to its end and False
+        # when it was interrupted.  Any other return value (a stub, an older
+        # player) keeps the legacy "it played" reading.
+        if player.play_video(video_path) is False:
+            return ""
         return filename.replace(".mp4", "")

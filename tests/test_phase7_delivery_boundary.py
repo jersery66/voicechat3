@@ -22,6 +22,26 @@ PHASE7_BASELINE = "38d16ecf2cf59f1d0c74a90b2245b0ebc6e19425"
 
 
 def _baseline_source(path: str) -> str:
+    """Return a file exactly as it existed at the Phase 6 baseline commit.
+
+    These are historical documentation checks: they assert what the code
+    looked like *before* Phase 7, not what it does now.  The snapshot only
+    exists in a checkout that still carries the original history, so a fresh
+    repository, a shallow clone, or an exported source tree skips instead of
+    failing on a missing commit.
+    """
+    try:
+        subprocess.check_output(
+            ["git", "rev-parse", "--verify", f"{PHASE7_BASELINE}^{{commit}}"],
+            cwd=ROOT,
+            text=True,
+            encoding="utf-8",
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip(
+            f"baseline commit {PHASE7_BASELINE[:8]} is not present in this checkout"
+        )
     return subprocess.check_output(
         ["git", "show", f"{PHASE7_BASELINE}:{path}"],
         cwd=ROOT,

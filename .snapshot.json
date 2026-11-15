@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/jersery66/voicechat3",
+  "branch": "exp/agent-jev-decision",
+  "head_commit": "b98c5c8",
+  "commit_title": "Tacit worker: self-heal on engine errors, dump the failing payload",
+  "downloaded_at": "2026-11-06 20:38:54",
+  "method": "codeload zip snapshot (no .git history)",
+  "files": 594,
+  "note": "github.com git 协议在本机代理下不通，仅 codeload 可用，故为快照而非完整 clone"
+}

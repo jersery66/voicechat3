@@ -25,7 +25,7 @@ def test_final_gate_pass_is_offline_only_and_hardware_not_run():
     assert summary["offline_evidence"] == "SIMULATED / CONTRACT"
     assert summary["hardware_validation"] == "NOT RUN"
     assert summary["real_gpu"] == "NOT RUN"
-    assert summary["real_vllm"] == "NOT RUN"
+    assert summary["real_inference_engine"] == "NOT RUN"
     assert summary["real_phase5"] == "NOT RUN"
     assert summary["real_ab"] == "NOT RUN"
     assert summary["real_stt"] == "NOT RUN"
@@ -78,7 +78,7 @@ def test_required_docs_and_tools_are_declared():
 def test_env_template_exists_without_obvious_secret_or_personal_path():
     path = final_readiness.PROJECT_ROOT / ".env.example"
     text = path.read_text(encoding="utf-8")
-    assert "VOICECHAT_DEPLOYMENT_PROFILE=" in text
+    assert "VOICECHAT_RUNTIME_CONFIG=" in text
     assert "password=" not in text.lower()
     assert "api_key=" not in text.lower()
     assert "sk-" not in text

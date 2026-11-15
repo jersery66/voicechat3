@@ -178,6 +178,18 @@ class TestRelaxationFlow:
         assert engine.state == SessionState.CHATTING
         assert not any(isinstance(e, ContinueOrEndAskEvent) for e in events)
 
+    def test_provider_failed_core_relaxation_returns_to_chat_without_feedback_choice(self, engine, events):
+        start(engine)
+        engine.process_command(PlayRelaxationCommand(relaxation="breathing"))
+        events.clear()
+
+        engine.process_command(
+            RelaxationFinishedCommand(completed=False, provider_failed=True)
+        )
+
+        assert engine.state is SessionState.CHATTING
+        assert not any(isinstance(e, ContinueOrEndAskEvent) for e in events)
+
 
 class TestTimeLimitDecisions:
     def test_warning_single_shot(self, engine):

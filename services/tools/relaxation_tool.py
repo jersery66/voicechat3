@@ -21,7 +21,7 @@ class RelaxationRecommendationTool:
 
     def execute(self, conversation_history=None, spoken_text=None) -> str:
         """
-        Recommend relaxation type. Tries 3B agent first, falls back to report_service.
+        Recommend relaxation type. Tries the agent model first, falls back to report_service.
 
         Args:
             conversation_history: List of conversation messages

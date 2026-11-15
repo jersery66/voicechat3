@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Pre-launch configuration health check (NON-BLOCKING DIAGNOSTIC).
+"""Pre-launch service health check (NON-BLOCKING DIAGNOSTIC).
 
-Validates the selected dialogue backend, model files, knowledge base, and
-relaxation media before the main UI starts.
+Validates the configured dialogue and Agent services, the configured
+ASR/TTS providers' model files, the knowledge base, and relaxation media
+before the main UI starts. Checks are engine agnostic: any
+OpenAI-compatible provider (llama.cpp, vLLM, ...) is probed through its
+``/v1/models`` endpoint, and the Ollama provider through the Ollama
+client API. Voice checks apply to the provider named by runtime.yaml;
+an unselected provider is reported as such instead of being probed.
 
-IMPORTANT: this is a *diagnostic*. Development profiles return False only when
-a critical dependency fails (dialogue backend unreachable, data root not
-writable); their launcher may still continue for troubleshooting. The
-Profiles with ``strict_preflight`` additionally require their configured 3B
-Agent endpoint, because their startup path treats a failed check as a hard stop.
+IMPORTANT: this is a *diagnostic*. When ``runtime.strict_preflight`` is
+false the launcher may still continue for troubleshooting; strict runtime
+configs additionally require their configured Agent endpoint, because their
+startup path treats a failed check as a hard stop.
 Offline-only converted knowledge corpora and relaxation videos remain warnings.
 
 Usage:
@@ -27,7 +31,7 @@ import requests
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, APP_ROOT)
 
-from deployment.profiles import get_deployment_profile
+from deployment.runtime_config import PROVIDER_OLLAMA, get_runtime_config
 
 
 def _ok(label: str) -> None:
@@ -45,7 +49,9 @@ def _warn(label: str, detail: str) -> None:
 
 def check_ollama() -> bool:
     """Verify Ollama server is reachable and has at least one model."""
-    from config import OLLAMA_HOST, OLLAMA_MODEL
+    # OLLAMA_MODEL was removed from config.py when the provider matrix moved
+    # to runtime.yaml; the endpoint choice alone decides what matters here.
+    from config import OLLAMA_HOST
     try:
         import ollama
         client = ollama.Client(host=OLLAMA_HOST)
@@ -60,42 +66,31 @@ def check_ollama() -> bool:
         names = [n for n in names if n]
         if not names:
             return _fail("Ollama", f"no models found at {OLLAMA_HOST}")
-        _ok(f"Ollama ({len(names)} models, using '{OLLAMA_MODEL}')")
+        _ok(f"Ollama ({len(names)} models)")
         return True
     except Exception as e:
         return _fail("Ollama", f"cannot reach {OLLAMA_HOST}: {e}")
 
 
 def check_dialogue_backend() -> bool:
-    """Check the selected dialogue transport without assuming Ollama.
+    """Check the configured dialogue service without assuming an engine.
 
-    For vLLM this deliberately calls the OpenAI-compatible ``/v1/models``
-    endpoint. The desktop UI must never try to probe the A100 dialogue server
-    through the Ollama client API.
+    OpenAI-compatible providers (llama.cpp, vLLM, ...) are probed through
+    their ``/v1/models`` endpoint; the desktop UI must never try to probe
+    them through the Ollama client API.
     """
-    from config import DIALOGUE_BACKEND, DIALOGUE_BASE_URL, OLLAMA_MODEL
+    from config import DIALOGUE_PROVIDER, DIALOGUE_BASE_URL, DIALOGUE_MODEL
 
-    if DIALOGUE_BACKEND == "ollama":
+    if DIALOGUE_PROVIDER == PROVIDER_OLLAMA:
         return check_ollama()
-    if DIALOGUE_BACKEND != "vllm":
-        return _fail("Dialogue Backend", f"unsupported backend: {DIALOGUE_BACKEND}")
-    try:
-        url = urljoin(DIALOGUE_BASE_URL.rstrip("/") + "/", "models")
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        available = [item.get("id") for item in data.get("data", []) if item.get("id")]
-        if OLLAMA_MODEL not in available:
-            return _fail("vLLM", f"model '{OLLAMA_MODEL}' not served by {url}")
-        _ok(f"vLLM ({len(available)} models, using '{OLLAMA_MODEL}')")
-        return True
-    except Exception as exc:
-        return _fail("vLLM", f"cannot reach {DIALOGUE_BASE_URL}: {exc}")
+    return _check_openai_compatible_model(
+        f"Dialogue ({DIALOGUE_PROVIDER})", DIALOGUE_BASE_URL, DIALOGUE_MODEL
+    )
 
 
 def _check_openai_compatible_model(label: str, base_url: str,
                                    model: str | None) -> bool:
-    """Verify one profile-owned vLLM endpoint serves its configured model."""
+    """Verify one configured endpoint serves its configured model."""
     if not model:
         _ok(f"{label} (not configured)")
         return True
@@ -116,26 +111,53 @@ def _check_openai_compatible_model(label: str, base_url: str,
 
 
 def check_agent_backend() -> bool:
-    """Check the Agent endpoint, enforcing strict profiles."""
-    from config import AGENT_BACKEND, AGENT_MODEL, AGENT_MODEL_SERVER
-    profile = get_deployment_profile()
+    """Check the Agent endpoint, enforcing strict runtime configurations."""
+    from config import AGENT_ENABLED, AGENT_PROVIDER, AGENT_MODEL, AGENT_MODEL_SERVER
 
-    if AGENT_BACKEND == "ollama":
-        available = _check_openai_compatible_model("Agent Ollama", AGENT_MODEL_SERVER, AGENT_MODEL)
-    elif AGENT_BACKEND == "vllm":
-        available = _check_openai_compatible_model("Agent vLLM", AGENT_MODEL_SERVER, AGENT_MODEL)
-    else:
-        available = _fail("Agent Backend", f"unsupported backend: {AGENT_BACKEND}")
+    if not AGENT_ENABLED:
+        _ok("Agent (disabled by runtime config)")
+        return True
+
+    runtime = get_runtime_config()
+    # The legacy agent LLM is only contacted at runtime when the decision
+    # chain can fall back to it: mode=legacy (agent IS the decider) or
+    # escalation_mode=legacy (agent is the escalation target).  With
+    # escalation_mode=deterministic the config contract explicitly says the
+    # agent server (e.g. :8001 / Qwen3-4B) is NOT started, so probing it
+    # must not fail the strict preflight.
+    decision = getattr(runtime, "decision", None)
+    decision_mode = str(getattr(decision, "mode", "legacy") or "legacy")
+    escalation_mode = str(
+        getattr(decision, "escalation_mode", "legacy") or "legacy"
+    )
+    agent_used_at_runtime = (
+        decision_mode == "legacy" or escalation_mode == "legacy"
+    )
+    if not agent_used_at_runtime:
+        _ok(
+            f"Agent (unused: decision={decision_mode}, "
+            f"escalation={escalation_mode} — agent server not started)"
+        )
+        return True
+
+    # Every supported provider exposes an OpenAI-compatible /v1/models
+    # endpoint (llama.cpp, vLLM, and Ollama's compatibility layer alike).
+    available = _check_openai_compatible_model(
+        f"Agent ({AGENT_PROVIDER})", AGENT_MODEL_SERVER, AGENT_MODEL
+    )
     if not available:
-        if profile.strict_preflight:
-            return _fail("Agent", f"required by the {profile.name} strict preflight profile")
+        if runtime.runtime.strict_preflight:
+            return _fail("Agent", "required by the strict preflight runtime configuration")
         _warn("Agent", "unavailable; deterministic keyword routing remains active")
     return True
 
 
 def check_funasr() -> bool:
-    """Verify FunASR model directory exists."""
-    from config import FUNASR_MODEL_PATH
+    """Verify the FunASR model directory when it is the configured ASR provider."""
+    from config import ASR_PROVIDER, FUNASR_MODEL_PATH
+    if ASR_PROVIDER != "funasr":
+        _ok(f"FunASR (not the configured ASR provider: {ASR_PROVIDER})")
+        return True
     if FUNASR_MODEL_PATH and os.path.isdir(FUNASR_MODEL_PATH):
         _ok(f"FunASR ({FUNASR_MODEL_PATH})")
         return True
@@ -144,18 +166,25 @@ def check_funasr() -> bool:
 
 
 def check_cosyvoice() -> bool:
-    """Verify CosyVoice model directory exists (legacy)."""
-    from config import COSYVOICE_MODEL_PATH
-    if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
-        _ok(f"CosyVoice (legacy, {COSYVOICE_MODEL_PATH})")
+    """Verify the CosyVoice model directory when it is the configured TTS provider."""
+    from config import COSYVOICE_MODEL_PATH, TTS_PROVIDER
+    if TTS_PROVIDER != "cosyvoice":
+        _ok(f"CosyVoice (not the configured TTS provider: {TTS_PROVIDER})")
         return True
-    _warn("CosyVoice (legacy)", f"path not found: {COSYVOICE_MODEL_PATH}")
+    if COSYVOICE_MODEL_PATH and os.path.isdir(COSYVOICE_MODEL_PATH):
+        _ok(f"CosyVoice ({COSYVOICE_MODEL_PATH})")
+        return True
+    _warn("CosyVoice", f"path not found: {COSYVOICE_MODEL_PATH}")
     return True
 
 
 def check_voxcpm() -> bool:
-    """Verify VoxCPM2 model availability."""
-    from config import VOXCPM_MODEL_PATH
+    """Verify VoxCPM2 availability when it is the configured TTS provider."""
+    from config import TTS_PROVIDER, VOXCPM_MODEL_PATH
+    if TTS_PROVIDER != "voxcpm":
+        _ok(f"VoxCPM2 (not the configured TTS provider: {TTS_PROVIDER})")
+        return True
+
     from services.tts_service_voxcpm import TTSService
 
     blocker = TTSService.get_load_blocker()
@@ -276,6 +305,178 @@ def check_relaxation_media() -> bool:
     return True  # non-fatal
 
 
+def check_audio_devices() -> bool:
+    """Report which microphone and which loudspeaker the app will use.
+
+    Both directions are WARN-level: a wrong endpoint still launches an
+    interview, it just records the programme's own playback (or plays the
+    avatar into a virtual cable), and the session quietly yields nothing
+    usable.  That is precisely why this check exists -- on this machine the
+    preflight used to pass 12/12 while *both* directions pointed at VB-Cable.
+    """
+    try:
+        import sounddevice as sd
+        from services.stt_service import select_input_device, _device_is_loopback
+        from services.tts_service_voxcpm import resolve_output_device, _is_virtual_output
+    except Exception as exc:
+        _warn("Audio Devices", f"cannot inspect endpoints: {exc}")
+        return True
+
+    try:
+        devices = list(sd.query_devices())
+    except Exception as exc:
+        _warn("Audio Devices", f"PortAudio unavailable: {exc}")
+        return True
+
+    try:
+        from config import TTS_SAMPLE_RATE
+    except Exception:
+        TTS_SAMPLE_RATE = None
+
+    try:
+        default_in = sd.query_devices(kind="input")["index"]
+    except Exception:
+        default_in = None
+    try:
+        default_out = sd.query_devices(kind="output")["index"]
+    except Exception:
+        default_out = None
+
+    mic, _mic_reason = select_input_device(devices, default_index=default_in)
+    speaker, _speaker_reason = resolve_output_device(
+        devices, default_index=default_out, samplerate=TTS_SAMPLE_RATE
+    )
+
+    problems = []
+    mic_name = ""
+    if mic is None:
+        problems.append("no microphone found")
+    else:
+        mic_name = str(devices[mic].get("name", ""))[:30]
+        if _device_is_loopback(devices[mic]):
+            problems.append(f"microphone is a loopback endpoint ({mic_name})")
+
+    speaker_name = ""
+    if speaker is None:
+        problems.append("no speaker found")
+    else:
+        speaker_name = str(devices[speaker].get("name", ""))[:30]
+        if _is_virtual_output(devices[speaker].get("name", "")):
+            problems.append(f"speaker is a virtual cable ({speaker_name})")
+
+    label = (
+        f"Audio Devices (in: {mic_name or 'none'} | out: {speaker_name or 'none'})"
+    )
+    if problems:
+        _warn(label, "; ".join(problems) + " -- check Windows sound settings")
+    else:
+        _ok(label)
+    return True  # never blocks a launch; it only makes the wrong endpoint visible
+
+
+def _tacit_class_blocker(decision) -> str:
+    """Why the in-process Tacit class cannot be obtained here; ``""`` when it can.
+
+    Mirrors the three fallbacks of ``TacitDecisionProvider._ensure_tacit``:
+    the ``anyjev`` package, the checkpoint's own ``tacit_decision.py``, and the
+    isolated decision venv worker.  Importing torch here would make the
+    preflight pay the model load, so this only checks reachability.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    if importlib.util.find_spec("anyjev") is not None:
+        return ""
+    checkpoint = Path(str(decision.model_path or decision.model or "")).expanduser()
+    if checkpoint.is_dir() and (checkpoint / "tacit_decision.py").is_file():
+        return ""
+    isolated = os.environ.get("VOICECHAT_TACIT_PYTHON")
+    if isolated and Path(isolated).is_file():
+        return ""
+    return (
+        "no Tacit class available (anyjev not installed, checkpoint has no "
+        "tacit_decision.py, VOICECHAT_TACIT_PYTHON unset) — every turn will fall back"
+    )
+
+
+def check_decision_backend() -> bool:
+    """Report the decision layer's readiness without ever blocking the launch.
+
+    A decision failure is *designed* to fall back to the Qwen Agent (or to a
+    deterministic chat), so an unreachable decision service must remain a WARN:
+    turning it into a hard FAIL would contradict the fallback contract and stop
+    interviews that would otherwise run fine.
+    """
+    try:
+        decision = get_runtime_config().decision
+    except Exception as exc:  # config already validated at import; defensive only
+        _warn("Decision Layer", f"config unavailable: {type(exc).__name__}")
+        return True
+
+    if decision.mode == "legacy":
+        _ok(f"Decision Layer (mode=legacy, backend={decision.backend})")
+        return True
+
+    label = f"Decision Layer (mode={decision.mode}, backend={decision.backend})"
+
+    if decision.backend in {"anyjev_decider", "tacit"} and decision.transport == "server":
+        endpoint = decision.endpoint
+        if not endpoint:
+            _warn(label, "no endpoint configured; will fall back at runtime")
+            return True
+        url = urljoin(endpoint.rstrip("/") + "/", "health")
+        try:
+            # Loopback must not be routed through a system proxy.
+            response = requests.get(url, timeout=float(decision.timeout or 5.0),
+                                    proxies={"http": None, "https": None})
+            payload = response.json() if response.ok else {}
+        except Exception as exc:
+            _warn(label, f"{endpoint} unreachable ({type(exc).__name__}); falls back at runtime")
+            return True
+        if str(payload.get("status")) == "ok":
+            integrity = payload.get("integrity") or {}
+            if integrity and not integrity.get("ok", True):
+                _warn(label, f"service up but weights unverified: {integrity.get('problems')}")
+            else:
+                _ok(f"{label} at {endpoint}")
+        else:
+            _warn(label, f"{endpoint} reported status={payload.get('status')!r}")
+        return True
+
+    if decision.transport == "inprocess" or decision.backend == "tacit":
+        model_path = decision.model_path or decision.model
+        if not model_path:
+            _warn(label, "no model_path/model configured; falls back at runtime")
+            return True
+        try:
+            from decision.integrity import summarise, verify_model_dir
+
+            report = verify_model_dir(model_path, require_manifest=True, extra_files_ok=True)
+        except Exception as exc:
+            _warn(label, f"integrity check failed: {type(exc).__name__}: {exc}")
+            return True
+        if report.ok:
+            # Weights are only half of readiness.  The in-process backend still
+            # needs an importable Tacit class; without it every turn falls back
+            # at runtime while this line keeps saying OK, which is exactly the
+            # false pass that hid a missing decision model before.
+            blocker = _tacit_class_blocker(decision) if decision.backend == "tacit" else ""
+            if blocker:
+                _warn(f"{label} — {summarise(report)}", blocker)
+            else:
+                _ok(f"{label} — {summarise(report)}")
+        else:
+            _warn(label, summarise(report))
+        return True
+
+    if decision.backend == "fake":
+        _warn(label, "fake backend is for tests only; not production inference")
+        return True
+
+    _warn(label, "no readiness probe defined for this backend")
+    return True  # non-fatal
+
+
 def run_check() -> bool:
     """Run all checks. Returns True if all critical checks pass."""
     print("=" * 50)
@@ -293,7 +494,9 @@ def run_check() -> bool:
         check_knowledge_base(),
         check_converted_knowledge_base(),
         check_relaxation_media(),
+        check_audio_devices(),
         check_data_root(),
+        check_decision_backend(),
     ]
 
     print("=" * 50)

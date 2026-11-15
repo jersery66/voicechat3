@@ -60,6 +60,17 @@ class TestHeadlessBoot:
         assert window.session_engine is not None
         assert window.session_engine.state == SessionState.IDLE
 
+    def test_relaxation_center_shell_opens_once_and_returns_cleanly(self, window):
+        window._open_relaxation_center()
+        dialog = window._relaxation_center_dialog
+        assert dialog is not None
+        assert dialog.isVisible()
+        first_session = window.relaxation_runtime.snapshot().relaxation_session_id
+        window._open_relaxation_center()
+        assert window.relaxation_runtime.snapshot().relaxation_session_id == first_session
+        dialog.close_to_chat()
+        assert window.relaxation_runtime.snapshot().state.value == "INACTIVE"
+
     def test_production_window_has_no_legacy_crisis_ui(self, window):
         assert not hasattr(window, "_show_crisis_dialog")
         assert not hasattr(window, "safety_gate")

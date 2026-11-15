@@ -13,6 +13,34 @@ from services.logger import get_logger
 
 logger = get_logger(__name__)
 
+#: Fonts that can render the on-screen exit hint.  Addressed by path on
+#: purpose: ``pygame.font.SysFont`` walks the Windows font registry and raises
+#: when it meets a non-string entry, which is what used to crash the first
+#: playback on a fresh machine.
+_CJK_FONT_CANDIDATES = (
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\msyhl.ttc",
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\simsun.ttc",
+)
+
+
+def _overlay_font(size: int):
+    """A font that can render Chinese, or ``None`` when none is installed."""
+    for path in _CJK_FONT_CANDIDATES:
+        if not os.path.exists(path):
+            continue
+        try:
+            return pygame.font.Font(path, size)
+        except Exception as exc:  # pragma: no cover - depends on the machine
+            logger.warning(f"Overlay font {path} unusable: {exc}")
+    try:
+        return pygame.font.Font(None, size)
+    except Exception as exc:  # pragma: no cover
+        logger.warning(f"No overlay font available: {exc}")
+        return None
+
+
 class VideoPlayer:
     def __init__(self):
         self._abort = threading.Event()
@@ -20,11 +48,18 @@ class VideoPlayer:
     def play_video(self, file_path):
         """
         Play video in fullscreen (Kiosk mode).
-        Blocks until video finishes or (Win + Esc) is pressed (or stop() is called).
+
+        Blocks until the video finishes, the participant clicks the picture,
+        ESC / Ctrl+Alt+Q / Win+Esc is pressed, or ``stop()`` is called.
+
+        Returns ``True`` only when the clip played to its end.  An interrupted
+        or unplayable run returns ``False``: calling an abandoned exercise a
+        completed one is what put ``relaxation_completed=true`` into reports
+        for sessions where nothing was watched.
         """
         if not os.path.exists(file_path):
             logger.error(f"Video file not found: {file_path}")
-            return
+            return False
 
         # Reset abort flag for this playback session.
         self._abort.clear()
@@ -51,6 +86,7 @@ class VideoPlayer:
         
         # Load Video using MoviePy
         clip = None
+        finished = False
         try:
             clip = VideoFileClip(file_path)
             
@@ -84,11 +120,19 @@ class VideoPlayer:
             if not os.path.exists(audio_path):
                 logger.info("Extracting audio (first time only)... Please wait.")
                 # Show a loading screen using standard font if possible, or just console log
-                # PyGAme default font
-                font = pygame.font.SysFont("Arial", 36)
-                text_surface = font.render(f"Loading...", True, (255, 255, 255))
-                screen.blit(text_surface, (screen_width//2 - 50, screen_height//2))
-                pygame.display.flip()
+                # pygame's bundled default font: SysFont() enumerates the Windows
+                # font registry and raises TypeError when an entry there is not a
+                # string, which aborted every first-run (cache-miss) playback and
+                # still reported the exercise as finished.
+                font = None
+                try:
+                    font = pygame.font.Font(None, 36)
+                except Exception as exc:
+                    logger.warning(f"Loading caption font unavailable: {exc}")
+                if font is not None:
+                    text_surface = font.render("Loading...", True, (255, 255, 255))
+                    screen.blit(text_surface, (screen_width//2 - 50, screen_height//2))
+                    pygame.display.flip()
                 
                 try:
                     clip.audio.write_audiofile(audio_path, logger=None)
@@ -108,9 +152,23 @@ class VideoPlayer:
             clock = pygame.time.Clock()
             start_time = time.time()
             fps = clip.fps
-            
+
+            # A fullscreen video with no visible way out is a trap: the doctor
+            # cannot interrupt an exercise and the participant cannot stop one.
+            # The backdoor keys stay, but a click anywhere is the affordance
+            # everyone already knows, so it is advertised on screen.
+            hint_surface = None
+            hint_font = _overlay_font(26)
+            if hint_font is not None:
+                try:
+                    hint_surface = hint_font.render(
+                        "点击画面任意处  结束本次放松", True, (255, 255, 255)
+                    )
+                except Exception as exc:  # pragma: no cover - glyph coverage
+                    logger.warning(f"Exit hint could not be rendered: {exc}")
+
             running = True
-            
+
             for frame in clip_resized.iter_frames(fps=fps, dtype="uint8"):
                 if not running or self._abort.is_set():
                     break
@@ -120,7 +178,14 @@ class VideoPlayer:
                     if event.type == pygame.QUIT:
                         # Ignore standard quit
                         pass
+                    elif event.type == pygame.MOUSEBUTTONDOWN:
+                        logger.info("Exit requested by mouse click on the video")
+                        running = False
                     elif event.type == pygame.KEYDOWN:
+                         if event.key == pygame.K_ESCAPE:
+                             logger.info("Exit requested by ESC")
+                             running = False
+                             continue
                          # Check strict Backdoor: 
                          # Win+Esc is unreliable due to Start Menu focus stealing.
                          # Changed to: CTRL + ALT + Q
@@ -155,6 +220,18 @@ class VideoPlayer:
                 # Blit centered
                 screen.fill((0, 0, 0))
                 screen.blit(frame_surface, (x_pos, y_pos))
+                if hint_surface is not None:
+                    # Bottom-left, inside the letterbox so it never covers the
+                    # picture the exercise is asking them to look at.
+                    hint_x = 32
+                    hint_y = screen_height - hint_surface.get_height() - 24
+                    backdrop = pygame.Surface(
+                        (hint_surface.get_width() + 24, hint_surface.get_height() + 16),
+                        pygame.SRCALPHA,
+                    )
+                    backdrop.fill((0, 0, 0, 110))
+                    screen.blit(backdrop, (hint_x - 12, hint_y - 8))
+                    screen.blit(hint_surface, (hint_x, hint_y))
                 pygame.display.flip()
                 
                 # Sync logic
@@ -167,6 +244,11 @@ class VideoPlayer:
                     # Audio finished, wait a bit then exit? 
                     # Actually logic depends on frames. If frames done, we exit loop.
                     pass
+
+            # The clip is only "finished" when the frame iterator ran out on
+            # its own.  ``running`` still True here means no exit was asked
+            # for, so a completed loop is a completed exercise.
+            finished = running and not self._abort.is_set()
 
         except Exception as e:
             logger.error(f"Video playback error: {e}")
@@ -201,8 +283,8 @@ class VideoPlayer:
             #     if os.path.exists(audio_path):
             #         os.remove(audio_path)
             # except: pass
-            
-        return
+
+        return finished
 
     def stop(self):
         """Request the currently playing video to abort (e.g. at session end)."""

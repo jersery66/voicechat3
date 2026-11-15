@@ -5,13 +5,13 @@ import sys
 import time
 from typing import Generator, List, Dict, Any, Optional
 
-from services.logger import get_logger
+from services.logger import get_logger, text_meta
 from services.metrics import get_metrics
 from services._ollama_pool import get_ollama_client
 
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import OLLAMA_MODEL, OLLAMA_HOST, SYSTEM_PROMPT
+from config import DIALOGUE_MODEL, OLLAMA_HOST, SYSTEM_PROMPT
 
 try:
     # Optional: configurable timeout (seconds) for LLM requests
@@ -43,12 +43,12 @@ class LLMService:
         # Auto-detect model if not specified
         if model is None:
             available = self.get_available_models()
-            if OLLAMA_MODEL in available:
-                self.model = OLLAMA_MODEL
+            if DIALOGUE_MODEL in available:
+                self.model = DIALOGUE_MODEL
             elif available:
                 self.model = available[0]
             else:
-                self.model = OLLAMA_MODEL
+                self.model = DIALOGUE_MODEL
         else:
             self.model = model
         
@@ -186,7 +186,7 @@ class LLMService:
                     logger.warning(
                         f"[LLMChunkDebug] type={type(msg).__name__} "
                         f"keys={_msg_keys(msg)} "
-                        f"head={str(msg)[:400]}"
+                        f"{text_meta('head', msg, limit=400)}"
                     )
 
                 # Thinking/reasoning: capture but don't yield to UI
@@ -265,7 +265,10 @@ class LLMService:
                 raise RuntimeError("LLM_NO_FINAL_CONTENT")
 
         # Log raw LLM output for debugging
-        logger.warning(f"[LLMRawFull] len={len(full_response)} text={full_response[:1000]!r}")
+        logger.warning(
+            f"[LLMRawFull] len={len(full_response)} "
+            f"{text_meta('text', full_response, limit=1000)}"
+        )
 
         # Note: do NOT yield full_response again — chunks were already yielded
         # in the stream loop above. Yielding here would duplicate the content.
@@ -326,7 +329,7 @@ class LLMService:
         ])
 
     def _maybe_summarize(self):
-        """Compress conversation history using the 3B agent when it grows too long."""
+        """Compress conversation history using the agent model when it grows too long."""
         if len(self.conversation_history) < self.MAX_HISTORY_TURNS * 2:
             return  # Not long enough yet
 

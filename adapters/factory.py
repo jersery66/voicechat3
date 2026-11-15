@@ -14,9 +14,9 @@
 #     sides share one instance per backend (otherwise: two conversation
 #     histories, two session dirs, two round counters).
 #
-# Backend selection knobs will land here (e.g. VOICECHAT_TTS_BACKEND to
-# choose VoxCPM vs CosyVoice) — today each slot has a single production
-# implementation, matching legacy behavior exactly.
+# Backend selection knobs (VOICECHAT_TTS_BACKEND to choose VoxCPM vs
+# CosyVoice) live in the service selectors driven by runtime.yaml
+# (tts.provider / asr.provider); each builder delegates to them.
 #
 # M34: every builder now degrades to None on missing dependencies (instead of
 # raising ImportError), and build() is the single dispatch entry point.
@@ -55,8 +55,12 @@ def build_rag_backend():
 
 
 def build_tts_backend():
-    """TTS backend selection point. Currently VoxCPM2 only (legacy:
-    services/tts_service.py hard-imports the VoxCPM implementation)."""
+    """TTS backend selection point.
+
+    services/tts_service.py is a config-driven selector: the provider
+    named by runtime.yaml (tts.provider) decides between the VoxCPM2 and
+    CosyVoice implementations.
+    """
     try:
         from services.tts_service import get_tts_service
         return get_tts_service()
@@ -66,6 +70,7 @@ def build_tts_backend():
 
 
 def build_stt_backend():
+    """STT backend selection point (asr.provider; funasr today)."""
     try:
         from services.stt_service import get_stt_service
         return get_stt_service()

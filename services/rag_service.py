@@ -1,8 +1,10 @@
 # RAG Service - Knowledge Retrieval for Psychology Counseling
 
 import os
+import re
 import sys
 import json
+import hashlib
 from collections import OrderedDict
 from typing import Optional, List, Dict, Any, Set
 from pathlib import Path
@@ -12,6 +14,28 @@ from services.logger import get_logger
 logger = get_logger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+_ORDERED_STEP = re.compile(r"^\s*[1-9][\.、．\)）]", re.MULTILINE)
+_PRACTICE_WORDS = ("呼吸", "放松", "冥想", "正念", "肌肉", "想象", "练习", "训练", "着陆")
+
+
+def _is_procedure_entry(content: str) -> bool:
+    """True when a curated entry is an ordered how-to list.
+
+    The curated file used to be written as intervention protocols ("1. ... 2.
+    ...").  Injected verbatim into a conversation turn they read as an
+    instruction to walk the participant through the exercise, which the
+    participant prompt forbids ("不在对话里逐步教放松、呼吸或冥想的具体步骤").
+    Entries are now phrased as "typical presentation / how to respond / when to
+    refer", but this stays as a guard: a numbered protocol added later is
+    reduced to its topic signal instead of being read out loud, and the topic
+    is kept rather than dropped.
+    """
+    body = content or ""
+    if len(_ORDERED_STEP.findall(body)) < 2:
+        return False
+    return any(word in body for word in _PRACTICE_WORDS)
 
 
 def _init_jieba():
@@ -108,6 +132,9 @@ class RAGService:
         "无聊透顶": ["抑郁", "无意义感"],
         "对啥都没兴趣": ["抑郁", "兴趣减退"],
         "提不起精神": ["抑郁", "情绪低落"],
+        # Participants say "提不起劲" far more often than "提不起精神".
+        "提不起劲": ["抑郁", "没意思", "不想动"],
+        "没那个劲": ["抑郁", "不想动"],
         "萎靡不振": ["抑郁", "情绪低落"],
         "心如死灰": ["抑郁", "绝望"],
         "万念俱灰": ["抑郁", "绝望", "自杀风险"],
@@ -132,6 +159,10 @@ class RAGService:
         "爆发": ["愤怒", "情绪失控"],
         "砸东西": ["愤怒", "冲动行为"],
         "想打人": ["愤怒", "冲动", "暴力风险"],
+        "动手": ["愤怒", "冲动", "暴力风险"],
+        "差点动手": ["愤怒", "冲动控制", "暴力风险"],
+        "想揍": ["愤怒", "冲动"],
+        "压不住火": ["愤怒", "冲动控制"],
         "骂人": ["愤怒", "情绪管理"],
         "吵架": ["愤怒", "人际冲突"],
         "看谁都不顺眼": ["愤怒", "烦躁"],
@@ -169,6 +200,11 @@ class RAGService:
         "不自在": ["戒断", "躯体不适"],
         "像蚂蚁爬": ["戒断", "躯体感觉异常"],
         "骨头痒": ["戒断", "躯体症状"],
+        # "虫子爬" is the usual phrasing; "像蚂蚁爬" alone missed it.
+        "虫子爬": ["戒断", "躯体感觉异常"],
+        "有虫子": ["戒断", "躯体感觉异常"],
+        "骨头里痒": ["戒断", "躯体症状"],
+        "再来一口": ["渴求", "复吸"],
         "心里发毛": ["渴求", "焦虑"],
         "抓心挠肝": ["渴求", "焦虑"],
         "飘飘然": ["渴求", "心理依赖"],
@@ -197,6 +233,20 @@ class RAGService:
         "被监控": ["被害妄想", "精神病性症状"],
         "灵魂出窍": ["解离", "人格解体"],
         "不在自己身上": ["解离", "现实解体"],
+        # Colloquial descriptions of hallucination: participants never say
+        # "幻听", they say someone is talking behind them or calling their
+        # name.  Without these the entry is unreachable even when the turn is
+        # clearly about hearing voices.
+        "有人说话": ["幻听", "幻觉"],
+        "背后说话": ["幻听", "幻觉"],
+        "叫我名字": ["幻听", "幻觉"],
+        "喊我名字": ["幻听", "幻觉"],
+        "看不见的人": ["幻听", "幻觉"],
+        # Dissociation is described as a blank head, not as "解离".
+        "脑子空": ["解离", "注意力障碍"],
+        "脑子一片空白": ["解离", "注意力障碍"],
+        "不知道自己在干嘛": ["解离", "走神"],
+        "隔着玻璃": ["解离", "现实解体"],
 
         # === Relationship related ===
         "被人欺负": ["人际冲突", "创伤", "欺凌"],
@@ -229,6 +279,14 @@ class RAGService:
         "这儿疼那儿疼": ["躯体化", "心理痛苦"],
         "不舒服": ["躯体化", "身体不适"],
 
+        # === Relaxation related ===
+        # "静不下来" is the request phrased as a complaint; without it the turn
+        # that should route to the relaxation centre retrieves nothing.
+        "静下来": ["放松", "焦虑"],
+        "静不下来": ["放松", "焦虑", "坐立不安"],
+        "停不下来": ["焦虑", "放松"],
+        "绷着": ["焦虑", "身体紧张"],
+
         # === Work/Study related ===
         "压力大": ["压力", "焦虑", "心理压力"],
         "压力好大": ["压力", "焦虑", "心理压力"],
@@ -259,6 +317,18 @@ class RAGService:
     # and tests, but make the runtime allowlist explicit and empty.
     LAZY_FILES: list[str] = []
 
+    #: A hit must reach this score to be injected.  5.0 means at least one
+    #: curated keyword actually matched (3.0 keyword + 3.0 domain boost);
+    #: a title-only 4.5 stays out.  The curated set is ten entries long, so a
+    #: weak hit is worse than no hit: it reads as generic advice the
+    #: participant has already heard.
+    MIN_SCORE = 5.0
+    #: At most one entry per turn.  Three related entries said the same thing
+    #: three ways and the writer repeated all three.
+    MAX_ENTRIES_PER_TURN = 1
+    #: Candidate pool fetched before the session-level de-duplication below.
+    SEARCH_POOL = 3
+
     def __init__(self, knowledge_base_path: str = None):
         self.knowledge_base_path = Path(knowledge_base_path) if knowledge_base_path else self._get_default_kb_path()
         self.knowledge_base: List[Dict[str, str]] = []
@@ -268,12 +338,20 @@ class RAGService:
         self._query_cache: OrderedDict[str, Set[str]] = OrderedDict()  # Cache expanded queries
         self._search_cache: OrderedDict[str, List[Dict]] = OrderedDict()  # Cache search results
         self._MAX_CACHE_SIZE = 256
+        # Entries already injected in this session.  With only ten curated
+        # entries, re-serving one is how the same paragraph reaches the same
+        # participant twice in ten minutes.
+        self._served_entry_keys: set[str] = set()
         # Pre-sort the synonym keys once — used by _expand_query on every call.
         # Sorting all 200+ keys per query was wasteful.
         self._synonym_keys_sorted: List[str] = sorted(
             self.SYNONYM_MAP.keys(), key=len, reverse=True
         )
         self._load_core_knowledge()
+
+    def reset_session(self) -> None:
+        """Forget which entries this session has already been shown."""
+        self._served_entry_keys.clear()
 
     def _get_default_kb_path(self) -> Path:
         app_dir = Path(__file__).parent.parent
@@ -325,62 +403,46 @@ class RAGService:
         self._lazy_loaded = True
 
     def _create_default_knowledge_base(self):
-        """Create default knowledge base with psychology intervention techniques.
-        All interventions are designed for mandatory drug rehabilitation center environments."""
+        """Seed from the curated file instead of an inline copy.
+
+        This used to carry its own hard-coded list of intervention protocols
+        and wrote it over ``knowledge.json`` whenever the file was missing or
+        empty -- so a deleted file silently restored the exercise walkthroughs
+        the knowledge base had just been rewritten to remove.  The curated file
+        is the single source of truth; if it cannot be read, an empty index
+        degrades to "no retrieval" rather than to stale protocol text.
+        """
+        self.knowledge_base = []
+
+        canonical = self._get_default_kb_path() / "knowledge.json"
+        if canonical.resolve() == (self.knowledge_base_path / "knowledge.json").resolve():
+            logger.warning(
+                "RAG: curated knowledge base is missing at %s; retrieval disabled", canonical
+            )
+            return
+
+        try:
+            with open(canonical, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"RAG: could not read curated knowledge base {canonical}: {e}")
+            return
+
+        if not isinstance(data, list) or not data:
+            logger.warning(f"RAG: curated knowledge base {canonical} is empty")
+            return
+
         self.knowledge_base = [
             {
-                "keywords": ["失眠", "睡不着", "入睡困难", "睡眠"],
-                "title": "失眠干预技术",
-                "content": "针对戒毒人员失眠问题，可采用以下干预技术：\n1. 睡眠卫生教育：保持规律作息，按照所内作息时间上床和起床\n2. 刺激控制疗法：床只用于睡眠，躺下20分钟仍睡不着就坐起来做深呼吸\n3. 放松训练：睡前在床铺上进行腹式呼吸或渐进式肌肉放松\n4. 着陆技术(Grounding)：关注当下环境，寻找房间里的5种颜色、4种触感、3种声音"
-            },
-            {
-                "keywords": ["焦虑", "紧张", "心慌", "害怕", "恐惧", "压力"],
-                "title": "焦虑情绪干预",
-                "content": "针对焦虑情绪的干预技术：\n1. 深呼吸练习：4-7-8呼吸法（吸气4秒，屏息7秒，呼气8秒），可坐在床铺或椅子上进行\n2. 着陆技术：5-4-3-2-1感官练习（看5样东西，摸4样，听3种声音，闻2种气味，尝1种味道）\n3. 认知重构：识别并挑战灾难化思维，把担心的事写在纸上逐条分析\n4. 渐进式肌肉放松：坐在椅子上从头到脚依次紧张-放松各肌肉群"
-            },
-            {
-                "keywords": ["幻觉", "幻听", "幻视", "不真实感"],
-                "title": "幻觉应对策略",
-                "content": "针对幻觉体验的干预策略：\n1. 现实检验：引导来访者描述当前宿舍或活动室的环境，确认真实存在的事物\n2. 着陆技术：触摸身边的墙壁、桌面、床铺，感受温度和质地\n3. 分散注意力：与同宿舍的人交谈，或做简单的手工、抄写\n4. 安全环境：保持在有人陪伴的环境中，避免独处\n5. 医疗转介：如幻觉持续或加重，立即向值班医生报告"
-            },
-            {
-                "keywords": ["戒断", "难受", "痛苦", "想吸毒", "复吸"],
-                "title": "戒断症状应对",
-                "content": "针对戒断症状的应对策略：\n1. 接纳不适感：理解这是身体恢复的正常过程，戒断反应会随时间减轻\n2. 转移注意力：在活动室做俯卧撑、仰卧起坐，或进行手工制作、抄写\n3. 社会支持：与同宿舍的人交流，或找管教民警谈话\n4. 放松技巧：深呼吸、冥想、用冷水洗脸刺激感官\n5. 正念练习：观察而不评判当下的感受，关注呼吸\n6. 医疗支持：如症状严重，立即向值班医生或管教民警报告"
-            },
-            {
-                "keywords": ["抑郁", "情绪低落", "没意思", "不想活", "绝望", "心情不好", "不想动", "累"],
-                "title": "抑郁情绪干预",
-                "content": "针对抑郁情绪的干预策略：\n1. 行为激活：鼓励参与所内日常活动，哪怕只是整理内务、打扫卫生\n2. 正念练习：关注当下，不做评判，在宿舍里做呼吸练习\n3. 社会连接：与信任的同戒人员或管教民警交流\n4. 规律作息：严格按照所内作息时间保持睡眠和饮食规律\n5. 集体活动：在规定活动时间参加集体锻炼、学习和劳动"
-            },
-            {
-                "keywords": ["认知解离", "解离", "恍惚", "不真实"],
-                "title": "解离症状应对",
-                "content": "针对解离症状的干预策略：\n1. 着陆技术：用冷水洗手或洗脸，感受水的温度；或闻风油精、清凉油\n2. 身体活动：原地踏步、伸展运动、握紧拳头再松开\n3. 现实锚定：大声说出自己的名字、年龄、当前所在位置和今天的日期\n4. 安全空间：回到熟悉的宿舍，坐在自己的床铺上\n5. 创伤知情：理解解离可能是创伤反应，保持耐心，陪伴来访者"
-            },
-            {
-                "keywords": ["愤怒", "生气", "发脾气", "冲动"],
-                "title": "愤怒情绪管理",
-                "content": "针对愤怒情绪的干预策略：\n1. 暂停技术：感到愤怒时向管教民警申请冷静时间，暂时回到宿舍\n2. 深呼吸：坐在床铺上进行3轮深呼吸，每轮吸气4秒呼气6秒\n3. 认知重构：识别触发愤怒的想法，问自己：这件事一年后还重要吗\n4. 表达训练：用\"我感到...因为...\"的方式表达情绪，而不是动手或骂人\n5. 身体释放：握紧拳头再缓慢松开反复5次，或做俯卧撑、原地高抬腿释放能量\n6. 问题解决：找管教民警或心理咨询师分析愤怒背后的需求"
-            },
-            {
-                "keywords": ["家庭", "想家", "家人", "父母", "孩子"],
-                "title": "家庭关系支持",
-                "content": "针对家庭情感问题的支持策略：\n1. 情感确认：理解思乡之情是正常的，想念家人说明你重视亲情\n2. 联系支持：通过所内规定的亲情电话和家属会见日与家人保持联系\n3. 未来规划：讨论回归家庭后的计划，如何做一个更好的家人\n4. 关系修复：讨论如何用行动重建家庭信任，比如写信表达关心\n5. 所内支持：参加所内亲情帮教活动，在戒毒所内建立同伴支持网络"
-            },
-            {
-                "keywords": ["放松", "放松训练", "呼吸", "冥想", "肌肉放松"],
-                "title": "放松训练技术",
-                "content": "放松训练技术汇总（均可在宿舍或活动室进行）：\n1. 深呼吸训练：坐在椅子上或床铺上进行腹式呼吸，吸气时腹部隆起\n2. 渐进式肌肉放松：坐在椅子上依次紧张-放松各肌肉群，从脚趾到头顶\n3. 引导式冥想：闭眼想象安全、平静的场景（如家乡的田野、海边）\n4. 身体扫描：躺在床上从头到脚关注身体各部位的感觉\n5. 着陆呼吸：吸气时数到4，屏息数到4，呼气数到6，重复5轮"
-            },
-            {
-                "keywords": ["评估", "量表", "测试", "测量"],
-                "title": "心理评估工具",
-                "content": "常用心理评估工具：\n1. SAS（焦虑自评量表）：评估焦虑程度\n2. SDS（抑郁自评量表）：评估抑郁程度\n3. PSQI（匹兹堡睡眠质量指数）：评估睡眠质量\n4. SCL-90：综合心理健康评估\n5. 成瘾严重程度指数(ASI)：评估成瘾问题严重程度\n注意：量表评估需由所内专业心理咨询师操作，本系统仅提供科普信息"
-            },
+                "id": entry.get("id", f"entry_{i + 1}"),
+                "keywords": entry.get("keywords", []),
+                "title": entry.get("title", ""),
+                "content": entry.get("content", ""),
+            }
+            for i, entry in enumerate(data)
+            if isinstance(entry, dict) and "content" in entry
         ]
-
-        self._save_knowledge_base()
+        logger.info(f"RAG: seeded {len(self.knowledge_base)} entries from {canonical}")
 
     def _save_knowledge_base(self):
         """Save knowledge base to JSON file."""
@@ -503,6 +565,16 @@ class RAGService:
 
         return score
 
+    @staticmethod
+    def _entry_key(result: Dict) -> str:
+        """Stable identity of an injected entry, for session de-duplication.
+
+        Titles are unique in the curated file; the id is a fallback only,
+        because generated ids differ between loads.
+        """
+        title = str(result.get("title") or "").strip()
+        return title or str(result.get("id") or "")
+
     def _search_entries(self, entries: List[Dict], expanded_keywords: Set[str],
                         query_lower: str, min_score: float = 0.0) -> List[Dict]:
         """Search a list of entries and return scored results above min_score."""
@@ -535,7 +607,10 @@ class RAGService:
 
         # Production RAG searches only the entries loaded from knowledge.json.
         core_results = self._search_entries(
-            self.knowledge_base[:self._core_count], expanded_keywords, query_lower
+            self.knowledge_base[:self._core_count],
+            expanded_keywords,
+            query_lower,
+            min_score=self.MIN_SCORE,
         )
         result = core_results[:top_k]
         if len(self._search_cache) >= self._MAX_CACHE_SIZE:
@@ -559,26 +634,63 @@ class RAGService:
         # Debug trigger remains deterministic and uses only the curated core.
         if "知识库测试" in user_text:
             results = self._simple_search("失眠 焦虑 戒断", top_k=3)
-            logger.warning(f"[RagDebug] DEBUG trigger '知识库测试' results="
-                          f"{[{'title': r.get('title'), 'score': r.get('score')} for r in results]}")
+            logger.info(
+                "[RagDebug] debug_trigger=knowledge_test query_length=%d result_count=%d",
+                len(user_text),
+                len(results),
+            )
             if results:
                 return "\n\n".join(f"【{r['title']}】\n{r['content']}" for r in results)
             return None
 
         # ``enabled`` is supplied by TurnDecision.needs_rag.  Once it is true,
         # retrieval is deterministic; no keyword gate or second model may
-        # override the decision.
-        results = self._simple_search(user_text, top_k=3)
+        # override the decision.  The gate below is about *repetition*, not
+        # relevance: one entry per turn, and never the same entry twice in a
+        # session.
+        results = self._simple_search(user_text, top_k=self.SEARCH_POOL)
 
-        logger.warning(f"[RagDebug] query={user_text!r} results="
-                      f"{[{'title': r.get('title'), 'score': round(r.get('score', 0), 1)} for r in results]}")
+        logger.info(
+            "[RagDebug] query_hash=%s query_length=%d result_count=%d",
+            hashlib.sha256(user_text.encode("utf-8")).hexdigest()[:16],
+            len(user_text),
+            len(results),
+        )
 
         if not results:
             return None
 
+        unserved = [
+            result for result in results
+            if self._entry_key(result) not in self._served_entry_keys
+        ]
+        if not unserved:
+            logger.info(
+                "[RagDebug] skip=already_served matched=%d", len(results)
+            )
+            return None
+
+        selected = unserved[:self.MAX_ENTRIES_PER_TURN]
+        for result in selected:
+            self._served_entry_keys.add(self._entry_key(result))
+            logger.info(
+                "[RagDebug] served entry=%r score=%.1f",
+                self._entry_key(result),
+                float(result.get("score") or 0.0),
+            )
+
         context_parts = []
-        for i, result in enumerate(results, 1):
-            context_parts.append(f"【{result['title']}】\n{result['content']}")
+        for i, result in enumerate(selected, 1):
+            content = result.get("content", "")
+            if _is_procedure_entry(content):
+                # Keep the topic, drop the protocol: the writer must not read a
+                # numbered exercise list out loud.
+                context_parts.append(
+                    f"【{result['title']}】\n"
+                    "这个话题可以识别。不要逐条讲步骤，也不要在本轮主动提议做练习。"
+                )
+            else:
+                context_parts.append(f"【{result['title']}】\n{content}")
 
         context = "\n\n".join(context_parts)
         return context

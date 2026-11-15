@@ -5,8 +5,8 @@ workstation and attach raw evidence/artifact paths for each acceptance item.
 
 ## Checkout and host
 
-- [ ] Approved branch checked out
-- [ ] Approved commit verified
+- [ ] `pre-hardware-validation-ready-v2-20260817` checked out
+- [ ] `HEAD == f33acb57d2c1d5ece35aa946bc40206113a14d24`
 - [ ] Working tree clean
 - [ ] Windows edition/build recorded
 - [ ] Exact GPU identity recorded

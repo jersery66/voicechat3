@@ -442,12 +442,19 @@ class DeliveryLedger:
         data_manager: Any = None,
         *,
         sample_rate: int = 48000,
+        persist: bool = True,
     ) -> str:
         """Finalize delivered history and persistence exactly once.
 
         ``history_owner`` is expected to expose ``conversation_history`` and
         ``data_manager`` is expected to expose ``save_assistant_message``.
         Both are optional so the pure ledger remains usable in headless tests.
+
+        ``persist=False`` marks the generation as delivered (so the UI keeps
+        rendering it) but skips both the conversation history and the transcript
+        write.  Callers use it for UI-only utterances — the "session is ending"
+        banner is not dialogue content and must never overwrite a real reply or
+        pollute the transcript used for research.
         """
         with self._lock:
             record = self.controller.get_record(generation_id)
@@ -471,6 +478,12 @@ class DeliveryLedger:
 
             if not delivered:
                 return ""
+
+            if not persist:
+                # Visible-only utterance: keep the ledger finalised and let the
+                # caller render it, but leave history and on-disk transcript
+                # untouched.
+                return delivered
 
             history = getattr(history_owner, "conversation_history", None)
             if isinstance(history, list):

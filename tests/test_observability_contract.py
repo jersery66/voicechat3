@@ -14,7 +14,7 @@ from scripts.deployment.observability import (
 
 def test_structured_event_has_ids_timing_and_error_fields(tmp_path):
     path = tmp_path / "events.jsonl"
-    writer = StructuredEventWriter(path, profile="rtxpro6000_96g", git_commit="test-commit")
+    writer = StructuredEventWriter(path, runtime_config="config/runtime.yaml", git_commit="test-commit")
     assert writer.emit(
         "llm_first_sentence",
         component="dialogue",
@@ -27,7 +27,7 @@ def test_structured_event_has_ids_timing_and_error_fields(tmp_path):
         error_code=None,
     ) is True
     event = json.loads(path.read_text(encoding="utf-8").strip())
-    for key in ("schema_version", "timestamp_utc", "event_name", "component", "status", "session_id", "turn_id", "generation_id", "request_id", "profile", "git_commit", "duration_ms", "error_code"):
+    for key in ("schema_version", "timestamp_utc", "event_name", "component", "status", "session_id", "turn_id", "generation_id", "request_id", "runtime_config", "git_commit", "duration_ms", "error_code"):
         assert key in event
     assert event["generation_id"] == 3
     assert event["duration_ms"] == 12.5
@@ -68,7 +68,7 @@ def test_observability_rejects_unknown_error_codes(tmp_path):
 
 
 def test_initialise_artifacts_are_not_run_and_do_not_contain_participant_text(tmp_path):
-    paths = initialise_observability_artifacts(tmp_path, profile="rtxpro6000_96g", git_commit="test-commit")
+    paths = initialise_observability_artifacts(tmp_path, runtime_config="config/runtime.yaml", git_commit="test-commit")
     assert set(paths) == {"measurement_events", "memory_snapshots", "performance_summary", "observability_summary"}
     summary = json.loads(paths["performance_summary"].read_text(encoding="utf-8"))
     assert summary["status"] == "NOT RUN"

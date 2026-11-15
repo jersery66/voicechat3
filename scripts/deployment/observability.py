@@ -41,9 +41,9 @@ def _timestamp() -> str:
 class StructuredEventWriter:
     """Best-effort JSONL writer for identity/status/timing metadata only."""
 
-    def __init__(self, path: str | Path, *, profile: str | None = None, git_commit: str | None = None) -> None:
+    def __init__(self, path: str | Path, *, runtime_config: str | None = None, git_commit: str | None = None) -> None:
         self.path = Path(path)
-        self.profile = profile
+        self.runtime_config = runtime_config
         self.git_commit = git_commit
 
     def _event(
@@ -70,7 +70,7 @@ class StructuredEventWriter:
             "turn_id": turn_id,
             "generation_id": generation_id,
             "request_id": request_id,
-            "profile": self.profile,
+            "runtime_config": self.runtime_config,
             "git_commit": self.git_commit,
             "duration_ms": duration_ms,
             "error_code": error_code,
@@ -124,7 +124,7 @@ class StructuredEventWriter:
 def initialise_observability_artifacts(
     output_root: str | Path,
     *,
-    profile: str | None = None,
+    runtime_config: str | None = None,
     git_commit: str | None = None,
 ) -> dict[str, Path]:
     root = Path(output_root)
@@ -141,7 +141,7 @@ def initialise_observability_artifacts(
             {
                 "schema_version": 1,
                 "timestamp_utc": timestamp,
-                "profile": profile,
+                "runtime_config": runtime_config,
                 "git_commit": git_commit,
                 "status": "NOT RUN",
                 "evidence_type": EVIDENCE_NOT_AVAILABLE,
@@ -157,7 +157,7 @@ def initialise_observability_artifacts(
             {
                 "schema_version": 1,
                 "timestamp_utc": timestamp,
-                "profile": profile,
+                "runtime_config": runtime_config,
                 "git_commit": git_commit,
                 "status": "NOT RUN",
                 "evidence_type": EVIDENCE_NOT_AVAILABLE,

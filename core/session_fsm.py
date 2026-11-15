@@ -55,7 +55,10 @@ class SessionOrchestrator:
             SessionState.CHATTING,
             SessionState.SESSION_ENDING,
         },
-        SessionState.VIDEO_PLAYING: {SessionState.POST_RELAXATION},
+        # Core relaxation exits through POST_RELAXATION.  Catalog-owned
+        # leisure content returns directly to CHATTING after its active-media
+        # slot is released.
+        SessionState.VIDEO_PLAYING: {SessionState.POST_RELAXATION, SessionState.CHATTING},
         SessionState.POST_RELAXATION: {
             SessionState.CHATTING,
             SessionState.SESSION_ENDING,
@@ -73,6 +76,10 @@ class SessionOrchestrator:
         if new_state not in valid:
             logger.warning(f"Invalid transition: {self.ctx.state} -> {new_state}")
             return False
+        if self.ctx.state is SessionState.POST_RELAXATION and new_state is SessionState.CHATTING:
+            # Keep the completed core type available during POST_RELAXATION;
+            # clear it only once the user has explicitly resumed chatting.
+            self.ctx.current_relaxation_type = None
         self.ctx.state = new_state
         return True
 

@@ -44,7 +44,10 @@ class StatsService:
                 "subject_id": prog.get("subject_id", "unknown"),
                 "session_count": len(sessions),
                 "latest_emotion": latest.get("emotion_summary", {}).get("dominant", "--"),
-                "latest_emotion_trend": latest.get("emotion_summary", {}).get("trend", "--"),
+                "latest_emotion_observation": {
+                    "intensity": latest.get("emotion_summary", {}).get("avg_intensity", 0),
+                    "source": "MODEL_EMOTION_OBSERVATION",
+                },
                 "latest_intensity": latest.get("emotion_summary", {}).get("avg_intensity", 0),
                 "latest_scale_scores": latest.get("scale_scores", {}),
                 "last_session_date": latest.get("date", "--"),
@@ -54,13 +57,16 @@ class StatsService:
         return subjects
 
     def get_group_stats(self) -> Dict[str, Any]:
-        """Get aggregate group-level statistics."""
+        """Get descriptive session and structured-assessment statistics.
+
+        Scale changes are descriptive paired observations.  They are not
+        treatment efficacy, recovery, or improvement claims.
+        """
         all_progress = self._load_all_progress()
         total_sessions = 0
         total_duration = 0.0
         crisis_count = 0
         end_type_counts: Dict[str, int] = {}
-        improvement_count = 0
         subject_count = len(all_progress)
 
         for prog in all_progress:
@@ -74,19 +80,7 @@ class StatsService:
                     if "crisis" in event:
                         crisis_count += 1
 
-            # Check improvement: latest scale scores < first scale scores
-            if len(sessions) >= 2:
-                first_scales = sessions[0].get("scale_scores", {})
-                last_scales = sessions[-1].get("scale_scores", {})
-                improved = False
-                for scale_name in first_scales:
-                    if scale_name in last_scales:
-                        first_total = first_scales[scale_name].get("total", 0)
-                        last_total = last_scales[scale_name].get("total", 0)
-                        if last_total < first_total:
-                            improved = True
-                if improved:
-                    improvement_count += 1
+        scale_changes = self._build_scale_changes(all_progress)
 
         return {
             "total_subjects": subject_count,
@@ -95,9 +89,42 @@ class StatsService:
             "crisis_count": crisis_count,
             "crisis_rate": round(crisis_count / max(total_sessions, 1), 3),
             "end_type_distribution": end_type_counts,
-            "improvement_count": improvement_count,
-            "improvement_rate": round(improvement_count / max(subject_count, 1), 3),
+            "scale_changes": scale_changes,
         }
+
+    @staticmethod
+    def _build_scale_changes(all_progress: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Return paired descriptive changes for each structured scale."""
+        paired: Dict[str, List[tuple[float, float]]] = {}
+        for progress in all_progress:
+            first: Dict[str, float] = {}
+            last: Dict[str, float] = {}
+            for session in progress.get("sessions", []):
+                for name, data in (session.get("scale_scores", {}) or {}).items():
+                    total = data.get("total") if isinstance(data, dict) else None
+                    if not isinstance(total, (int, float)):
+                        continue
+                    first.setdefault(name, float(total))
+                    last[name] = float(total)
+            for name in first.keys() & last.keys():
+                if first[name] != last[name] or sum(
+                    1 for session in progress.get("sessions", []) if name in (session.get("scale_scores", {}) or {})
+                ) >= 2:
+                    paired.setdefault(name, []).append((first[name], last[name]))
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for name, values in paired.items():
+            deltas = [last - first for first, last in values]
+            result[name] = {
+                "paired_n": len(values),
+                "first_mean": round(sum(first for first, _ in values) / len(values), 3),
+                "last_mean": round(sum(last for _, last in values) / len(values), 3),
+                "mean_delta": round(sum(deltas) / len(deltas), 3),
+                "decreased_count": sum(delta < 0 for delta in deltas),
+                "unchanged_count": sum(delta == 0 for delta in deltas),
+                "increased_count": sum(delta > 0 for delta in deltas),
+            }
+        return result
 
     def get_scale_score_progressions(self) -> Dict[str, List[Dict]]:
         """Get scale score progressions across all subjects."""
@@ -152,7 +179,7 @@ class StatsService:
         cn_style = styles.get('Chinese', styles['Normal'])
         cn_title = styles.get('ChineseTitle', styles['Title'])
 
-        elements.append(Paragraph("治疗效果统计报告", cn_title))
+        elements.append(Paragraph("会话与评估趋势报告", cn_title))
         elements.append(Spacer(1, 12))
         elements.append(Paragraph(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}", cn_style))
         elements.append(Spacer(1, 20))
@@ -167,7 +194,7 @@ class StatsService:
             ["总会话数", str(group["total_sessions"])],
             ["平均时长(分钟)", str(group["avg_duration"])],
             ["危机事件数", str(group["crisis_count"])],
-            ["好转率", f"{group['improvement_rate']*100:.1f}%"],
+            ["量表配对变化", "见下方描述性统计"],
         ]
         t = Table(stats_data, colWidths=[6*cm, 6*cm])
         t.setStyle(TableStyle([
@@ -183,16 +210,15 @@ class StatsService:
         elements.append(Paragraph("二、被试明细", cn_style))
         elements.append(Spacer(1, 8))
         subject_stats = self.get_all_subject_stats()
-        subject_data = [["被试", "会话数", "最近情绪", "趋势", "最近会话"]]
+        subject_data = [["被试", "会话数", "最近模型观察", "最近会话"]]
         for s in subject_stats:
             subject_data.append([
                 s["subject_id"],
                 str(s["session_count"]),
-                s["latest_emotion"],
-                s["latest_emotion_trend"],
+                f"{s['latest_emotion']} / 强度 {s['latest_intensity']:.2f}",
                 s["last_session_date"],
             ])
-        t2 = Table(subject_data, colWidths=[3*cm, 2*cm, 3*cm, 3*cm, 3*cm])
+        t2 = Table(subject_data, colWidths=[4*cm, 2*cm, 6*cm, 4*cm])
         t2.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),

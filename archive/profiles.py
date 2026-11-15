@@ -1,0 +1,242 @@
+"""Runtime profiles are explicit; hardware detection never selects a model."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Mapping, Optional
+
+
+@dataclass(frozen=True)
+class DeploymentProfile:
+    """Pinned runtime contract for one supported machine class.
+
+    ``dialogue_model`` is the model that the profile can run today. The
+    participant-facing runtime has only dialogue and Agent endpoints.
+    """
+
+    name: str
+    expected_gpu_memory_gb: int
+    runtime_backend: str
+    dialogue_model: str
+    dialogue_base_url: str
+    router_model: str
+    agent_model: str
+    agent_base_url: str
+    enable_streaming_tts: bool
+    notes: str = ""
+    vllm_request_mode: str = "chat"
+    vllm_system_role_mode: str = "native"
+    dialogue_max_tokens: int = 1024
+    system_prompt_override: Optional[str] = None
+    dialogue_temperature: float = 0.35
+    dialogue_top_p: float = 0.8
+    dialogue_top_k: Optional[int] = None
+    dialogue_presence_penalty: Optional[float] = None
+    dialogue_enable_thinking: Optional[bool] = None
+    immutable_runtime_contract: bool = False
+    strict_preflight: bool = False
+
+
+@dataclass(frozen=True)
+class RuntimeModels:
+    """Resolved model names after deliberate operator overrides."""
+
+    dialogue: str
+    router: str
+
+
+_PROFILES = {
+    "dev_6g": DeploymentProfile(
+        name="dev_6g",
+        expected_gpu_memory_gb=6,
+        runtime_backend="ollama",
+        dialogue_model="qwen2.5:3b",
+        dialogue_base_url="http://localhost:11434",
+        router_model="qwen2.5:3b",
+        agent_model="qwen2.5:3b",
+        agent_base_url="http://localhost:11434/v1",
+        enable_streaming_tts=False,
+        immutable_runtime_contract=False,
+        strict_preflight=False,
+        notes="Local UI and smoke-test profile; it is not a production capacity target.",
+    ),
+    "dev_vllm_6g": DeploymentProfile(
+        name="dev_vllm_6g",
+        expected_gpu_memory_gb=6,
+        runtime_backend="vllm",
+        dialogue_model="gemma-2b-awq",
+        dialogue_base_url="http://127.0.0.1:18000/v1",
+        router_model="qwen2.5:3b",
+        agent_model="qwen2.5:3b",
+        agent_base_url="http://127.0.0.1:18001/v1",
+        enable_streaming_tts=False,
+        immutable_runtime_contract=False,
+        strict_preflight=False,
+        vllm_request_mode="completion",
+        dialogue_max_tokens=96,
+        system_prompt_override="Reply briefly and directly to the user.",
+        notes=(
+            "Local vLLM integration profile for the Gemma 2B AWQ smoke server. "
+            "It validates desktop-to-vLLM wiring and is not a production dialogue target."
+        ),
+    ),
+    "a100_80g": DeploymentProfile(
+        name="a100_80g",
+        expected_gpu_memory_gb=80,
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen2.5-72B-Instruct-AWQ",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+        notes=(
+            "Single A100 80GB profile. Qwen2.5 72B AWQ dialogue and a 3B "
+            "Agent run behind vLLM. The crisis/Guard path is detached from "
+            "production and retained under safety/ for later redesign."
+        ),
+    ),
+    "a100_80g_qwen38_candidate": DeploymentProfile(
+        name="a100_80g_qwen38_candidate",
+        expected_gpu_memory_gb=80,
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen3.8-27B-FP8",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+        dialogue_temperature=0.7,
+        dialogue_top_p=0.8,
+        dialogue_top_k=20,
+        dialogue_presence_penalty=1.5,
+        dialogue_enable_thinking=False,
+        notes=(
+            "Explicit opt-in A100 dialogue candidate for Qwen/Qwen3.8-27B-FP8. "
+            "Uses vLLM non-thinking chat requests; real memory, latency, and "
+            "dialogue quality remain unvalidated."
+        ),
+    ),
+    "rtxpro6000_96g": DeploymentProfile(
+        name="rtxpro6000_96g",
+        expected_gpu_memory_gb=96,
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen2.5-72B-Instruct-AWQ",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        vllm_request_mode="chat",
+        vllm_system_role_mode="native",
+        dialogue_max_tokens=1024,
+        notes=(
+            "Target Windows workstation profile for an assumed RTX PRO 6000 "
+            "Blackwell 96GB GPU. Qwen2.5-72B AWQ dialogue and Qwen2.5-3B "
+            "Agent are exposed through local vLLM endpoints. Hardware, WSL2 "
+            "runtime, memory budget, and latency remain unvalidated."
+        ),
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+    ),
+    "rtxpro6000_96g_qwen38_candidate": DeploymentProfile(
+        name="rtxpro6000_96g_qwen38_candidate",
+        expected_gpu_memory_gb=96,
+        runtime_backend="vllm",
+        dialogue_model="Qwen/Qwen3.8-27B-FP8",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_model="Qwen/Qwen2.5-3B-Instruct-AWQ",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        vllm_request_mode="chat",
+        vllm_system_role_mode="native",
+        dialogue_max_tokens=1024,
+        dialogue_temperature=0.7,
+        dialogue_top_p=0.8,
+        dialogue_top_k=20,
+        dialogue_presence_penalty=1.5,
+        dialogue_enable_thinking=False,
+        notes=(
+            "Explicit opt-in RTX PRO 6000 Blackwell 96GB dialogue candidate "
+            "using Qwen/Qwen3.8-27B-FP8 in non-thinking mode. Production "
+            "promotion, real VRAM, latency, and dialogue quality remain "
+            "unvalidated."
+        ),
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+    ),
+    "rtx5090_32g": DeploymentProfile(
+        name="rtx5090_32g",
+        expected_gpu_memory_gb=32,
+        runtime_backend="vllm",
+        dialogue_model="Qwen3.8-27B-Q4_K_S",
+        dialogue_base_url="http://127.0.0.1:8000/v1",
+        router_model="Qwen3-4B-Instruct-2507",
+        agent_model="Qwen3-4B-Instruct-2507",
+        agent_base_url="http://127.0.0.1:8001/v1",
+        enable_streaming_tts=True,
+        vllm_request_mode="chat",
+        vllm_system_role_mode="native",
+        dialogue_max_tokens=1024,
+        dialogue_enable_thinking=False,
+        immutable_runtime_contract=True,
+        strict_preflight=True,
+        notes=(
+            "Single RTX 5090 32GB workstation profile. Both language services "
+            "are served by llama.cpp llama-server under WSL2 with OpenAI-"
+            "compatible /v1 endpoints; the runtime_backend field stays 'vllm' "
+            "because the client contract, doctor checks, and acceptance probes "
+            "are shared with the vLLM profiles. Dialogue is Qwen3.8-27B "
+            "Q4_K_S GGUF (language stack only; the multimodal mmproj weights "
+            "are deliberately not loaded, 8192-token context, thinking mode "
+            "disabled via chat template kwargs). Agent is Qwen3-4B-Instruct-"
+            "2507 Q4_K_M GGUF, single concurrent slot, low temperature for "
+            "intent routing. The GPU is shared with the Windows-side FunASR "
+            "and VoxCPM2 services, leaving roughly 5GB of headroom. vLLM "
+            "0.31 cannot serve GGUF, which is why llama.cpp replaced it. "
+            "Hardware, WSL2 runtime, memory budget, and latency remain "
+            "unvalidated."
+        ),
+    ),
+}
+
+
+def get_deployment_profile(name: Optional[str] = None) -> DeploymentProfile:
+    """Return a supported profile, optionally selected by an environment variable."""
+    selected = (name or os.environ.get("VOICECHAT_DEPLOYMENT_PROFILE", "dev_6g")).strip().lower()
+    try:
+        return _PROFILES[selected]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_PROFILES))
+        raise ValueError(
+            f"Unknown deployment profile {selected!r}. Supported profiles: {supported}"
+        ) from exc
+
+
+def resolve_runtime_models(profile: DeploymentProfile,
+                            environment: Mapping[str, str] | None = None) -> RuntimeModels:
+    """Resolve only explicit overrides; live server inventory never selects a model."""
+    environment = os.environ if environment is None else environment
+    if profile.immutable_runtime_contract:
+        # Production uses the profile as an immutable deployment contract.
+        # Dev-shell overrides must not silently point the desktop client at a
+        # different model or re-enable an unbudgeted third vLLM service.
+        return RuntimeModels(
+            dialogue=profile.dialogue_model,
+            router=profile.router_model,
+        )
+    return RuntimeModels(
+        dialogue=(
+            environment.get("VOICECHAT_DIALOGUE_MODEL")
+            or environment.get("VOICECHAT_VLLM_MODEL")
+            or environment.get("OLLAMA_MODEL")
+            or profile.dialogue_model
+        ),
+        router=environment.get("AGENT_MODEL") or profile.router_model,
+    )

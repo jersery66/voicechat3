@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Tuple
 
+from core.scoring import primary_scale_from_scores
+
 
 SCALES: Dict[str, Dict[str, Any]] = {
     "PHQ-9": {
@@ -269,7 +271,8 @@ class ScaleManager:
                           user_text=None,
                           administered: set = None,
                           agent_service=None,
-                          conversation_context: str = "") -> Optional[str]:
+                          conversation_context: str = "",
+                          symptom_scores: dict = None) -> Optional[str]:
         """
         Determine if a scale should be administered based on session context.
         Returns scale name (e.g. "PHQ-9") or None.
@@ -339,9 +342,16 @@ class ScaleManager:
                 if "PHQ-9" not in administered:
                     return "PHQ-9"
 
-        # Force a scale by FORCE_SCALE_ROUND if none administered yet
+        # Force a scale by FORCE_SCALE_ROUND if none administered yet.
+        #
+        # The fallback used to be a hard-coded PHQ-9, which is the other half
+        # of why only one instrument ever appeared: even when the keyword pass
+        # above was about to pick GAD-7, a session that reached this round with
+        # an empty ``administered`` set produced PHQ-9.  It now follows the same
+        # evidence rule as the decision layer, with PHQ-9 only as the default
+        # when nothing at all has been said about any dimension.
         if rounds >= self.FORCE_SCALE_ROUND and not administered:
-            return "PHQ-9"
+            return primary_scale_from_scores(symptom_scores or {}) or "PHQ-9"
 
         return None
 

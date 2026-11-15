@@ -1,11 +1,11 @@
 """
 Agent Service — 独立路由模型意图分类 + 报告生成
 
-使用 OpenAI 兼容 API 调用由部署 profile 指定的语言模型服务。
-在 vLLM profile 下，路由模型是独立的 vLLM 实例，
-不会降级到 Ollama。
+使用 OpenAI 兼容 API 调用由运行配置（config/runtime.yaml）指定的语言模型
+服务。Agent 与主模型相互独立：可以各自配置 provider、地址与模型，
+例如主模型走 llama.cpp，Agent 走 vLLM 或 Ollama。
 
-Fallback 策略：3B 模型故障时自动降级到关键词分类 / 72B 报告生成。
+Fallback 策略：Agent 模型故障时自动降级到关键词分类 / 主模型报告生成。
 """
 
 import json
@@ -15,10 +15,12 @@ from typing import Optional, Dict, Any, Generator
 
 from openai import OpenAI
 
-from services.logger import get_logger
+from inference.openai_client import build_no_keepalive_http_client
+from services.logger import get_logger, text_meta
 from config import (
+    AGENT_ENABLED,
     AGENT_MODEL,
-    AGENT_BACKEND,
+    AGENT_PROVIDER,
     AGENT_MODEL_SERVER,
     AGENT_API_KEY,
     AGENT_INTENT_SYSTEM_MESSAGE,
@@ -31,7 +33,8 @@ from config import (
     EMOTION_SCENE_MAP,
     INTENT_SCENE_MAP,
 )
-from conversation.contracts import RouterProposal
+from conversation.agent_observation import AgentObservation
+from conversation.contracts import RouterAction, RouterProposal
 
 logger = get_logger(__name__)
 
@@ -42,7 +45,11 @@ _RELAXATION_KEYWORDS = [
 ]
 
 class AgentService:
-    """3B 模型 Agent 服务，负责意图分类和报告生成。"""
+    """Agent 模型服务，负责意图分类和报告生成。
+
+    模型、端点与 provider 由运行配置（config/runtime.yaml 的 agent 段）
+    指定，与主模型相互独立。
+    """
 
     # Re-check availability at most once per RECHECK_INTERVAL seconds
     RECHECK_INTERVAL = 60.0
@@ -53,18 +60,23 @@ class AgentService:
             api_key=AGENT_API_KEY,
             timeout=AGENT_TIMEOUT,
             max_retries=0,
+            http_client=build_no_keepalive_http_client(AGENT_TIMEOUT),
         )
         self.model = AGENT_MODEL
-        self.backend = AGENT_BACKEND
+        self.provider = AGENT_PROVIDER
         self._available: Optional[bool] = None
         self._last_check_ts: float = 0.0
 
     def is_available(self) -> bool:
-        """检测 3B 模型是否可达。
+        """检测 Agent 模型是否可达。
 
-        结果缓存 ``RECHECK_INTERVAL`` 秒；超期后会重新探测，避免临时故障
-        后永久在 fallback 模式运行。
+        运行配置禁用 Agent（``agent.enabled: false``）时直接返回 False，
+        不发起任何网络探测。结果缓存 ``RECHECK_INTERVAL`` 秒；超期后会
+        重新探测，避免临时故障后永久在 fallback 模式运行。
         """
+        if not AGENT_ENABLED:
+            self._available = False
+            return False
         now = time.time()
         if (
             self._available is not None
@@ -100,7 +112,7 @@ class AgentService:
         temperature: float = 0.1,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Call the 3B agent and parse a JSON response.
+        """Call the agent model and parse a JSON response.
 
         Centralizes the request boilerplate for the various JSON-mode calls
         (intent, RAG routing, relaxation and emotion). Raises on failure
@@ -125,7 +137,7 @@ class AgentService:
 
         logger.warning(
             f"[AgentRaw] model={self.model} finish_reason={finish_reason} "
-            f"content_len={len(content)} content_head={content[:300]!r}"
+            f"content_len={len(content)} {text_meta('content_head', content, limit=300)}"
         )
 
         if not content:
@@ -134,7 +146,10 @@ class AgentService:
         try:
             return json.loads(content)
         except Exception as e:
-            logger.warning(f"[AgentRaw] JSON parse failed: {e}; raw={content[:1000]!r}")
+            logger.warning(
+                f"[AgentRaw] JSON parse failed: {e}; "
+                f"{text_meta('raw', content, limit=1000)}"
+            )
             raise
 
     # ==================== Intent Classification ====================
@@ -147,7 +162,7 @@ class AgentService:
          "reason": "简短理由"}
 
         先用关键词快速判断，高置信度直接返回；
-        关键词不确定时才调用3B模型。
+        关键词不确定时才调用 Agent 模型。
         """
         keyword_result = self._keyword_classify(user_text)
         if keyword_result["confidence"] >= 0.85:
@@ -203,7 +218,7 @@ class AgentService:
     def generate_report(self, prompt: str, system_msg: str = None, timeout: float = None) -> str:
         """
         非流式报告生成。返回完整文本。
-        失败时抛出异常，由调用方 fallback 到 72B。
+        失败时抛出异常，由调用方 fallback 到主模型。
         """
         timeout = timeout or AGENT_REPORT_TIMEOUT
         system_msg = system_msg or AGENT_REPORT_SYSTEM_MESSAGE
@@ -222,7 +237,7 @@ class AgentService:
     def generate_report_stream(self, prompt: str, system_msg: str = None, timeout: float = None) -> Generator[str, None, None]:
         """
         流式报告生成。逐 chunk yield。
-        失败时抛出异常，由调用方 fallback 到 72B。
+        失败时抛出异常，由调用方 fallback 到主模型。
         """
         timeout = timeout or AGENT_REPORT_TIMEOUT
         system_msg = system_msg or AGENT_REPORT_SYSTEM_MESSAGE
@@ -267,20 +282,47 @@ class AgentService:
             return keyword_emotion
 
     def _keyword_detect_emotion(self, text: str) -> Dict[str, Any]:
-        """关键词快速情绪检测 fallback。"""
+        """关键词快速情绪检测 fallback。
+
+        Keywords are matched with a negation guard ("没有很好" must not read as
+        happy).  Bare single-character hedges are deliberately absent: "好" in
+        "也没有很好" previously matched the happy list at intensity 0.75, which
+        also skipped the model-based recheck (>= 0.7 short-circuits).
+        """
         text_lower = text.lower()
+        # Widened from the live transcript: "和室友关系不好", "心里不舒服",
+        # "一个人呆着胡思乱想" all came back neutral, so the writer had nothing
+        # to work with and fell back on generic empathy.  Somatic complaints
+        # (头疼, 睡不着) are deliberately absent -- they belong to the scale
+        # track, and mislabelling them as anxiety would steer the reply wrong.
         emotion_keywords = {
-            "sad": ["难过", "伤心", "悲伤", "痛苦", "想哭", "委屈", "失落", "绝望"],
-            "anxious": ["焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁"],
-            "angry": ["生气", "愤怒", "烦", "恼火", "气愤", "不公平", "受够了"],
-            "depressed": ["抑郁", "低落", "没意思", "无聊", "空虚", "绝望", "崩溃"],
-            "happy": ["开心", "高兴", "快乐", "好", "不错", "满意", "感谢"],
-            "lonely": ["孤独", "寂寞", "没人", "一个人", "无助", "没有朋友"],
+            "sad": [
+                "难过", "伤心", "悲伤", "痛苦", "想哭", "委屈", "失落", "绝望",
+                "难受", "心里堵", "堵得慌", "不太好", "不是滋味", "心里不踏实",
+                "不舒服", "关系不好", "闹矛盾", "吵架", "处不来", "熬不住",
+                "扛不住", "憋", "闷得慌",
+            ],
+            "anxious": [
+                "焦虑", "紧张", "害怕", "恐惧", "担心", "不安", "心慌", "烦躁",
+                "胡思乱想", "瞎想", "静不下来", "放心不下", "睡不着觉",
+            ],
+            "angry": ["生气", "愤怒", "恼火", "气愤", "不公平", "受够了", "受不了", "憋屈"],
+            "depressed": [
+                "抑郁", "低落", "没意思", "无聊", "空虚", "崩溃", "提不起劲",
+                "没劲", "什么都不想干", "不想说话", "不想动", "活着没意思", "没盼头",
+            ],
+            "happy": ["开心", "高兴", "快乐", "满意", "欣慰", "轻松多了", "好多了", "有希望"],
+            "lonely": ["孤独", "寂寞", "没人", "一个人", "无助", "没有朋友", "没人理解", "没人说话"],
         }
+        negations = ("不", "没", "无", "未", "没有", "毫无", "并不", "从不", "从未")
         for emotion, keywords in emotion_keywords.items():
             for kw in keywords:
-                if kw in text_lower:
-                    return {"emotion": emotion, "intensity": 0.75, "keywords": [kw]}
+                start = text_lower.find(kw)
+                while start != -1:
+                    prefix = text_lower[max(0, start - 3):start]
+                    if not any(prefix.endswith(neg) for neg in negations):
+                        return {"emotion": emotion, "intensity": 0.75, "keywords": [kw]}
+                    start = text_lower.find(kw, start + 1)
         return {"emotion": "neutral", "intensity": 0.0, "keywords": []}
 
     # ==================== Conversation Summary ====================
@@ -489,7 +531,10 @@ class AgentService:
         if m:
             return json.loads(m.group(0))
 
-        raise ValueError(f"No JSON object found in route output: {text[:500]!r}")
+        raise ValueError(
+            "No JSON object found in route output; "
+            f"{text_meta('output', text, limit=500)}"
+        )
 
     def route_conversation_actions(
         self,
@@ -505,7 +550,7 @@ class AgentService:
 
         Uses direct API call WITHOUT response_format=json_object. We
         deliberately avoid json_object mode here so the routing model remains
-        compatible with every profile-selected OpenAI-compatible server. The loose JSON parser
+        compatible with every configured OpenAI-compatible server. The loose JSON parser
         (`_parse_json_loose`) handles undecorated JSON output robustly.
         """
         # Build context for the agent
@@ -532,7 +577,8 @@ class AgentService:
 {
   "action": "chat|start_scale|recommend_relaxation|recommend_game|end_session",
   "scale_name": null 或 "PHQ-9" 或 "GAD-7" 或 "PCL-5",
-  "intervention_type": null 或 "breathing" 或 "muscle_relaxation" 或 "mindfulness" 或 "game" 或 "media",
+  "intervention_type": null,
+  "intent": "counseling|entertainment|chitchat|relaxation",
   "emotion": "neutral|calm|sad|anxious|angry|fearful",
   "intensity": 0.0-1.0,
   "needs_rag": true 或 false,
@@ -547,8 +593,10 @@ class AgentService:
 - 达到系统当前最低轮次门槛且症状持续，或症状明确影响功能时：action="start_scale"
 - 单次轻微信号（如"还好""不太开心"）不触发量表，继续观察
 - 当前已有量表时不要切换量表，由系统根据状态继续当前题目
-- 用户焦虑/紧张/失眠/疲惫且量表已部分完成：action="recommend_relaxation"
+- 用户焦虑/紧张/失眠/疲惫且量表已部分完成：action="recommend_relaxation"，intervention_type=null
+- recommend_relaxation 只表示提供一次放松机会，不要选择呼吸、肌肉、冥想或其他具体内容；具体选择由用户在 Relaxation Center 内完成
 - 用户明确提出想玩游戏时：action="recommend_game"；仅说无聊/没意思时保持 action="chat"
+- recommend_game 只表示打开游戏选择页，不要指定具体游戏
 - 用户明确想退出时：action="end_session"
 
 症状→量表映射：
@@ -571,7 +619,7 @@ class AgentService:
 
         timeout = timeout or AGENT_TIMEOUT
         try:
-            # Direct call without response_format for Ollama compatibility
+            # Direct call without response_format for broader server compatibility
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -588,7 +636,7 @@ class AgentService:
 
             logger.warning(
                 f"[AgentRouteRaw] finish_reason={finish_reason} "
-                f"len={len(content)} head={content[:500]!r}"
+                f"len={len(content)} {text_meta('head', content, limit=500)}"
             )
 
             if not content:
@@ -610,16 +658,11 @@ class AgentService:
                 scale_action = raw_action
 
             # Build normalized result — derive booleans from action field
-            intervention = result.get("intervention_type")
-            if raw_action == "recommend_relaxation":
-                intervention = {
-                    "mindfulness": "meditation",
-                    "meditation": "meditation",
-                    "muscle": "muscle",
-                    "muscle_relaxation": "muscle",
-                    "progressive_muscle_relaxation": "muscle",
-                    "breathing": "breathing",
-                }.get(str(intervention or "").strip().lower(), "breathing")
+            # Content selection belongs to deterministic TurnSignals and the
+            # user-facing Center.  The Agent may observe an opportunity, but
+            # it cannot turn a proactive recommendation into breathing,
+            # muscle, meditation, or a specific game.
+            intervention = None
             normalized = {
                 "action": raw_action,
                 "scale_action": scale_action,
@@ -632,12 +675,14 @@ class AgentService:
                 "game_type": intervention if raw_action == "recommend_game" else None,
                 "recommend_media": raw_action == "recommend_media",
                 "media_type": intervention if raw_action == "recommend_media" else None,
+                "intent": result.get("intent", "counseling"),
                 "exit_intent": raw_action == "exit",
                 "confidence": result.get("confidence", 0.0),
                 "emotion": result.get("emotion", "neutral"),
                 "intensity": result.get("intensity", 0.0),
                 "needs_rag": result.get("needs_rag", raw_action == "chat"),
                 "reason": result.get("reason", ""),
+                "fallback_used": False,
             }
             return normalized
         except Exception as e:
@@ -651,6 +696,7 @@ class AgentService:
                 "relaxation_type": None,
                 "confidence": 0.0,
                 "reason": f"agent fallback: {e}",
+                "fallback_used": True,
             }
 
     def route_proposal(self, **kwargs) -> RouterProposal:
@@ -662,6 +708,58 @@ class AgentService:
         """
         legacy = self.route_conversation_actions(**kwargs)
         return RouterProposal.from_legacy_route(legacy)
+
+    def _deterministic_observation_fallback(
+        self,
+        user_text: str,
+        *,
+        reason: str = "agent_observation_fallback",
+    ) -> AgentObservation:
+        """Project the same local observations for every route failure path.
+
+        This helper is deliberately limited to the existing keyword
+        observers.  It never retries the model and the resulting proposal is
+        still a non-executable CHAT observation for TurnPolicy.
+        """
+        keyword_intent = self._keyword_classify(user_text)
+        keyword_emotion = self._keyword_detect_emotion(user_text)
+        intent = str(keyword_intent.get("intent", "counseling") or "counseling")
+        emotion = str(keyword_emotion.get("emotion", "neutral") or "neutral")
+        try:
+            intensity = float(keyword_emotion.get("intensity", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            intensity = 0.0
+        intensity = max(0.0, min(1.0, intensity))
+        return AgentObservation(
+            proposal=RouterProposal(
+                action=RouterAction.CHAT,
+                emotion=emotion,
+                intensity=intensity,
+                confidence=0.0,
+                reason=reason,
+                needs_rag=False,
+            ),
+            intent=intent,
+            fallback_used=True,
+            source="deterministic_fallback",
+        )
+
+    def observe_turn(self, **kwargs) -> AgentObservation:
+        """Perform one structured ordinary-turn request and project observations."""
+        legacy = self.route_conversation_actions(**kwargs)
+        if bool(legacy.get("fallback_used")):
+            user_text = str(kwargs.get("user_text", ""))
+            return self._deterministic_observation_fallback(user_text)
+        proposal = RouterProposal.from_legacy_route(legacy)
+        intent = str(legacy.get("intent", "counseling") or "counseling")
+        if intent not in {"counseling", "entertainment", "chitchat", "relaxation"}:
+            intent = "counseling"
+        return AgentObservation(
+            proposal=proposal,
+            intent=intent,
+            fallback_used=False,
+            source="agent",
+        )
 
     def validate_route_json(self) -> bool:
         """Test if agent can produce valid route JSON."""
@@ -689,8 +787,16 @@ class AgentService:
 _agent_service = None
 
 
-def get_agent_service() -> AgentService:
+def get_agent_service() -> Optional[AgentService]:
+    """Return the shared agent service singleton.
+
+    Returns ``None`` when the runtime configuration disables the agent
+    (``agent.enabled: false``); callers already treat a missing agent as
+    "fall back to the dialogue model / keyword routing".
+    """
     global _agent_service
+    if not AGENT_ENABLED:
+        return None
     if _agent_service is None:
         _agent_service = AgentService()
     return _agent_service

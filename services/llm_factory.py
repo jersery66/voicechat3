@@ -1,24 +1,54 @@
-"""Build the compatibility LLM service selected by the deployment profile."""
+"""Build the compatibility LLM service selected by the runtime configuration."""
 
 from __future__ import annotations
 
-import os
 from typing import Generator, Optional
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-from inference.vllm_client import VLLMOpenAIClient
+from deployment.runtime_config import (
+    PROVIDER_OPENAI_COMPATIBLE,
+    RuntimeConfig,
+    get_runtime_config,
+)
+from inference.factory import build_dialogue_client
+from inference.openai_client import OpenAICompatibleClient
 
 
-class VLLMCompatibleLLMService:
-    """Preserves the legacy LLMService surface over the vLLM HTTP backend.
+class _ChatStreamHandle:
+    """Iterable stream handle carrying ``rollback_user_entry`` for the owner.
 
-    This lets the current report, UI, and pipeline code move to vLLM without
-    changing their conversation-history semantics in the same release.
+    Wraps the response generator with the minimal iterator/closing surface
+    used by callers (``for chunk in ...``, ``list(...)``, ``close()``) plus
+    the targeted history rollback exposed to the deferred-delivery owner.
+    """
+
+    def __init__(self, generator, rollback_user_entry) -> None:
+        self._generator = generator
+        self.rollback_user_entry = rollback_user_entry
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._generator)
+
+    def close(self):
+        return self._generator.close()
+
+    def throw(self, *args):
+        return self._generator.throw(*args)
+
+
+class OpenAICompatibleLLMService:
+    """Preserves the legacy LLMService surface over an OpenAI-compatible backend.
+
+    This lets the current report, UI, and pipeline code talk to any
+    OpenAI-compatible model server (llama.cpp, vLLM, ...) without changing
+    their conversation-history semantics.
     """
 
     MAX_HISTORY_TURNS = 20
 
-    def __init__(self, backend: VLLMOpenAIClient, *, model: str,
+    def __init__(self, backend: OpenAICompatibleClient, *, model: str,
                  system_prompt: Optional[str] = None) -> None:
         from config import SYSTEM_PROMPT
 
@@ -66,13 +96,63 @@ class VLLMCompatibleLLMService:
                 if self.conversation_history[index] is user_entry:
                     self.conversation_history.pop(index)
                     return
+
+        generator = self._stream_chat_response(
+            system_suffix,
+            commit_history,
+            _rollback_user_entry,
+        )
+        # Deferred-delivery owners (pipeline + delivery ledger) decide the
+        # final history policy for cancelled generations.  Expose the targeted
+        # rollback on a stream handle so a superseded request can drop its
+        # pending user turn instead of leaving an orphan user message in the
+        # context.  (Generators reject attribute assignment, hence the handle.)
+        return _ChatStreamHandle(generator, _rollback_user_entry)
+
+    def _stream_chat_response(
+        self,
+        system_suffix: Optional[str],
+        commit_history: bool,
+        _rollback_user_entry,
+    ) -> Generator[str, None, None]:
+        """Stream one provider response and apply the history commit policy.
+
+        History states after this generator finishes:
+
+        - delivered complete: user entry + full assistant reply committed;
+        - cancelled/failed with a partial response under ``commit_history``:
+          user entry + partial assistant reply committed;
+        - cancelled via ``GeneratorExit`` under ``commit_history``: nothing was
+          surfaced by this generator yet, so the pending user entry is rolled
+          back (no orphan user message);
+        - deferred mode (``commit_history=False``): the user entry stays until
+          the delivery ledger finalizes; the ledger owner calls
+          ``rollback_user_entry`` when nothing reached the participant.
+        """
         full_response = ""
         messages = [{"role": "system", "content": self._system_context(system_suffix)}]
         messages.extend(self.conversation_history)
+        assistant_committed = False
         try:
-            for chunk in self.backend.stream_messages(messages=messages):
-                full_response += chunk
-                yield chunk
+            stream = self.backend.stream_messages(messages=messages)
+            try:
+                for chunk in stream:
+                    full_response += chunk
+                    yield chunk
+            finally:
+                # Deterministically release the provider stream (HTTP response,
+                # decoder) when the consumer abandons this generator.
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
+        except GeneratorExit:
+            # The consumer closed the stream (cancellation).  In deferred
+            # delivery mode the ledger owns the decision and may still commit
+            # an already-delivered prefix, so only the self-committing mode
+            # rolls back here.
+            if commit_history and not assistant_committed:
+                _rollback_user_entry()
+            raise
         except Exception:
             if not full_response and commit_history:
                 _rollback_user_entry()
@@ -92,6 +172,7 @@ class VLLMCompatibleLLMService:
                 "role": "assistant",
                 "content": self._history_visible_text(full_response),
             })
+            assistant_committed = True
             self._maybe_summarize()
 
     @staticmethod
@@ -101,12 +182,13 @@ class VLLMCompatibleLLMService:
         return LLMService._history_visible_text(text)
 
     def _maybe_summarize(self) -> None:
-        """Keep vLLM requests below a bounded recent-turn context window.
+        """Keep model-server requests below a bounded recent-turn context window.
 
         The previous Ollama-specific summarizer is intentionally not reused:
         it would introduce a hidden second model dependency.  Retaining only
-        complete recent dialogue turns gives the A100 profile a deterministic
-        bound that works when every language model is served by vLLM.
+        complete recent dialogue turns gives the runtime configuration a
+        deterministic bound that works when the dialogue service is any
+        OpenAI-compatible server.
         """
         max_messages = self.MAX_HISTORY_TURNS * 2
         if len(self.conversation_history) > max_messages:
@@ -143,33 +225,21 @@ class VLLMCompatibleLLMService:
             return False
 
 
-def build_llm_service(*, profile_name: str | None = None):
-    """Return Ollama LLMService for development or vLLM compatibility service."""
-    profile = get_deployment_profile(profile_name)
-    models = resolve_runtime_models(profile)
-    if profile.runtime_backend == "vllm":
-        backend = VLLMOpenAIClient(
-            model=models.dialogue,
-            base_url=(
-                profile.dialogue_base_url
-                if profile.immutable_runtime_contract
-                else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", profile.dialogue_base_url)
-            ),
-            request_mode=profile.vllm_request_mode,
-            system_role_mode=profile.vllm_system_role_mode,
-            max_tokens=profile.dialogue_max_tokens,
-            dialogue_temperature=profile.dialogue_temperature,
-            dialogue_top_p=profile.dialogue_top_p,
-            dialogue_top_k=profile.dialogue_top_k,
-            dialogue_presence_penalty=profile.dialogue_presence_penalty,
-            dialogue_enable_thinking=profile.dialogue_enable_thinking,
-        )
-        return VLLMCompatibleLLMService(
-            backend,
-            model=models.dialogue,
-            system_prompt=profile.system_prompt_override,
-        )
+def build_llm_service(config: Optional[RuntimeConfig] = None):
+    """Return the dialogue service for the configured provider.
 
-    from services.llm_service import LLMService
+    OpenAI-compatible providers (llama.cpp, vLLM, ...) are served through
+    the compatibility service; the Ollama provider keeps its native
+    ``LLMService`` path.
+    """
+    config = config if config is not None else get_runtime_config()
+    if config.dialogue.provider != PROVIDER_OPENAI_COMPATIBLE:
+        from services.llm_service import LLMService
 
-    return LLMService(model=models.dialogue, host=profile.dialogue_base_url)
+        return LLMService(model=config.dialogue.model, host=config.dialogue.base_url)
+    backend = build_dialogue_client(config)
+    return OpenAICompatibleLLMService(
+        backend,
+        model=config.dialogue.model,
+        system_prompt=config.dialogue.system_prompt_override,
+    )

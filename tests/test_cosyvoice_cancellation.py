@@ -305,8 +305,16 @@ def test_cosy12_cleanup_is_safe_when_called_twice(tmp_path):
     service.cleanup()
 
 
-def test_cosy13_cosyvoice_is_not_production_selector():
-    source = (cosyvoice_module.__file__ or "")
-    selector = open(source.rsplit("services", 1)[0] + "services/tts_service.py", encoding="utf-8").read()
-    assert "services.tts_service_voxcpm" in selector
-    assert "tts_service_cosyvoice" not in selector
+def test_cosy13_cosyvoice_is_selectable_by_configuration():
+    """CosyVoice is reachable through the config-driven TTS selector.
+
+    Replaces the former "CosyVoice is not the production selector" source
+    contract: the selector now maps tts.provider to either implementation,
+    and CosyVoice is one configuration value away.
+    """
+    import services.tts_service as selector
+
+    assert selector.build_tts_service("cosyvoice").__class__.__module__ == "services.tts_service_cosyvoice"
+    selector_path = (cosyvoice_module.__file__ or "").rsplit("services", 1)[0] + "services/tts_service.py"
+    selector_source = open(selector_path, encoding="utf-8").read()
+    assert "tts_service_cosyvoice" in selector_source

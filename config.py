@@ -6,8 +6,11 @@ import fnmatch as _fnmatch
 # Application root (this file's directory)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Parent directory (for sibling model folders)
-PROGRAM_ROOT = os.path.dirname(os.path.dirname(APP_ROOT))
+# Parent directory (for sibling model folders).
+# The bundle layout is <bundle>/app plus <bundle>/models, so the parent of the
+# application directory is the bundle; a plain checkout is treated the same way
+# (e.g. <root>/voicechat3 plus <root>/models).
+PROGRAM_ROOT = os.path.dirname(APP_ROOT)
 
 # _BASE_DIR alias for backward compatibility
 _BASE_DIR = PROGRAM_ROOT
@@ -245,8 +248,9 @@ def _detect_ollama_model():
         if not names:
             return None
         # This inventory is reported by print_model_status() only. Runtime
-        # model selection comes from deployment.profiles and explicit operator
-        # environment overrides, never from whatever happens to be installed.
+        # model selection comes from the runtime configuration and explicit
+        # operator environment overrides, never from whatever happens to be
+        # installed.
         for exact in ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:8b", "qwen2.5:14b", "qwen2.5:72b"]:
             for n in names:
                 if exact.lower() in n.lower():
@@ -290,21 +294,75 @@ except Exception:
     _OLLAMA_DETECTED = None
 
 
-# ============== Paths (auto-detected with fallbacks) ==============
-# FunASR STT Model
-FUNASR_MODEL_PATH = _FUNASR_DETECTED or os.path.join(
-    OFFLINE_MODELS_ROOT, "funasr", "Fun-ASR-Nano-2512")
+# ============== Runtime Configuration ==============
+# Runtime selection is config-driven.  deployment/runtime_config.py loads one
+# YAML file (default config/runtime.yaml, override the path with the
+# VOICECHAT_RUNTIME_CONFIG environment variable) that names every model,
+# engine, endpoint, and generation parameter.  The application never inspects
+# the GPU to choose a model: switching hardware, the dialogue model, the
+# Agent, or the inference engine (llama.cpp / vLLM / Ollama) is a config
+# edit, not a code change.  Guard/crisis controls are intentionally not
+# exported here.
+from deployment.runtime_config import get_runtime_config
 
-# CosyVoice3 Model (legacy, kept for backward compat)
+_RUNTIME_CONFIG = get_runtime_config()
+RUNTIME_CONFIG = _RUNTIME_CONFIG
+
+# --- Dialogue (main model) ---
+DIALOGUE_PROVIDER = _RUNTIME_CONFIG.dialogue.provider
+DIALOGUE_BASE_URL = _RUNTIME_CONFIG.dialogue.base_url
+DIALOGUE_MODEL = _RUNTIME_CONFIG.dialogue.model
+
+# --- Agent (routing model, configured independently of the dialogue model) ---
+AGENT_ENABLED = _RUNTIME_CONFIG.agent.enabled
+AGENT_PROVIDER = _RUNTIME_CONFIG.agent.provider
+AGENT_MODEL = _RUNTIME_CONFIG.agent.model
+AGENT_MODEL_SERVER = _RUNTIME_CONFIG.agent.base_url
+AGENT_API_KEY = _RUNTIME_CONFIG.agent.api_key
+
+# --- Speech engines ---
+ASR_PROVIDER = _RUNTIME_CONFIG.asr.provider
+TTS_PROVIDER = _RUNTIME_CONFIG.tts.provider
+
+# --- Runtime policy ---
+RUNTIME_STRICT_PREFLIGHT = _RUNTIME_CONFIG.runtime.strict_preflight
+RUNTIME_IMMUTABLE_CONTRACT = _RUNTIME_CONFIG.runtime.immutable_contract
+MANAGE_MODEL_SERVERS = _RUNTIME_CONFIG.runtime.manage_model_servers
+ENABLE_STREAMING_TTS = _RUNTIME_CONFIG.runtime.enable_streaming_tts
+
+
+def _resolve_runtime_model_path(raw):
+    """Resolve a configured model path: absolute as-is, else models-root relative."""
+    if not raw:
+        return None
+    if os.path.isabs(raw):
+        return raw
+    return os.path.join(OFFLINE_MODELS_ROOT, raw)
+
+
+# ============== Paths (runtime config overrides auto-detection) ==============
+# FunASR STT Model
+FUNASR_MODEL_PATH = (
+    _resolve_runtime_model_path(_RUNTIME_CONFIG.asr.model_path)
+    or _FUNASR_DETECTED
+    or os.path.join(OFFLINE_MODELS_ROOT, "funasr", "Fun-ASR-Nano-2512")
+)
+
+# CosyVoice3 Model (alternative TTS engine, selected by runtime config)
 COSYVOICE_BASE_DIR = _COSYVOICE_BASE_DETECTED or os.path.join(OFFLINE_MODELS_ROOT, "CosyVoice")
 COSYVOICE_MODEL_PATH = _COSYVOICE_MODEL_DETECTED or os.path.join(
     COSYVOICE_BASE_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B")
 
 # VoxCPM2 Model (current TTS backend)
-VOXCPM_MODEL_PATH = _VOXCPM_DETECTED
+VOXCPM_MODEL_PATH = (
+    _resolve_runtime_model_path(_RUNTIME_CONFIG.tts.model_path) or _VOXCPM_DETECTED
+)
 
 # Voice prompt audio for TTS voice cloning
-VOICE_PROMPT_PATH = _VOICE_PROMPT_DETECTED
+VOICE_PROMPT_PATH = (
+    _resolve_runtime_model_path(_RUNTIME_CONFIG.tts.voice_prompt_path)
+    or _VOICE_PROMPT_DETECTED
+)
 
 # Voice prompt transcript text (auto-detected from S1.txt)
 VOICE_PROMPT_TEXT = _VOICE_PROMPT_TEXT_DETECTED
@@ -315,29 +373,6 @@ DATA_ROOT = os.environ.get(
     "VOICECHAT_DATA_DIR",
     r"D:\program\voice_chat_data",
 )
-
-# ============== Deployment Profile / Ollama ==============
-# The profile is an explicit deployment decision, never an automatic hardware
-# guess.  A100 production stays pinned to the user's verified Qwen2.5 72B
-# dialogue baseline; local 6GB machines default to the light development model.
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
-
-_DEPLOYMENT_PROFILE = get_deployment_profile()
-_RUNTIME_MODELS = resolve_runtime_models(_DEPLOYMENT_PROFILE)
-# Public compatibility aliases for callers that still inspect the selected
-# deployment.  Guard/crisis controls are intentionally not exported here.
-DEPLOYMENT_PROFILE = _DEPLOYMENT_PROFILE
-RUNTIME_MODELS = _RUNTIME_MODELS
-# Dialogue transport is profile-owned. ``OLLAMA_MODEL`` is retained as the
-# existing application-wide model-name variable for compatibility; under the
-# A100 profile it names the vLLM-served model rather than an Ollama tag.
-DIALOGUE_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
-DIALOGUE_BASE_URL = (
-    _DEPLOYMENT_PROFILE.dialogue_base_url
-    if _DEPLOYMENT_PROFILE.immutable_runtime_contract
-    else os.environ.get("VOICECHAT_DIALOGUE_BASE_URL", _DEPLOYMENT_PROFILE.dialogue_base_url)
-)
-OLLAMA_MODEL = _RUNTIME_MODELS.dialogue
 
 
 def print_model_status():
@@ -355,7 +390,7 @@ def print_model_status():
     _status(COSYVOICE_MODEL_PATH, "CosyVoice3 (legacy)")
     _status(VOXCPM_MODEL_PATH, "VoxCPM2")
     _status(VOICE_PROMPT_PATH, "Voice Prompt")
-    print(f"  [{'OK' if _OLLAMA_DETECTED else 'FALLBACK'}] Ollama Model: {OLLAMA_MODEL}")
+    print(f"  [{'OK' if _OLLAMA_DETECTED else 'FALLBACK'}] Ollama Model: {DIALOGUE_MODEL}")
     print("=" * 50)
 
 # Phase 6 live prompt: TurnPolicy has already selected the expression task.
@@ -373,12 +408,31 @@ SYSTEM_PROMPT = """
 
 【回应方式】
 - 优先回应来访者本轮真正说到的内容，不机械套用固定共情句。
-- 对明显情绪、压力或重要经历，可以先用一句具体、简短的话承接。
+- 回应从他说的事本身进入。不需要先“承接”一句再讲正事；要接，就接那件事的具体内容，不接对他的评价。
 - 普通闲聊、事实陈述或直接问题，不强行加入共情。
+- 不要为了凑结构而拼出“承接一句 + 提问一句”。只回应不提问、直接顺着说、只问不承接，都是允许的。
+- 咨询式聊天轮不能只回应不引导：多数轮次需要把话题往前带一步，但落点必须来自来访者这一轮说的话，接着他提到的那个具体细节往下问。不要套用固定问题清单，也不要问和刚才内容无关的例行问题。
+- 引导方向跟随来访者刚提到的话题，不自说自话；来访者明显不想展开时不追问，可用一句陪伴的话收尾，下一轮再尝试。
+- 承接的表达方式要多样，不要每轮都用同一个开头词（如连续几轮都用“嗯”）。
+- 第一句不要复述他刚说过的话。要落在具体的东西上：他没说到的那个时间、场景、动作、身体感受，用它把话往前推。
+- 不要把他的原话重说一遍、再补一句评价（形如“……，确实挺×的”“……，真的很×”）。复述和评价都去掉，直接问，或直接接一句。
+- 开头方式要和上一轮错开：上一轮先问，这轮就直接接住内容说一句；上一轮先接，这轮就直接问。同一段对话里同一个句式不要连着出现两次。
+- 一段话说完，不要用空行分段。
+- 允许更口语的短回应（“嗯”“这样啊”“我在听”），也允许顺着对方的话直接往下说一句，不必每轮都用“承接+提问”的同一个模子。
+- 引用来访者自己说过的词，不要把它们概括成“低落感”“消磨”“隐隐的”这类书面心理学措辞。
+- 同一话题最多连续追问两轮；聊到第三轮还没有新内容时，先简短小结，再换一个方向。
+- 来访者连续两次只回“嗯”“哦”“好的”“还行”这类极短的话，说明这个话题已经聊完：停止追问，
+  主动换一个新方向（吃饭、身体、和人相处、平时怎么打发时间、家里的事、出去后的打算），
+  并给出来访者容易接话的具体选项。
+- 不重复上一轮说过的话或同样的结尾；意识到自己又要说一样的内容时，换角度或直接换话题。
 - 通常一至三句；每轮最多一个主要问题。
+- 像面对面聊天那样你来我往，不独白、不连续说教；一句一个意思，说到位就停。
+- 来访者直接向你提问且你已回答时，不追加反问，把话头交回给来访者。
+- 不说让对话显得已经结束的话（例如“那就先这样吧”“今天先聊到这”），除非来访者明确表示想结束；宁可留一个开放的话头。
 - 能用反映或澄清继续时，不急着给建议。
 - 除非来访者明确询问建议，否则给建议前先确认是否愿意听一个简单做法。
 - 面对抗拒、沉默或否定，不争辩、不教育、不连续劝说。
+- 量表读题、任务表达等系统指定的任务轮不额外加引导问题，只完成指定任务。
 
 【避免过度解释】
 - 不说“你其实……”“这说明你……”“你一定是……”替对方解释动机、人格或病因。
@@ -399,6 +453,8 @@ SYSTEM_PROMPT = """
 【场景约束】
 - 来访者处于封闭戒治环境。
 - 不主动建议手机、互联网、自由外出等当前不可实施活动。
+- 不在对话里逐步教放松、呼吸或冥想的具体步骤（一次说完会变成长时间独白，也没法跟着做）；
+  需要这类练习时，简短说明一句，然后邀请来访者到放松训练里做对应的一项，由系统播放引导。
 - 最终只输出可直接展示和朗读的内容。
 """
 
@@ -470,6 +526,21 @@ MIN_ROUNDS_BEFORE_SCALE = 5
 # Agent routing confidence thresholds
 SCALE_ROUTE_CONFIDENCE = 0.45   # Minimum confidence for scale start/continue
 RELAX_ROUTE_CONFIDENCE = 0.6    # Minimum confidence for relaxation recommendation
+
+# Invitation cooldowns (rounds after a refusal during which the same kind of
+# offer stays suppressed).  These are policy floors only: the decision layer
+# decides whether a moment is appropriate, and these numbers stop it from
+# asking again the very next turn.
+OFFER_SCALE_COOLDOWN_ROUNDS = 4
+OFFER_RELAXATION_COOLDOWN_ROUNDS = 4
+
+# How many turns in a row the interview may spend asking "你指的是什么？".
+# A withdrawn participant answers "不知道" / "就那样" / "不想聊" turn after turn;
+# the router reads every one of those as ambiguous and asks again, and because
+# the clarification branch sits above both the questionnaire and the exercise
+# invitation, the session never reaches either.  Two attempts is enough to show
+# the participant is not going to elaborate; after that the interview moves on.
+MAX_CONSECUTIVE_CLARIFICATIONS = 2
 
 # Post-relaxation continue chat timeout (seconds)
 POST_RELAXATION_TIMEOUT = 60
@@ -543,6 +614,31 @@ VAD_SILENCE_THRESHOLD = 0.01
 VAD_SILENCE_DURATION = 1.5
 VAD_SPEECH_MIN_DURATION = 0.5
 
+
+def _detect_vad_model():
+    """Point FunASR at the local FSMN-VAD directory when one is shipped.
+
+    ``AutoModel(model="fsmn-vad")`` resolves the model id through ModelScope
+    and therefore needs the network on the first run -- unacceptable on an
+    offline demo box.  A local directory short-circuits that lookup entirely.
+    Falling back to the model id keeps machines without pre-staged weights
+    working exactly as before.
+    """
+    env_path = os.environ.get("VAD_MODEL_PATH")
+    if env_path and os.path.isdir(env_path):
+        return env_path
+    candidates = [
+        os.path.join(APP_MODELS_ROOT, "asr", "fsmn-vad"),
+        os.path.join(OFFLINE_MODELS_ROOT, "voicechat3", "asr", "fsmn-vad"),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return "fsmn-vad"
+
+
+VAD_MODEL_PATH = _detect_vad_model()
+
 # ============== TTS Control ==============
 ENABLE_TTS = True  # Set to False to disable TTS entirely (for debugging)
 
@@ -565,15 +661,9 @@ MAX_CONVERSATION_MINUTES = 45       # Maximum session duration in minutes
 TIME_WARNING_MINUTES = 40           # Show warning at this point (5 min before limit)
 
 # ============== Agent (qwen-agent) ==============
-AGENT_ENABLED = True
-AGENT_MODEL = _RUNTIME_MODELS.router
-AGENT_BACKEND = _DEPLOYMENT_PROFILE.runtime_backend
-AGENT_MODEL_SERVER = (
-    _DEPLOYMENT_PROFILE.agent_base_url
-    if _DEPLOYMENT_PROFILE.immutable_runtime_contract
-    else os.environ.get("VOICECHAT_AGENT_BASE_URL", _DEPLOYMENT_PROFILE.agent_base_url)
-)
-AGENT_API_KEY = 'EMPTY'
+# Agent enablement, provider, model, endpoint, and API key come from the
+# runtime configuration (see the Runtime Configuration section above); the
+# prompts and timeouts below remain application policy.
 
 AGENT_INTENT_SYSTEM_MESSAGE = """你是心理咨询系统的意图分类器。系统有以下功能模块：
 1. 咨询对话（counseling）：核心功能，咨询师通过对话建立关系、共情、引导
@@ -678,7 +768,7 @@ EMOTION_SCENE_MAP = {
 INTENT_SCENE_MAP = {
     "relaxation":     ["breathing_exercise", "muscle_relaxation", "meditation"],
     "entertainment":  ["entertainment"],  # 仅主动提出时
-    "counseling":     [],  # 不推荐影音，由 72B 决定是否建议放松训练
+    "counseling":     [],  # 不推荐影音，由主模型决定是否建议放松训练
     "chitchat":       [],
 }
 

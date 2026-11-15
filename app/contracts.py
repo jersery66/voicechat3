@@ -117,9 +117,37 @@ class PlayRelaxationCommand(Command):
 
 
 class RelaxationFinishedCommand(Command):
-    """Relaxation video finished (or was exited early)."""
+    """Relaxation video finished (or was exited early).
+
+    Three outcomes, not two: a finished exercise, a participant who stopped
+    it, and a provider that could not play it.  Collapsing the middle case
+    into either neighbour told the participant "放松训练已完成" for a clip
+    they had just clicked away from.
+    """
     kind: Literal["relaxation_finished"] = "relaxation_finished"
     completed: bool = True
+    provider_failed: bool = False
+    stopped_early: bool = False
+
+
+class PlayLeisureCommand(Command):
+    """Start one catalog-owned leisure activity.
+
+    This is intentionally separate from the legacy ``PlayGameCommand`` and
+    ``PlayRelaxationCommand`` compatibility paths.  ``content_id`` is the
+    stable RelaxationCatalog identity, not a core relaxation kind.
+    """
+    kind: Literal["play_leisure"] = "play_leisure"
+    content_id: str
+
+
+class LeisureFinishedCommand(Command):
+    """Report one completed or cancelled leisure activity run."""
+    kind: Literal["leisure_finished"] = "leisure_finished"
+    content_id: str
+    completed: bool = True
+    cancelled: bool = False
+    reason: Optional[str] = None
 
 
 class ContinueChatCommand(Command):
@@ -196,6 +224,8 @@ AnyCommand = (
     | EndSessionCommand
     | PlayRelaxationCommand
     | RelaxationFinishedCommand
+    | PlayLeisureCommand
+    | LeisureFinishedCommand
     | ContinueChatCommand
     | AcknowledgeTimeLimitCommand
     | CheckTimeLimitCommand
@@ -251,6 +281,12 @@ class RelaxationRecommendedEvent(Event):
     kind: Literal["relaxation_recommended"] = "relaxation_recommended"
     relaxation: RelaxationKind
     forced: bool = False  # True when the end flow forces one last session
+
+
+class LeisureStartedEvent(Event):
+    """The lifecycle writer accepted a catalog-owned leisure activity."""
+    kind: Literal["leisure_started"] = "leisure_started"
+    content_id: str
 
 
 class SessionWarningEvent(Event):
@@ -314,6 +350,7 @@ AnyEvent = (
     | StateChangedEvent
     | ScaleProgressEvent
     | RelaxationRecommendedEvent
+    | LeisureStartedEvent
     | SessionWarningEvent
     | TimeLimitAskEvent
     | TimeLimitAcknowledgedEvent

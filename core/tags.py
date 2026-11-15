@@ -41,6 +41,35 @@ _RE_BRACKETS_CN = re.compile(r'【.*?】')
 _RE_PIPE_TAG = re.compile(r'<\|[^|]+\|>')
 _RE_BREATH_LAUGH = re.compile(r'\[(?:breath|laughter)\]')
 _RE_THINK = re.compile(r'<think>[\s\S]*?</think>')
+_RE_THINK_MARKER = re.compile(r'</?think\s*>', re.IGNORECASE)
+
+
+def _strip_think_residue(text: str) -> str:
+    """Drop reasoning delimiters that arrive without a matching partner.
+
+    The serving stack puts the opening ``<think>`` in the chat template and
+    only returns the closing marker in the completion, so the paired pattern
+    above matches nothing: the marker is spoken aloud as "反斜杠 think", and
+    whatever the model drafted before the closer is repeated afterwards.  An
+    observed turn read "可以试试肌肉放松…不用勉强。</think>可以试试肌肉放松…
+    不用勉强。" -- one sentence, said twice, with a tag in between.
+
+    A lone marker is therefore treated as a boundary: the segment after the
+    last one is the answer.  Identical halves collapse to a single copy, and a
+    reply that is nothing but a trailing marker keeps its text.
+    """
+    lowered = (text or "").lower()
+    if "<think" not in lowered and "</think" not in lowered:
+        return text
+    text = _RE_THINK.sub('', text)
+    if "<think" not in text.lower() and "</think" not in text.lower():
+        return text
+    parts = [part for part in _RE_THINK_MARKER.split(text) if part.strip()]
+    if not parts:
+        return ""
+    if len(parts) == 2 and parts[0].strip() == parts[1].strip():
+        return parts[0]
+    return parts[-1]
 
 
 def split_legacy_response(text: str) -> tuple[str, str]:
@@ -136,7 +165,7 @@ def clean_for_display(text: str) -> str:
     # If analysis|||spoken got mixed, only keep the spoken part
     if "|||" in text:
         text = text.rsplit("|||", 1)[-1]
-    text = _RE_THINK.sub('', text)
+    text = _strip_think_residue(text)
     text = _RE_REC_TAG.sub('', text)
     text = _RE_END_TAG.sub('', text)
     text = _RE_SCALE_TAG.sub('', text)
@@ -146,7 +175,7 @@ def clean_for_display(text: str) -> str:
     # Remove internal strategy terms that leaked into spoken output
     for term in _FORBIDDEN_INTERNAL_TERMS:
         text = text.replace(term, "")
-    return text.strip()
+    return _collapse_spoken_breaks(text)
 
 
 def clean_for_tts(text: str) -> str:
@@ -156,10 +185,22 @@ def clean_for_tts(text: str) -> str:
     # If analysis|||spoken got mixed, only keep the spoken part
     if "|||" in text:
         text = text.rsplit("|||", 1)[-1]
-    text = _RE_THINK.sub('', text)
+    text = _strip_think_residue(text)
     text = _RE_REC_TAG.sub('', text)
     text = _RE_END_TAG.sub('', text)
     text = _RE_SCALE_TAG.sub('', text)
     text = _RE_PIPE_TAG.sub('', text)
     text = _RE_BRACKETS_CN.sub('', text)
+    return _collapse_spoken_breaks(text)
+
+
+def _collapse_spoken_breaks(text: str) -> str:
+    """Join model-introduced newlines so one turn is one spoken utterance.
+
+    Chat models habitually answer with paragraph breaks ("……烦躁。\\n\\n最近
+    睡眠怎么样？"); the TTS engine reads the raw string, so the break has to
+    disappear before playback, and the bubble must not show the blank line.
+    """
+    text = re.sub(r"[ \t]*\r?\n+[ \t]*", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()

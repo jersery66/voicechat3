@@ -155,3 +155,52 @@ def test_decision_action_specific_validation():
     with pytest.raises(ValueError):
         TurnDecision(action=TurnAction.END_SESSION)
     assert TurnDecision(action=TurnAction.CHAT).scale_name is None
+
+
+# --- A pause lasts until the participant asks to come back -----------------
+# Before this, a paused scale resumed on the very next turn whatever the
+# participant said, so "先别问了" bought exactly one question-free reply.
+
+def test_paused_scale_does_not_own_an_ordinary_turn():
+    decision = TurnPolicy().decide(
+        user_text="我这两天就是睡不好，翻来覆去到天亮",
+        proposal=proposal(RouterAction.CHAT),
+        snapshot=snapshot(
+            active_scale="PHQ-9", current_item=4, waiting_for_answer=False,
+            scale_paused=True,
+        ),
+        signals=TurnSignals(),
+    )
+    assert decision.action is TurnAction.CHAT
+    assert decision.reason == "active_scale_paused"
+
+
+def test_paused_scale_resumes_only_on_an_explicit_request():
+    decision = TurnPolicy().decide(
+        user_text="行，那你接着问吧",
+        proposal=proposal(RouterAction.CHAT),
+        snapshot=snapshot(
+            active_scale="PHQ-9", current_item=4, waiting_for_answer=False,
+            scale_paused=True,
+        ),
+        signals=TurnSignals(active_scale_resume_requested=True),
+    )
+    assert decision.action is TurnAction.CONTINUE_SCALE
+    assert decision.reason == "active_scale_resume"
+
+
+def test_refusal_containing_a_resume_phrase_still_pauses():
+    decision = TurnPolicy().decide(
+        user_text="别问了吧，我真不想说这个",
+        proposal=proposal(RouterAction.CHAT),
+        snapshot=snapshot(
+            active_scale="PHQ-9", current_item=4, waiting_for_answer=False,
+            scale_paused=True,
+        ),
+        signals=TurnSignals(
+            active_scale_pause_requested=True,
+            active_scale_refusal=True,
+            active_scale_resume_requested=False,
+        ),
+    )
+    assert decision.action is TurnAction.PAUSE_SCALE

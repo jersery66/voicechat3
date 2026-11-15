@@ -143,7 +143,7 @@ def build_measurement_event(
     source: str = "passive_measurement",
     timestamp_utc: str | None = None,
     git_commit: str | None = None,
-    profile: str | None = None,
+    runtime_config: str | None = None,
     session_id: str | None = None,
     turn_id: str | None = None,
     generation_id: int | None = None,
@@ -157,7 +157,7 @@ def build_measurement_event(
         "evidence_type": evidence_type,
         "timestamp_utc": timestamp_utc or utc_timestamp(),
         "git_commit": git_commit if git_commit is not None else current_git_commit(),
-        "profile": profile,
+        "runtime_config": runtime_config,
         "component": component,
         "session_id": session_id,
         "turn_id": turn_id,
@@ -290,7 +290,7 @@ def aggregate_metric(
 def build_performance_summary(
     samples: Iterable[Mapping[str, Any]],
     *,
-    profile: str | None = None,
+    runtime_config: str | None = None,
     git_commit: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate successful measured samples without comparing model quality."""
@@ -305,7 +305,7 @@ def build_performance_summary(
         "schema_version": 1,
         "timestamp_utc": utc_timestamp(),
         "git_commit": git_commit if git_commit is not None else current_git_commit(),
-        "profile": profile,
+        "runtime_config": runtime_config,
         # Availability of real samples is not an acceptance verdict.  No
         # performance threshold is defined in this layer, so measured data is
         # explicitly reported as MEASURED rather than PASS.
@@ -322,14 +322,14 @@ def write_performance_summary(
     path: str | Path,
     samples: Iterable[Mapping[str, Any]],
     *,
-    profile: str | None = None,
+    runtime_config: str | None = None,
     git_commit: str | None = None,
 ) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
         json.dumps(
-            build_performance_summary(samples, profile=profile, git_commit=git_commit),
+            build_performance_summary(samples, runtime_config=runtime_config, git_commit=git_commit),
             ensure_ascii=False,
             indent=2,
         ),
@@ -341,7 +341,7 @@ def write_performance_summary(
 def initialise_measurement_artifacts(
     output_root: str | Path,
     *,
-    profile: str | None = None,
+    runtime_config: str | None = None,
     git_commit: str | None = None,
 ) -> dict[str, Path]:
     """Create empty, explicitly-not-run observability artifacts."""
@@ -349,7 +349,7 @@ def initialise_measurement_artifacts(
 
     return initialise_observability_artifacts(
         output_root,
-        profile=profile,
+        runtime_config=runtime_config,
         git_commit=git_commit if git_commit is not None else current_git_commit(),
     )
 
@@ -358,10 +358,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Initialize evidence-aware measurement artifacts")
-    parser.add_argument("--profile", default=os.environ.get("VOICECHAT_DEPLOYMENT_PROFILE"))
+    parser.add_argument("--config", default=os.environ.get("VOICECHAT_RUNTIME_CONFIG"))
     parser.add_argument("--output-root", default=str(PROJECT_ROOT / "test_output" / "observability"))
     args = parser.parse_args(argv)
-    paths = initialise_measurement_artifacts(args.output_root, profile=args.profile)
+    paths = initialise_measurement_artifacts(args.output_root, runtime_config=args.config)
     print(json.dumps({name: str(path) for name, path in paths.items()}, ensure_ascii=False, indent=2))
     return 0
 

@@ -87,7 +87,11 @@ def test_i3_provider_exception_before_delivery_uses_current_safe_fallback(harnes
         proposal(RouterAction.CHAT, needs_rag=False),
     )
 
-    assert "系统出了点小问题" in result.spoken_text
+    # The fallback must hold the turn, not hand the failure back to the
+    # participant: "say that again" reads as "you were unclear" and in an
+    # interview that costs the turn.
+    assert "你说的我都记着" in result.spoken_text
+    assert "再说一遍" not in result.spoken_text
     assert harness.trace.visible_sentences
     assert failing.conversation_history[-1]["role"] == "assistant"
 
@@ -105,6 +109,10 @@ def test_i4_one_sentence_tts_failure_does_not_replay_or_reorder(harness):
         "第一句。",
         "第二句。",
     ]
+    import time
+    deadline = time.monotonic() + 1.0
+    while len(harness.trace.tts_calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
     assert harness.trace.tts_calls == ["第一句。", "第二句。"]
     assert harness.llm.conversation_history[-1]["content"] == "第一句。第二句。"
 
@@ -242,10 +250,7 @@ def test_phase8_legacy_model_tags_have_no_live_action_authority(harness):
 
 def test_phase8_deployment_provider_contracts_remain_unchanged():
     root = Path(__file__).resolve().parents[2]
-    config = (root / "deployment" / "profiles.py").read_text(encoding="utf-8")
-    launcher = (root / "scripts" / "start_a100_vllm_stack.ps1").read_text(encoding="utf-8")
+    runtime = (root / "config" / "runtime.yaml").read_text(encoding="utf-8")
 
-    assert "8000" in config
-    assert "8001" in config
-    assert "8000" in launcher
-    assert "8001" in launcher
+    assert "8000" in runtime
+    assert "8001" in runtime

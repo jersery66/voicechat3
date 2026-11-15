@@ -22,7 +22,8 @@ class ReportGenerationTool:
 
     def execute(self, conversation_history, end_type, user_id="default_user",
                 user_info=None, relaxation_info="", session_emotions=None,
-                scale_tags=None, emit=None, emotion_tracker=None) -> dict:
+                scale_tags=None, emit=None, emotion_tracker=None,
+                interview_coverage=None) -> dict:
         """
         Generate all reports for session end.
 
@@ -35,6 +36,9 @@ class ReportGenerationTool:
             session_emotions: List of emotion dicts
             scale_tags: Dict of scale assessment results {scale_name: {q_num: score}}
             emit: Callback for UI updates (stream_text, etc.)
+            interview_coverage: Dimension coverage from
+                ``pipeline.get_interview_coverage()``; system record, not an
+                inference.
 
         Returns:
             dict with keys: feedback, researcher_report, save_result
@@ -68,7 +72,8 @@ class ReportGenerationTool:
                 researcher_report = self.report.generate_researcher_report(
                     conversation_history, user_id, end_type,
                     user_info=user_info, relaxation_info=relaxation_info,
-                    session_emotions=session_emotions
+                    session_emotions=session_emotions,
+                    interview_coverage=interview_coverage,
                 )
             # Add scale assessment results
             if scale_tags:

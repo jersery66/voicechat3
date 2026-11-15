@@ -2,20 +2,20 @@
 
 ## Status
 
-This is an explicit, reversible candidate profile. It does not replace the
-production `a100_80g` profile.
+This is an explicit, reversible candidate *configuration*. It does not replace
+the production runtime configuration.
 
 Production promotion: **NOT APPROVED**.
 
-| Profile | Dialogue model | Router/Agent | Status |
+| Configuration | Dialogue model | Agent | Status |
 | --- | --- | --- | --- |
-| `a100_80g` | `Qwen/Qwen2.5-72B-Instruct-AWQ` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | production baseline |
-| `a100_80g_qwen38_candidate` | `Qwen/Qwen3.8-27B-FP8` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | explicit opt-in candidate |
+| `config/runtime.yaml` | `Qwen/Qwen2.5-72B-Instruct-AWQ` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | production baseline |
+| `config/runtime_qwen38.yaml` (operator copy) | `Qwen/Qwen3.8-27B-FP8` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | explicit opt-in candidate |
 
-Select the candidate only deliberately, for example with
-`VOICECHAT_DEPLOYMENT_PROFILE=a100_80g_qwen38_candidate`. No automatic GPU or
-model detection promotes it, and model/environment overrides cannot replace
-the pinned A100 dialogue or router models.
+Select the candidate only deliberately, by pointing
+`VOICECHAT_RUNTIME_CONFIG` at the candidate file. No automatic GPU or model
+detection promotes it, and while `immutable_contract: true` the legacy
+environment overrides cannot replace the pinned dialogue or agent models.
 
 ## Request contract
 
@@ -31,9 +31,9 @@ TTS. It changes only the dialogue checkpoint and its typed generation options:
 - no `preserve_thinking` and no participant-facing reasoning-content path;
 - the client yields final `delta.content` only.
 
-The existing Qwen2.5 profiles do not receive Qwen3.8-specific
-`chat_template_kwargs` or `top_k` parameters unless their profile explicitly
-sets those typed fields.
+A configuration that does not set Qwen3.8-specific `chat_template_kwargs` or
+`top_k` does not send them; those parameters exist only when the configuration
+sets the typed fields explicitly.
 
 ## Candidate launch shape
 
@@ -77,7 +77,6 @@ be described as faster, safer, or clinically better before that acceptance.
 
 ## Deterministic verification
 
-- Candidate/profile/request contract: **15 passed**.
-- Full regression after adding the candidate: **728 passed / 0 failed**.
+- Candidate request contract: **TESTED** (`tests/test_qwen38_dialogue_candidate.py`).
 - `git diff --check`: PASS.
 - Production promotion: **NOT APPROVED** pending real A100 validation.

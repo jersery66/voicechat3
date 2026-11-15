@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QApplication, QLabel
 )
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QRect
 from PySide6.QtGui import QFont, QPixmap, QPainter, QColor, QBrush
 
 # Add parent directory to path
@@ -42,6 +42,11 @@ from services.pipeline import get_end_type_enum, ConversationPipeline, PipelineC
 from services.report_service import EndType
 from conversation.delivery import GenerationController, SentenceReady, SentenceSegmenter
 from core.tags import clean_for_display, clean_for_tts
+from relaxation.catalog import build_default_catalog
+from relaxation.contracts import RelaxationContentRole, RelaxationContentType, RelaxationState
+from relaxation.playback import content_id_from_legacy, legacy_relaxation_key
+from relaxation.runtime import RelaxationRuntime
+from relaxation.return_context import RelaxationReturnContext
 
 
 class MainWindow(QMainWindow):
@@ -76,12 +81,24 @@ class MainWindow(QMainWindow):
         # from SessionEngine (lifecycle) and TurnPolicy (business action).
         self.delivery_controller = GenerationController()
         self._history_finalized_generations: set[int] = set()
+        # Generations whose text is delivered to the screen but must not reach
+        # the transcript or conversation history (e.g. the quit banner).
+        self._non_persisted_generations: set[int] = set()
         self._active_ui_generation: int | None = None
 
         # Tools (initialized in load_models; guarded against partial init)
         self.video_tool = None
         self.relaxation_tool = None
         self.report_tool = None
+        # Phase 2 shell ownership only. Content playback remains on the
+        # existing core signal handlers until the later integration phase.
+        self.relaxation_catalog = build_default_catalog()
+        self.relaxation_runtime = RelaxationRuntime(self.relaxation_catalog)
+        self._relaxation_center_dialog = None
+        self._relaxation_game_dialog = None
+        self._pending_leisure_game_start: str | None = None
+        self._pending_relaxation_preference: str | None = None
+        self._relaxation_return_context: RelaxationReturnContext | None = None
 
         # State
         self.is_recording = False
@@ -162,14 +179,37 @@ class MainWindow(QMainWindow):
         return getattr(snapshot, "relaxation_type", None)
 
     def _setup_window(self):
-        self.setWindowTitle(APP_NAME)
+        # The window title states the ACTUAL decision mode from the runtime
+        # config, so a demo audience can never mistake a fallback for Jev.
+        try:
+            from deployment.runtime_config import get_runtime_config
+
+            decision = get_runtime_config().decision
+            mode_text = {
+                "jev": "Jev",
+                "shadow": "Shadow",
+                "legacy": "Legacy",
+            }.get(str(decision.mode), str(decision.mode))
+            backend = str(getattr(decision, "backend", "") or "")
+            title_mode = f"{mode_text}/{backend}" if backend else mode_text
+        except Exception:
+            title_mode = "模式未知"
+        self.setWindowTitle(f"{APP_NAME}［决策模式：{title_mode}］")
         self.setMinimumSize(1024, 768)
 
         # Load background image
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         bg_path = os.path.join(app_dir, "ui", "background.jpg")
         if os.path.exists(bg_path):
-            self._bg_pixmap = QPixmap(bg_path)
+            loaded = QPixmap(bg_path)
+            if not loaded.isNull():
+                # The photo carries an institutional watermark along its
+                # bottom edge; cropping that strip (floor/chair base only)
+                # keeps every window shape free of a clipped, half-covered
+                # watermark.  The UI paints the same credit as a clean chip.
+                self._bg_pixmap = loaded.copy(
+                    0, 0, loaded.width(), int(loaded.height() * 0.92)
+                )
 
         # Apply global stylesheet
         self.setStyleSheet(get_style())
@@ -179,27 +219,24 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
 
-        # Main horizontal layout with bottom margin for logo
+        # Main horizontal layout: a fixed control rail on the left and a
+        # conversation surface that takes the remaining width.  The old
+        # 100px spacers plus fixed 280/380 panels left ~700px of empty photo
+        # at 1440px, so the layout now stretches with the window.
         main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 20, 0, 50)
-        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(24, 24, 24, 24)
+        main_layout.setSpacing(18)
 
-        # Left spacer
-        main_layout.addSpacing(100)
-
-        # Left control panel
+        # Left control panel (fixed rail)
         self.control_panel = ControlPanel()
-        main_layout.addWidget(self.control_panel)
+        main_layout.addWidget(self.control_panel, 0)
 
-        # Center spacer (smaller - push panels closer to center)
+        # Right chat column: a bounded floating card, right-aligned.  It used
+        # to stretch across the whole window and hid the counsellor portrait
+        # that is the visual anchor of this screen.
         main_layout.addStretch(1)
-
-        # Right chat panel
         self.chat_panel = ChatPanel()
-        main_layout.addWidget(self.chat_panel)
-
-        # Right spacer (smaller to let panel sit closer to edge)
-        main_layout.addSpacing(100)
+        main_layout.addWidget(self.chat_panel, 0)
 
         # Loading screen (overlay on top)
         self.loading_screen = LoadingScreen(central)
@@ -233,21 +270,123 @@ class MainWindow(QMainWindow):
                 panel.set_theme(self._dark_mode)
 
     def paintEvent(self, event):
-        """Paint the background image."""
-        if self._bg_pixmap:
+        """Paint the photo without any dark veil, adapted to the window aspect.
+
+        Normal windows cover-fit the photo and anchor the portrait in the band
+        between the panels.  Ultra-wide windows would crop most of the frame
+        (and its institutional watermark), so they show the complete photo over
+        a blurred, self-generated backdrop instead of black bars.
+        """
+        if not self._bg_pixmap:
             painter = QPainter(self)
-            # Scale to fit within window, keep aspect ratio, no cropping
-            scaled = self._bg_pixmap.scaled(
+            painter.fillRect(self.rect(), QColor(247, 244, 238))
+            painter.end()
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        aspect = self.width() / max(1, self.height())
+        wide = aspect > 2.05
+
+        if wide:
+            # Cheap blur: shrink then stretch the cover copy for the backdrop,
+            # then draw the whole frame on top so nothing is cropped away.
+            cover = self._bg_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            )
+            tiny = cover.scaled(
+                max(1, cover.width() // 60), max(1, cover.height() // 60),
+                Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
+            )
+            painter.drawPixmap(0, 0, tiny.scaled(self.size(), Qt.IgnoreAspectRatio,
+                                                 Qt.SmoothTransformation))
+            # A light wash keeps the backdrop soft and free of text smears.
+            painter.fillRect(self.rect(), QColor(255, 255, 255, 46))
+            frame = self._bg_pixmap.scaled(
                 self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
-            # Center the image
-            x = (self.width() - scaled.width()) // 2
+            painter.drawPixmap((self.width() - frame.width()) // 2,
+                               (self.height() - frame.height()) // 2, frame)
+        else:
+            scaled = self._bg_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            )
+            x = self._background_offset_x(scaled.width())
             y = (self.height() - scaled.height()) // 2
-            # Fill edges with dominant background color
-            painter.fillRect(0, 0, self.width(), self.height(), QColor(245, 245, 245))
             painter.drawPixmap(x, y, scaled)
-            painter.end()
+
+        self._paint_watermark(painter)
+        painter.end()
         super().paintEvent(event)
+
+    def _paint_watermark(self, painter: QPainter) -> None:
+        """Keep the institution credit visible whatever the crop does.
+
+        The photo's own watermark sits in its bottom-right corner, which the
+        chat column covers; this draws the same credit in the visible band so
+        it survives any window shape.
+        """
+        text = "南昌市强制隔离戒毒所 · 心理矫治中心"
+        try:
+            left = self.control_panel.geometry().right() + 18
+            right = self.chat_panel.geometry().left()
+        except Exception:
+            left, right = 0, self.width()
+        if right - left < 220:
+            left, right = 0, self.width()
+        font = QFont("Microsoft YaHei", 9)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(text)
+        x = left + max(0, (right - left - text_width) // 2)
+        y = self.height() - 22
+        # A quiet chip keeps the credit legible on any photo without a veil.
+        pad_x, pad_y = 10, 4
+        chip = QRect(
+            x - pad_x,
+            y - metrics.ascent() - pad_y,
+            text_width + pad_x * 2,
+            metrics.height() + pad_y * 2,
+        )
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 168))
+        painter.drawRoundedRect(chip, 9, 9)
+        painter.setPen(QColor(44, 58, 66, 200))
+        painter.drawText(x, y, text)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt naming
+        """Keep the chat column readable and the overlays window-sized."""
+        super().resizeEvent(event)
+        # The loading overlay was sized once from the 640x480 default central
+        # rect and never followed the window, so it stayed as a small card in
+        # the top-left corner while the rest of the UI was already laid out.
+        overlay = getattr(self, "loading_screen", None)
+        central = self.centralWidget()
+        if overlay is not None and central is not None:
+            overlay.setGeometry(central.rect())
+
+        panel = getattr(self, "chat_panel", None)
+        if panel is None:
+            return
+        # Wider screens get a wider conversation column (up to 760px) instead
+        # of staying pinned at the 560px phone-like width.
+        target = max(400, min(760, int(self.width() * 0.38)))
+        if panel.width() != target:
+            panel.setFixedWidth(target)
+
+    def _background_offset_x(self, scaled_width: int) -> int:
+        """Horizontal offset that keeps the portrait inside the visible band."""
+        try:
+            left = self.control_panel.geometry().right() + 18
+            right = self.chat_panel.geometry().left()
+        except Exception:
+            left, right = 0, self.width()
+        band_center = (left + right) // 2 if right > left else self.width() // 2
+        offset = band_center - scaled_width // 2
+        # Never show empty space at either edge of the window.
+        min_offset = self.width() - scaled_width
+        return max(min_offset, min(0, offset))
 
     def _connect_signals(self):
         # Control panel signals
@@ -255,11 +394,18 @@ class MainWindow(QMainWindow):
         self.control_panel.modify_user.connect(self._on_modify_user)
         self.control_panel.record_started.connect(self._on_record_started)
         self.control_panel.record_stopped.connect(self._on_record_stopped)
-        self.control_panel.play_breathing.connect(lambda: self._play_relaxation_video("breathing"))
-        self.control_panel.play_muscle.connect(lambda: self._play_relaxation_video("muscle"))
-        self.control_panel.play_meditation.connect(lambda: self._play_relaxation_video("meditation"))
+        self.control_panel.play_breathing.connect(
+            lambda: self._start_core_relaxation("breathing", "DIRECT_SHORTCUT")
+        )
+        self.control_panel.play_muscle.connect(
+            lambda: self._start_core_relaxation("muscle_relaxation", "DIRECT_SHORTCUT")
+        )
+        self.control_panel.play_meditation.connect(
+            lambda: self._start_core_relaxation("meditation", "DIRECT_SHORTCUT")
+        )
         self.control_panel.play_game.connect(self._play_game)
         self.control_panel.play_media.connect(self._open_media_panel)
+        self.control_panel.open_relaxation_center.connect(self._open_relaxation_center)
 
         # Chat panel signals
         self.chat_panel.clear_clicked.connect(self._clear_history)
@@ -278,11 +424,17 @@ class MainWindow(QMainWindow):
         self.info_confirmed = True
         self.current_user_id = user_id
 
+        # The subject id has to reach the data layer *before* the session
+        # starts: the engine creates the per-subject folder during start-up, so
+        # setting it afterwards filed every subject under the previous
+        # subject's folder (S002's transcript landed in .../S001/).
+        if self.data_manager:
+            self.data_manager.set_user_id(user_id)
+
         # Always start a fresh session for each confirmed subject
         self._start_new_session()
 
         if self.data_manager:
-            self.data_manager.set_user_id(user_id)
             self.data_manager.save_user_profile(normalized)
         if self.llm_service and self.data_manager:
             context = self.data_manager.get_formatted_history_context(
@@ -466,8 +618,12 @@ class MainWindow(QMainWindow):
             self.llm_service,
             self.data_manager,
             sample_rate=48000,
+            persist=generation_id not in self._non_persisted_generations,
         )
         self._history_finalized_generations.add(generation_id)
+        # Keep the marker set bounded: a finalised generation is never persisted
+        # later, and re-entry is already blocked by the guard above.
+        self._non_persisted_generations.discard(generation_id)
         if not delivered:
             return ""
         return delivered
@@ -647,12 +803,24 @@ class MainWindow(QMainWindow):
             return
 
         if action == "recommend_relaxation":
-            relaxation = decision.intervention_type or "breathing"
-            self.processing_queue.put(("highlight_relax_delayed", (relaxation, 500)))
-            self.processing_queue.put(("status", "可以尝试左侧放松训练"))
+            # Two different moments wear the same action.  The first is an
+            # *invitation*: highlight the entrance and let the participant
+            # decide.  The second is the turn where they said yes (or asked
+            # for it outright) -- then the Center must actually open, because
+            # the writer has already told them where to go.  Without the split
+            # the promise is spoken and nothing happens on screen.
+            reason = str(getattr(decision, "reason", "") or "")
+            preference = getattr(result, "relaxation_rec", None) or getattr(
+                decision, "intervention_type", None
+            )
+            if reason in ("offer_relaxation_accepted", "user_relaxation_request"):
+                self.processing_queue.put(("open_relaxation_center", preference))
+            else:
+                self.processing_queue.put(("relaxation_invitation", preference))
         elif action == "recommend_game":
-            self.processing_queue.put(("highlight_relax", "game"))
-            self.processing_queue.put(("status", "准备就绪"))
+            # Explicit game requests open the selection page, never a legacy
+            # game service or one of the concrete games.
+            self.processing_queue.put(("open_games_center", None))
         else:
             self.processing_queue.put(("status", "准备就绪"))
 
@@ -667,6 +835,9 @@ class MainWindow(QMainWindow):
                 self.control_panel.set_buttons_enabled(False)
             elif state == "CHATTING" and not self._current_report_generating:
                 self.control_panel.set_status("继续对话中...")
+            return
+        if kind == "leisure_started":
+            self._show_relaxation_game(getattr(event, "content_id", ""))
             return
         if kind == "relaxation_recommended":
             tag = getattr(event, "relaxation", "breathing")
@@ -703,6 +874,9 @@ class MainWindow(QMainWindow):
             return
         if kind == "error":
             logger.warning("SessionEngine error: %s", getattr(event, "message", event))
+            if str(getattr(event, "context", "")).startswith("play_leisure"):
+                self._reject_relaxation_game_start()
+            return
 
     def process_queue(self):
         # VAD auto-stop polling
@@ -724,6 +898,20 @@ class MainWindow(QMainWindow):
 
                 elif msg_type == "status":
                     self.control_panel.set_status(content)
+
+                elif msg_type == "relaxation_invitation":
+                    self._pending_relaxation_preference = content or None
+                    self._highlight_relax_safe("center")
+                    self.control_panel.set_status("可以打开“轻松一下”看看")
+
+                elif msg_type == "open_relaxation_center":
+                    # Consent already given this turn: open the Center with the
+                    # recommended exercise highlighted, no extra click needed.
+                    self._pending_relaxation_preference = content or None
+                    self._open_relaxation_center()
+
+                elif msg_type == "open_games_center":
+                    self._open_relaxation_center(show_games=True)
 
                 elif msg_type == "append_chat":
                     role, text = content
@@ -831,6 +1019,15 @@ class MainWindow(QMainWindow):
                         if not self.delivery_controller.is_current(generation_id):
                             continue
                         self._replace_last_system(replacement, generation_id)
+
+                elif msg_type == "speak_greeting_fallback":
+                    # Greeting generation failed/timed out: speak the
+                    # already-displayed fallback text once, still stale-gated.
+                    if isinstance(content, tuple) and len(content) == 2:
+                        generation_id, fallback_text = content
+                        if not self.delivery_controller.is_current(generation_id):
+                            continue
+                        self._play_tts_async(fallback_text)
                     else:
                         self._replace_last_system(content)
 
@@ -933,9 +1130,9 @@ class MainWindow(QMainWindow):
     def load_models(self):
         """Load all models with progress updates."""
         try:
-            from services.stt_service import STTService
+            from services.stt_service import get_stt_service
             from services.llm_factory import build_llm_service
-            from services.tts_service import TTSService
+            from services.tts_service import get_tts_service
             from services.rag_service import get_rag_service
             from data.data_manager import DataManager
             from services.report_service import ReportService
@@ -956,7 +1153,7 @@ class MainWindow(QMainWindow):
             def load_stt():
                 nonlocal stt_ok
                 try:
-                    service = STTService()
+                    service = get_stt_service()
                     service.load_model()
                     self.stt_service = service
                     stt_ok = True
@@ -973,7 +1170,7 @@ class MainWindow(QMainWindow):
                     logger.warning("TTS disabled by config; continuing without TTS.")
                     return
                 try:
-                    service = TTSService()
+                    service = get_tts_service()
                     service.load_model(use_streaming=True)
                     self.tts_service = service
                     tts_ok = True
@@ -1052,14 +1249,14 @@ class MainWindow(QMainWindow):
             self.llm_service.warmup()
             self.processing_queue.put(("loading_progress", 90))
 
-            # Step 2.5: Agent (3B routing model)
+            # Step 2.5: Agent (routing model)
             try:
                 from services.agent_service import get_agent_service
                 self.agent_service = get_agent_service()
-                if self.agent_service.is_available():
-                    logger.info("Agent service (3B) ready")
+                if self.agent_service is not None and self.agent_service.is_available():
+                    logger.info("Agent service ready")
                 else:
-                    logger.warning("3B agent model not available, using keyword fallback")
+                    logger.warning("Agent model not available, using keyword fallback")
             except Exception as e:
                 logger.warning(f"Agent service init failed: {e}")
                 self.agent_service = None
@@ -1142,6 +1339,313 @@ class MainWindow(QMainWindow):
         self.loading_screen.fade_out(callback=self.loading_screen.hide)
         self.control_panel.set_buttons_enabled(True)
 
+    def _capture_relaxation_conversation_anchor(self) -> str | None:
+        """Capture one short existing user turn for a transient return bridge."""
+        history = getattr(getattr(self, "llm_service", None), "conversation_history", None)
+        if not history:
+            return None
+        for message in reversed(history):
+            if message.get("role") != "user":
+                continue
+            text = str(message.get("content") or "").strip()
+            if text:
+                return text[:200]
+        return None
+
+    def _prepare_relaxation_center_entry(self, source: str) -> bool:
+        """Pause the real ScaleRuntime before any Center content can start."""
+        pipeline = getattr(self, "pipeline", None)
+        scale_runtime = getattr(pipeline, "scale_runtime", None)
+        scale_snapshot = scale_runtime.snapshot() if scale_runtime is not None else None
+        scale_paused_by_center = False
+        if scale_snapshot and scale_snapshot.active_scale:
+            if not scale_snapshot.paused:
+                update = scale_runtime.pause()
+                if update.status == "rejected":
+                    logger.warning("[RelaxResume] Center entry pause rejected: %s", update.reason)
+                    return False
+                scale_paused_by_center = True
+            # The engine sees only a boolean projection. Queue ordering keeps
+            # this false projection ahead of any subsequent media command.
+            from app.contracts import ScaleProjectionCommand
+            self._engine_submit(ScaleProjectionCommand(active=False))
+        self._relaxation_return_context = RelaxationReturnContext(
+            source=source,
+            scale_paused_by_center=scale_paused_by_center,
+            scale_name=scale_snapshot.active_scale if scale_snapshot else None,
+            conversation_anchor=self._capture_relaxation_conversation_anchor(),
+        )
+        return True
+
+    def _clear_relaxation_return_context(self) -> None:
+        self._relaxation_return_context = None
+
+    def _resume_scale_from_relaxation_context(self) -> str | None:
+        """Resume only from ScaleRuntime's first unanswered item."""
+        context = self._relaxation_return_context
+        self._relaxation_return_context = None
+        if context is None or not context.scale_paused_by_center:
+            return None
+        pipeline = getattr(self, "pipeline", None)
+        scale_runtime = getattr(pipeline, "scale_runtime", None)
+        if scale_runtime is None:
+            return None
+        snapshot = scale_runtime.snapshot()
+        if not snapshot.active_scale:
+            from app.contracts import ScaleProjectionCommand
+            self._engine_submit(ScaleProjectionCommand(active=False))
+            return None
+        if snapshot.paused:
+            update = scale_runtime.resume()
+            if update.status == "rejected":
+                logger.warning("[RelaxResume] resume rejected: %s", update.reason)
+                return None
+        snapshot = scale_runtime.snapshot()
+        from app.contracts import ScaleProjectionCommand
+        self._engine_submit(ScaleProjectionCommand(active=bool(snapshot.active_scale)))
+        if not snapshot.active_scale:
+            return None
+        question_getter = getattr(pipeline, "get_active_scale_question_text", None)
+        return question_getter() if callable(question_getter) else None
+
+    def _open_relaxation_center(self, *, show_games: bool = False):
+        """Open one catalog-driven Center shell without changing policy/runtime owners."""
+        dialog = self._relaxation_center_dialog
+        if dialog is not None and dialog.isVisible():
+            if show_games:
+                self._pending_relaxation_preference = None
+                dialog.show_games_page()
+            elif self._pending_relaxation_preference:
+                dialog.highlight_core_content(self._pending_relaxation_preference)
+                self._pending_relaxation_preference = None
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        if not self._prepare_relaxation_center_entry(
+            "EXPLICIT_GAME" if show_games else "CENTER"
+        ):
+            return
+        try:
+            from ui.relaxation_center import RelaxationCenterDialog
+
+            dialog = RelaxationCenterDialog(
+                catalog=self.relaxation_catalog,
+                runtime=self.relaxation_runtime,
+                parent=self,
+            )
+            dialog.core_content_requested.connect(self._on_center_core_content)
+            dialog.game_content_requested.connect(self._on_center_game_content)
+            dialog.returned_to_chat.connect(self._on_center_returned)
+            self._relaxation_center_dialog = dialog
+            dialog.open_center()
+            if show_games:
+                self._pending_relaxation_preference = None
+                dialog.show_games_page()
+            elif self._pending_relaxation_preference:
+                dialog.highlight_core_content(self._pending_relaxation_preference)
+                self._pending_relaxation_preference = None
+        except Exception as exc:
+            self._relaxation_center_dialog = None
+            logger.warning(f"Relaxation Center open failed: {exc}")
+
+    def _on_center_core_content(self, content_id: str):
+        """Handoff Center core selection to the shared core executor."""
+        dialog = self._relaxation_center_dialog
+        if dialog is not None:
+            dialog.hide_for_content()
+        self._start_core_relaxation(content_id, "CENTER")
+
+    def _on_center_game_content(self, content_id: str):
+        """Handoff a Center game selection to the native game host."""
+        dialog = self._relaxation_center_dialog
+        if dialog is not None:
+            dialog.hide_for_content()
+        self._start_relaxation_game(content_id)
+
+    def _start_relaxation_game(self, content_id: str) -> bool:
+        """Start one catalog-approved native leisure game.
+
+        The Center owns presentation; this method bridges the
+        RelaxationRuntime content state to the SessionEngine
+        ``PlayLeisureCommand``.  It never calls the legacy game service,
+        Agent, or a model.
+        """
+        definition = self.relaxation_catalog.get(content_id)
+        if (
+            definition is None
+            or definition.role is not RelaxationContentRole.LEISURE
+            or definition.category is not RelaxationContentType.GAME
+            or not definition.is_available
+        ):
+            logger.warning(f"[Relaxation] rejected unavailable game: {content_id!r}")
+            return False
+        scale_runtime = getattr(getattr(self, "pipeline", None), "scale_runtime", None)
+        if (
+            getattr(self, "_relaxation_return_context", None) is None
+            and scale_runtime is not None
+            and scale_runtime.snapshot().active_scale
+            and not self._prepare_relaxation_center_entry("CENTER")
+        ):
+            return False
+        if not self._engine_can_play_video():
+            return False
+        try:
+            state = self.relaxation_runtime.snapshot().state
+            if state is RelaxationState.INACTIVE:
+                self.relaxation_runtime.enter_center()
+            if self.relaxation_runtime.snapshot().state is not RelaxationState.CENTER:
+                logger.warning(f"[Relaxation] invalid game start state: {state.value}")
+                return False
+            self.relaxation_runtime.start_content(content_id)
+            self._pending_leisure_game_start = content_id
+            self.control_panel.stop_all_blinks()
+            from app.contracts import PlayLeisureCommand
+            self._engine_submit(PlayLeisureCommand(content_id=content_id))
+            return True
+        except Exception as exc:
+            logger.warning(f"[Relaxation] game start failed: {exc}")
+            if self.relaxation_runtime.snapshot().state is RelaxationState.RUNNING:
+                self.relaxation_runtime.cancel_content("start_failure")
+            self._pending_leisure_game_start = None
+            self._relaxation_game_dialog = None
+            return False
+
+    def _show_relaxation_game(self, content_id: str) -> None:
+        """Open the game only after SessionEngine accepted the lifecycle command."""
+        if self._pending_leisure_game_start != content_id:
+            logger.warning(f"[Relaxation] stale leisure start ignored: {content_id!r}")
+            return
+        snapshot = self.relaxation_runtime.snapshot()
+        if not (
+            snapshot.state is RelaxationState.RUNNING
+            and snapshot.selected_content_id == content_id
+        ):
+            logger.warning(f"[Relaxation] runtime rejected leisure start: {content_id!r}")
+            return
+        try:
+            from ui.relaxation_games import RelaxationGameDialog
+
+            game_dialog = RelaxationGameDialog(content_id=content_id, parent=self)
+            game_dialog.game_finished.connect(
+                lambda completed, item_id=content_id: self._on_relaxation_game_finished(
+                    item_id, completed
+                )
+            )
+            self._relaxation_game_dialog = game_dialog
+            self._pending_leisure_game_start = None
+            game_dialog.show()
+        except Exception as exc:
+            logger.warning(f"[Relaxation] native game dialog failed: {exc}")
+            self._on_relaxation_game_finished(content_id, completed=False, reason="provider_error")
+
+    def _reject_relaxation_game_start(self, message: str = "小游戏暂时无法启动。") -> None:
+        """Roll back the local content reservation after an engine rejection."""
+        content_id = self._pending_leisure_game_start
+        self._pending_leisure_game_start = None
+        if content_id is not None:
+            snapshot = self.relaxation_runtime.snapshot()
+            if (
+                snapshot.state is RelaxationState.RUNNING
+                and snapshot.selected_content_id == content_id
+            ):
+                self.relaxation_runtime.cancel_content("engine_rejected")
+        dialog = self._relaxation_center_dialog
+        if dialog is not None:
+            dialog.restore_after_game(message)
+        if getattr(self, "control_panel", None):
+            self.control_panel.set_status("可以重新选择小游戏")
+
+    def _on_relaxation_game_finished(
+        self,
+        content_id: str,
+        completed: bool = True,
+        reason: str | None = None,
+    ):
+        """Finish a native game and return to the Center Games page."""
+        runtime_snapshot = self.relaxation_runtime.snapshot()
+        if not (
+            runtime_snapshot.state is RelaxationState.RUNNING
+            and runtime_snapshot.selected_content_id == content_id
+        ):
+            logger.warning(f"[Relaxation] duplicate/stale game completion ignored: {content_id!r}")
+            return
+        if completed:
+            self.relaxation_runtime.complete_content()
+        else:
+            self.relaxation_runtime.cancel_content(reason or "participant_exit")
+        from app.contracts import LeisureFinishedCommand
+        self._engine_submit(LeisureFinishedCommand(
+            content_id=content_id,
+            completed=completed,
+            cancelled=not completed,
+            reason=reason or (None if completed else "participant_exit"),
+        ))
+
+        definition = self.relaxation_catalog.get(content_id)
+        if definition is not None and self.report_service and hasattr(self.report_service, "activity_log"):
+            self.report_service.activity_log.append({
+                "type": "leisure",
+                "content_id": content_id,
+                "content_role": getattr(definition.role, "value", definition.role),
+                "content_type": getattr(definition.category, "value", definition.category),
+                "display_name": definition.display_name,
+                "entry_source": "CENTER",
+                "completed": bool(completed),
+                "cancelled": not bool(completed),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        if self._relaxation_game_dialog is not None:
+            self._relaxation_game_dialog.close()
+        self._relaxation_game_dialog = None
+        center = self._relaxation_center_dialog
+        if center is not None:
+            center.restore_after_game("这一小段结束了。" if completed else "已结束。")
+
+    def _start_core_relaxation(self, content_id: str, entry_source: str) -> bool:
+        """Start one catalog-approved core item through the shared lifecycle."""
+        definition = self.relaxation_catalog.get(content_id)
+        if definition is None or definition.role is not RelaxationContentRole.CORE_RELAXATION:
+            logger.warning(f"[Relaxation] rejected non-core content: {content_id!r}")
+            return False
+        if not definition.is_available or not definition.resource_path:
+            logger.warning(f"[Relaxation] unavailable core content: {content_id!r}")
+            return False
+        scale_runtime = getattr(getattr(self, "pipeline", None), "scale_runtime", None)
+        if (
+            getattr(self, "_relaxation_return_context", None) is None
+            and scale_runtime is not None
+            and scale_runtime.snapshot().active_scale
+            and not self._prepare_relaxation_center_entry(entry_source)
+        ):
+            return False
+        if not self._engine_can_play_video():
+            return False
+        try:
+            state = self.relaxation_runtime.snapshot().state
+            if state is RelaxationState.INACTIVE:
+                self.relaxation_runtime.enter_center()
+            if self.relaxation_runtime.snapshot().state is not RelaxationState.CENTER:
+                logger.warning(f"[Relaxation] invalid start state: {state.value}")
+                return False
+            self.relaxation_runtime.start_content(content_id)
+            self._active_relaxation_entry_source = entry_source
+            self._play_relaxation_video(content_id)
+            return True
+        except Exception as exc:
+            logger.warning(f"[Relaxation] core start failed: {exc}")
+            if self.relaxation_runtime.snapshot().state is RelaxationState.RUNNING:
+                self.relaxation_runtime.cancel_content("start_failure")
+            return False
+
+    def _on_center_returned(self):
+        self._relaxation_center_dialog = None
+        resumed_question = self._resume_scale_from_relaxation_context()
+        if resumed_question:
+            message = f"好，我们接着刚才没完成的部分聊。{resumed_question}"
+            self.chat_panel.add_system_message(message)
+            self._play_tts_async(message)
+            self.control_panel.set_status("继续量表中...")
+
     # ==================== Session Management ====================
 
     def _prepare_next_subject(self):
@@ -1152,6 +1656,7 @@ class MainWindow(QMainWindow):
         which runs only when the next subject confirms their info.
         """
         self._cancel_active_pipeline(reason="next subject")
+        self._clear_relaxation_return_context()
         self.chat_panel.clear_chat()
         self.session_emotions = []
         self._scale_tags = {}
@@ -1169,6 +1674,8 @@ class MainWindow(QMainWindow):
             self.emotion_tracker.reset()
         if hasattr(self, 'pipeline') and self.pipeline:
             self.pipeline.reset_session()
+        if getattr(self, "conversation_coordinator", None):
+            self.conversation_coordinator.set_trace_recorder(None)
         if self.llm_service:
             self.llm_service.reset_conversation(clear_context=True)
         from app.contracts import PrepareNextSubjectCommand
@@ -1221,8 +1728,25 @@ class MainWindow(QMainWindow):
                     self.llm_service.set_history_context(context)
         if self.data_manager:
             self.data_manager.start_new_session()
+            self._attach_session_trace()
         if self.report_service:
             self.report_service.start_session()
+
+    def _attach_session_trace(self) -> None:
+        """Attach one de-identified trace sink to the current session folder."""
+        coordinator = getattr(self, "conversation_coordinator", None)
+        data_manager = getattr(self, "data_manager", None)
+        session_dir = getattr(data_manager, "session_dir", None)
+        if coordinator is None or not session_dir:
+            return
+        from research.turn_trace import TurnTraceRecorder
+
+        coordinator.set_trace_recorder(
+            TurnTraceRecorder(
+                os.path.join(session_dir, "turn_trace.jsonl"),
+                session_id=coordinator.session_id,
+            )
+        )
 
     def _highlight_relax_safe(self, relax_key: str):
         """Highlight relaxation button with logging and safety checks."""
@@ -1255,12 +1779,19 @@ class MainWindow(QMainWindow):
             self._engine_submit(ContinueChatCommand())
         except Exception as exc:
             logger.warning(f"ContinueChat command failed: {exc}")
-        resumed_question = None
-        if self.pipeline and hasattr(self.pipeline, "resume_scale_after_relaxation"):
-            try:
-                resumed_question = self.pipeline.resume_scale_after_relaxation()
-            except Exception as exc:
-                logger.warning(f"ScaleRuntime post-relaxation resume failed: {exc}")
+        had_return_context = getattr(self, "_relaxation_return_context", None) is not None
+        resumed_question = self._resume_scale_from_relaxation_context()
+        if not had_return_context and resumed_question is None:
+            # Compatibility for older callers that reached POST_RELAXATION
+            # before the Center-entry context was created.
+            if self.pipeline and hasattr(self.pipeline, "resume_scale_after_relaxation"):
+                try:
+                    resumed_question = self.pipeline.resume_scale_after_relaxation()
+                    if resumed_question:
+                        from app.contracts import ScaleProjectionCommand
+                        self._engine_submit(ScaleProjectionCommand(active=True))
+                except Exception as exc:
+                    logger.warning(f"ScaleRuntime post-relaxation resume failed: {exc}")
         if resumed_question:
             message = f"好，我们接着把刚才没完成的部分聊完。{resumed_question}"
         else:
@@ -1271,6 +1802,7 @@ class MainWindow(QMainWindow):
     def _on_end_chosen(self):
         """用户在放松后弹窗选择结束"""
         self._cancel_post_relaxation_timer()
+        self._clear_relaxation_return_context()
         self._handle_session_end(
             EndType.GOAL_ACHIEVED,
             allow_force_relaxation=False,
@@ -1279,10 +1811,16 @@ class MainWindow(QMainWindow):
 
     # ==================== Video / Game ====================
 
-    def _play_relaxation_video(self, relaxation_type):
+    def _play_relaxation_video(self, content_id: str):
         """统一的放松视频播放流程：全屏播放 → 弹窗
-        relaxation_type: 'breathing', 'muscle', 'meditation'
+        ``content_id`` is resolved through the catalog; the legacy provider key
+        is kept only at the compatibility boundary.
         """
+        definition = self.relaxation_catalog.require(content_id)
+        relaxation_type = legacy_relaxation_key(content_id)
+        if not relaxation_type:
+            logger.warning(f"[Relaxation] missing provider compatibility key: {content_id!r}")
+            return
         if not self._engine_can_play_video():
             return
 
@@ -1292,44 +1830,127 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"PlayRelaxation command failed: {e}")
 
-        # ScaleRuntime owns the paused item; the UI only issues its command.
-        if self.pipeline and self.pipeline.scale_runtime.snapshot().active_scale:
-            update = self.pipeline.scale_runtime.pause()
-            if update.accepted:
-                logger.warning("[RelaxResume] Runtime scale paused for relaxation")
+        # Center entry normally paused the Runtime already. Keep this guarded
+        # compatibility fallback for callers that reach the media boundary
+        # directly, without issuing a second pause for an already-paused scale.
+        if self.pipeline:
+            scale_snapshot = self.pipeline.scale_runtime.snapshot()
+            if scale_snapshot.active_scale and not scale_snapshot.paused:
+                update = self.pipeline.scale_runtime.pause()
+                if update.status != "rejected":
+                    from app.contracts import ScaleProjectionCommand
+                    self._engine_submit(ScaleProjectionCommand(active=False))
         self.control_panel.stop_all_blinks()
 
         # Store type for recording after video finishes (not before — video may fail)
         self._pending_relaxation_type = relaxation_type
+        self._pending_relaxation_content_id = content_id
 
         def video_runner():
-            completed = False
+            outcome = None
             try:
-                completed = bool(self.video_tool.execute(relaxation_type=relaxation_type))
+                outcome = self.video_tool.execute(filename=definition.resource_path)
             except Exception as e:
                 logger.warning(f"Video error: {e}")
             finally:
-                self.processing_queue.put(("video_finished", (relaxation_type, completed)))
+                self.processing_queue.put(("video_finished", (content_id, outcome)))
 
         threading.Thread(target=video_runner, daemon=True).start()
 
-    def _on_video_finished(self, relaxation_type, completed=True):
-        """视频播放完成：记录放松，回到正常聊天。不弹结束框。"""
-        # A missing or failed video is not a completed intervention.
+    def _on_video_finished(self, content_id, completed=True):
+        """视频播放完成：记录放松，回到正常聊天。不弹结束框。
+
+        ``completed`` is the video boundary's tri-state result: the exercise
+        name when the clip played to the end, an empty string when the
+        participant stopped it, ``None`` when it could not be played.  Only the
+        first is a completed intervention; a voluntary stop must not be
+        reported as a provider failure either.
+        """
+        content_id = content_id_from_legacy(content_id) or content_id
+        definition = self.relaxation_catalog.get(content_id)
+        runtime_snapshot = self.relaxation_runtime.snapshot()
+        owns_active_run = (
+            runtime_snapshot.state is RelaxationState.RUNNING
+            and runtime_snapshot.selected_content_id == content_id
+        )
+        if not owns_active_run:
+            logger.warning(f"[Relaxation] duplicate/stale video completion ignored: {content_id!r}")
+            return
+        if isinstance(completed, bool):
+            played, stopped = completed, False
+        elif completed is None:
+            played, stopped = False, False
+        else:
+            played, stopped = bool(completed), not bool(completed)
+        entry_source = getattr(self, "_active_relaxation_entry_source", "unknown")
+        center_dialog = getattr(self, "_relaxation_center_dialog", None)
+        center_provider_failure = (
+            not played and not stopped
+            and entry_source == "CENTER" and center_dialog is not None
+        )
+        if played:
+            self.relaxation_runtime.complete_content()
+        elif stopped:
+            self.relaxation_runtime.cancel_content("participant_stopped")
+        else:
+            self.relaxation_runtime.cancel_content("provider_failure")
+        relaxation_type = legacy_relaxation_key(content_id) or content_id
+        # A missing, failed or abandoned video is not a completed intervention.
         try:
             from app.contracts import RelaxationFinishedCommand
-            self._engine_submit(RelaxationFinishedCommand(completed=completed))
+            self._engine_submit(RelaxationFinishedCommand(
+                completed=played,
+                provider_failed=not played and not stopped,
+                stopped_early=stopped,
+            ))
         except Exception as e:
             logger.warning(f"RelaxationFinished command failed: {e}")
+
+        if center_provider_failure:
+            self._end_decision_open = False
+            self._pre_end_relax_prompted = False
+            center_dialog.restore_after_core_failure()
+            return
+
+        if stopped and center_dialog is not None:
+            # Closing the exercise early returns straight to the interview.
+            # Staying in the Center would ask someone who just walked out to
+            # choose again, and the programme already spent its one exercise.
+            self._end_decision_open = False
+            self._pre_end_relax_prompted = False
+            if self.relaxation_runtime.snapshot().state is RelaxationState.CENTER:
+                self.relaxation_runtime.exit_to_conversation()
+            if self.relaxation_runtime.snapshot().state is RelaxationState.RETURNING:
+                self.relaxation_runtime.finalize_return()
+            center_dialog.blockSignals(True)
+            center_dialog.close()
+            self._relaxation_center_dialog = None
+            self.control_panel.set_status("这次先到这儿，想再做一次可以再打开“轻松一下”")
+            return
+
+        if self.relaxation_runtime.snapshot().state is RelaxationState.CENTER:
+            self.relaxation_runtime.exit_to_conversation()
+        if self.relaxation_runtime.snapshot().state is RelaxationState.RETURNING:
+            self.relaxation_runtime.finalize_return()
+        if completed and center_dialog is not None and entry_source == "CENTER":
+            # Successful core relaxation follows POST_RELAXATION, not the
+            # Center return path; prevent closeEvent from resuming the scale.
+            center_dialog.blockSignals(True)
+            center_dialog.close()
+            self._relaxation_center_dialog = None
         # Record relaxation AFTER video finishes
-        relax_name = ""
-        if completed:
-            relax_name = self.video_tool.FILE_MAP.get(relaxation_type, "").replace(".mp4", "")
+        relax_name = definition.display_name if (completed and definition is not None) else ""
         if relax_name:
             if self.report_service:
                 self.report_service.record_relaxation(relax_name)
                 self.report_service.activity_log.append({
                     "type": "relaxation",
+                    "content_id": content_id,
+                    "content_role": getattr(definition.role, "value", definition.role),
+                    "content_type": getattr(definition.category, "value", definition.category),
+                    "display_name": definition.display_name,
+                    "entry_source": getattr(self, "_active_relaxation_entry_source", "unknown"),
+                    "completed": True,
                     "relaxation_type": relaxation_type,
                     "relaxation_name": relax_name,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1339,8 +1960,28 @@ class MainWindow(QMainWindow):
         self._pre_end_relax_prompted = False
 
         if not completed:
-            self.chat_panel.add_system_message("放松训练未能启动，未记录为已完成。请检查媒体文件后重试。")
-            self.control_panel.set_status("放松训练未完成")
+            # A failed video is not a completed relaxation; keep the session
+            # open rather than ending on a broken intervention.
+            self._auto_ending_after_relaxation = False
+            self.chat_panel.add_system_message("放松内容暂时无法打开，可以稍后再试。")
+            self.control_panel.set_status("放松内容暂时不可用")
+            return
+
+        # "End session → do relaxation first" flow: the exercise was the last
+        # step the participant chose, so end now instead of resuming chat.
+        if getattr(self, "_auto_ending_after_relaxation", False):
+            self._auto_ending_after_relaxation = False
+            closing = "这节练习做完了，那今天就先到这儿。"
+            self.chat_panel.add_system_message(closing, as_ai=True)
+            self.control_panel.set_status("放松完成，正在结束会话…")
+            QTimer.singleShot(
+                1200,
+                lambda: self._handle_session_end(
+                    EndType.GOAL_ACHIEVED,
+                    allow_force_relaxation=True,
+                    source="auto_end_after_relaxation",
+                ),
+            )
             return
 
         # A paused Runtime scale resumes after the next feedback turn.
@@ -1541,10 +2182,20 @@ class MainWindow(QMainWindow):
         return record.generation_id
 
     def _play_opening_greeting(self):
-        """Play the opening greeting - dynamically generated or fallback."""
+        """Play the opening greeting - dynamically generated or fallback.
+
+        Single-speech contract: the fallback text is shown in the bubble
+        immediately but only the FINAL greeting is spoken.  Speaking the
+        fallback first and re-speaking the generated text made every session
+        start trigger two TTS calls -- the second call's stop_playing()
+        cancelled the first synthesis mid-flight ("generator already
+        executing"), wasting GPU time and cutting the audio off.
+        """
         fallback = random.choice(GREETING_VARIANTS) if GREETING_VARIANTS else GREETING_MESSAGE
         self.chat_panel.add_system_message(fallback, as_ai=True)
-        greeting_generation = self._play_tts_async(fallback)
+        # Staleness token only (no audio enqueued): a newer generation from
+        # the real dialogue pipeline supersedes this greeting automatically.
+        token = self.delivery_controller.start_generation().generation_id
 
         def _try_generate():
             generated = ""
@@ -1562,8 +2213,9 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 60:
                     generated = generated[:60]
-                if greeting_generation is not None:
-                    self.processing_queue.put(("replace_greeting", (greeting_generation, generated)))
+                self.processing_queue.put(("replace_greeting", (token, generated)))
+            else:
+                self.processing_queue.put(("speak_greeting_fallback", (token, fallback)))
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _replace_greeting(self, new_greeting, generation_id=None):
@@ -1578,10 +2230,14 @@ class MainWindow(QMainWindow):
             self._play_tts_async(new_greeting)
 
     def _play_post_relaxation_greeting(self):
-        """Play post-relaxation greeting - dynamically generated or fallback."""
+        """Play post-relaxation greeting - dynamically generated or fallback.
+
+        Same single-speech contract as _play_opening_greeting: show the
+        fallback instantly, speak only the final text.
+        """
         fallback = random.choice(POST_RELAXATION_MESSAGE) if POST_RELAXATION_MESSAGE else "做完啦，身上有没有舒服点呀？"
         self.chat_panel.add_system_message(fallback)
-        greeting_generation = self._play_tts_async(fallback)
+        token = self.delivery_controller.start_generation().generation_id
 
         relax_type = self._engine_relaxation_type() or ""
         relax_name = {"breathing": "呼吸放松", "muscle": "肌肉放松", "meditation": "冥想"}.get(relax_type, "放松训练")
@@ -1602,8 +2258,9 @@ class MainWindow(QMainWindow):
                 generated = generated.strip()
                 if len(generated) > 50:
                     generated = generated[:50]
-                if greeting_generation is not None:
-                    self.processing_queue.put(("replace_last_system", (greeting_generation, generated)))
+                self.processing_queue.put(("replace_last_system", (token, generated)))
+            else:
+                self.processing_queue.put(("speak_greeting_fallback", (token, fallback)))
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _replace_last_system(self, new_text, generation_id=None):
@@ -1618,9 +2275,13 @@ class MainWindow(QMainWindow):
             self._play_tts_async(new_text)
 
     def _play_fill_info_prompt(self):
-        """Play fill-info prompt - dynamically generated or fallback."""
+        """Play fill-info prompt - speak the final text once.
+
+        Same single-speech contract as the opening greeting: speaking the
+        fixed fallback and then the LLM version cancelled the first synthesis
+        mid-flight ("generator already executing" right at startup).
+        """
         fallback = FILL_INFO_PROMPT
-        self._play_tts_async(fallback)
 
         def _try_generate():
             generated = ""
@@ -1634,8 +2295,14 @@ class MainWindow(QMainWindow):
                     )
             except Exception as e:
                 logger.debug(f"Fill-info prompt generation failed: {e}")
-            if generated and len(generated.strip()) > 5:
-                self._play_tts_async(generated.strip()[:50])
+            text = generated.strip()[:50] if generated and len(generated.strip()) > 5 else fallback
+            # The participant may have filled the form and started the session
+            # while this prompt was being generated; stay silent then.
+            if self._lifecycle_state_name() not in (
+                "CHATTING", "SESSION_ENDING", "SESSION_ENDED",
+                "VIDEO_PLAYING", "RELAXATION_PLAYING", "GAME_PLAYING",
+            ):
+                self._play_tts_async(text)
         threading.Thread(target=_try_generate, daemon=True).start()
 
     def _start_ollama_keepalive(self):
@@ -1726,9 +2393,13 @@ class MainWindow(QMainWindow):
             return
 
         self._end_request_in_progress = True
-        self._handle_session_end(
+        # Route the button through the readiness check: an unfinished scale or
+        # a session without relaxation must offer "先做个放松再结束" instead
+        # of jumping straight to the farewell/report (the old direct call
+        # bypassed the whole pre-end flow).
+        self._request_end_with_readiness_check(
             EndType.GOAL_ACHIEVED,
-            allow_force_relaxation=False,
+            allow_force_relaxation=True,
             source="user_button",
         )
 
@@ -1945,17 +2616,46 @@ class MainWindow(QMainWindow):
         )
 
     def _end_session_with_relaxation(self):
-        """User chose 'do relaxation first' — recommend training, no report yet."""
+        """User chose 'do relaxation first' — start it now, end after it finishes.
+
+        The old path only spoke '点左边的放松训练' and highlighted the button,
+        so the participant had to click twice for something they had already
+        chosen.  The recommended item now starts immediately and the session
+        ends by itself once the video completes.
+        """
         self._cancel_active_pipeline(reason="end with relaxation chosen")
 
         tag = self._get_end_relaxation_tag()
-        tag_cn = {"breathing": "呼吸", "muscle": "肌肉", "meditation": "冥想"}.get(tag, "呼吸")
-        rec_text = f"行，结束前咱们先做个短放松。[breath]你可以点左边的{tag_cn}放松训练。"
-        self.chat_panel.add_system_message(rec_text, as_ai=True)
-        self._play_tts_async(rec_text)
+        content_id = {
+            "breathing": "breathing",
+            "muscle": "muscle_relaxation",
+            "meditation": "meditation",
+        }.get(tag, "breathing")
+        definition = self.relaxation_catalog.get(content_id)
+        name = definition.display_name if definition is not None else "放松训练"
 
-        QTimer.singleShot(1000, lambda: self.control_panel.highlight_relax_button(tag))
-        self.control_panel.set_status("请先完成放松训练")
+        self._auto_ending_after_relaxation = True
+        self.chat_panel.add_system_message(
+            f"行，那咱们现在开始{name}，做完这一节就结束今天的会话。", as_ai=True
+        )
+        # This slot runs while the decision dialog is still closing; give the
+        # event loop one turn so the video surface owns the screen.
+        QTimer.singleShot(
+            120, lambda cid=content_id, nm=name: self._begin_end_relaxation(cid, nm)
+        )
+
+    def _begin_end_relaxation(self, content_id: str, name: str) -> None:
+        """Start the chosen relaxation; fall back to a manual nudge on failure."""
+        self.control_panel.set_status(f"正在进行{name}…")
+        if self._start_core_relaxation(content_id, entry_source="END_FLOW"):
+            return
+        self._auto_ending_after_relaxation = False
+        self.chat_panel.add_system_message(
+            "这段放松内容没能打开，你可以点左边对应的放松按钮再试一次。", as_ai=True
+        )
+        tag = {"muscle_relaxation": "muscle"}.get(content_id, content_id)
+        QTimer.singleShot(300, lambda: self.control_panel.highlight_relax_button(tag))
+        self.control_panel.set_status("放松内容暂时不可用")
 
     def _on_session_finished(self, report_ok: bool = True, exit_after: bool = False):
         """Session ended — keep chat visible until operator confirms next subject."""
@@ -2100,7 +2800,13 @@ class MainWindow(QMainWindow):
             )
 
     def _get_relaxation_info_str(self):
-        """Get Chinese description of relaxation training."""
+        """Get Chinese description of relaxation training.
+
+        The lifecycle snapshot only knows what is playing *now*, so after a
+        completed exercise it is empty and the report said "未进行" while
+        ``relaxation_completed_type`` (written from the report service) said
+        "呼吸放松".  A recorded completion is the stronger fact.
+        """
         relax_map = {
             "huxi": "呼吸放松训练", "jirou": "渐进式肌肉放松",
             "mingxiang": "冥想正念训练", "冥想训练": "冥想正念训练",
@@ -2112,7 +2818,38 @@ class MainWindow(QMainWindow):
         if raw_type:
             clean_type = raw_type.replace(".mp4", "")
             return relax_map.get(clean_type, clean_type)
+        recorded = getattr(self.report_service, "completed_relaxation", None) if self.report_service else None
+        if recorded:
+            return str(recorded)
         return "未进行"
+
+    def _relaxation_recommendation_code(self) -> str | None:
+        """What the pipeline recommended, whether or not it was ever played.
+
+        Read through the pipeline's accessor rather than its attribute so the
+        window never depends on the pipeline's internal field names.
+        """
+        pipeline = getattr(self, "pipeline", None)
+        getter = getattr(pipeline, "get_relaxation_recommendation", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception as error:  # pragma: no cover - defensive
+            logger.warning(f"Failed to read relaxation recommendation: {error}")
+            return None
+
+    def _risk_disclosed_flag(self) -> bool:
+        """Whether the pipeline's own detector saw a self-harm statement."""
+        pipeline = getattr(self, "pipeline", None)
+        getter = getattr(pipeline, "get_risk_disclosed", None)
+        if not callable(getter):
+            return False
+        try:
+            return bool(getter())
+        except Exception as error:  # pragma: no cover - defensive
+            logger.warning(f"Failed to read risk flag: {error}")
+            return False
 
     def _generate_and_save_pdf(self, researcher_report, user_id, end_type, save_result=None):
         """Generate PDF report."""
@@ -2150,6 +2887,12 @@ class MainWindow(QMainWindow):
     def _handle_session_end(self, end_type, relaxation_tag=None,
                             allow_force_relaxation=True, source="ui"):
         """Submit an end request; SessionEngine owns all lifecycle decisions."""
+        # Ending a session must never resume a paused scale; keep incomplete
+        # answers for reporting and discard only the transient Center context.
+        self._clear_relaxation_return_context()
+        center = getattr(self, "_relaxation_center_dialog", None)
+        if center is not None and center.isVisible():
+            center.close_to_chat()
         try:
             from app.contracts import EndSessionCommand
             self._engine_submit(EndSessionCommand(
@@ -2182,6 +2925,11 @@ class MainWindow(QMainWindow):
         def generate_farewell_and_reports():
             farewell_generation_id = None
             farewell_sentences: list[SentenceReady] = []
+            # Initialised before the try: the finally block reads them, so an
+            # early failure must not turn into UnboundLocalError.
+            full_feedback = ""
+            raw_snapshot_saved = False
+            report_ok = False
             try:
                 user_id = self.current_user_id or "default_user"
                 current_user_info = getattr(self, "user_info", {})
@@ -2196,10 +2944,11 @@ class MainWindow(QMainWindow):
                 # --- Phase 1: Visitor feedback ---
                 # Exit path: skip long farewell, keep it short.
                 # End session: generate full farewell via LLM streaming.
-                full_feedback = ""
                 if is_exit:
                     full_feedback = "本次会话已结束，系统正在保存报告。"
                     farewell_generation_id = self.delivery_controller.start_generation().generation_id
+                    # UI-only banner: show it, but never persist it as a turn.
+                    self._non_persisted_generations.add(farewell_generation_id)
                     self.processing_queue.put(("start_ai_message", farewell_generation_id))
                     farewell_sentence = SentenceReady(
                         farewell_generation_id,
@@ -2272,14 +3021,23 @@ class MainWindow(QMainWindow):
                                 self.processing_queue.put(("stream_text", normalized))
                     self.processing_queue.put(("finish_streaming", farewell_generation_id))
 
+                # The quit banner is a UI affordance, not dialogue content.  It
+                # must not be archived as the visitor's feedback nor summarised
+                # into the subject's session history; a QUIT session simply has
+                # no farewell to archive.
+                archive_feedback = "" if is_exit else full_feedback
+
                 # --- Phase 2: Save raw snapshot → Generate report + PDF FIRST ---
                 # Reports MUST complete before farewell TTS plays.
                 self._current_report_generating = True
                 self.processing_queue.put(("status", "正在保存会话数据..."))
-                raw_snapshot_saved = False
                 try:
                     if self.data_manager:
-                        self.data_manager.save_session_summary(summary=full_feedback[:500])
+                        summary_text = archive_feedback[:500] if archive_feedback else (
+                            f"会话由来访者主动结束（{self.report_service.round_count} 轮），"
+                            "未生成告别语。"
+                        )
+                        self.data_manager.save_session_summary(summary=summary_text)
                         raw_snapshot_saved = True
                         logger.info("Raw session snapshot saved before report generation")
                 except Exception as e:
@@ -2295,9 +3053,17 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         logger.warning(f"Failed to get scale results: {e}")
 
+                # Which dimensions the interview actually asked about; recorded
+                # by the pipeline per turn, never inferred from the transcript.
+                interview_coverage = {}
+                if self.pipeline and hasattr(self.pipeline, "get_interview_coverage"):
+                    try:
+                        interview_coverage = self.pipeline.get_interview_coverage()
+                    except Exception as e:
+                        logger.warning(f"Failed to get interview coverage: {e}")
+
                 # Generate report with timeout
                 researcher_report = None
-                report_ok = False
                 try:
                     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
                     report_pool = ThreadPoolExecutor(max_workers=1)
@@ -2306,7 +3072,10 @@ class MainWindow(QMainWindow):
                             self.report_service.generate_researcher_report,
                             conversation_history, user_id, end_type,
                             current_user_info, relaxation_rec or relax_str,
-                            self.session_emotions, scale_results
+                            self.session_emotions, scale_results,
+                            interview_coverage=interview_coverage,
+                            relaxation_recommendation=self._relaxation_recommendation_code(),
+                            risk_disclosed=self._risk_disclosed_flag(),
                         )
                         researcher_report = future.result(timeout=60)
                     finally:
@@ -2329,7 +3098,7 @@ class MainWindow(QMainWindow):
                     if self.data_manager and researcher_report:
                         try:
                             save_result = self.data_manager.save_session_report(
-                                researcher_report, full_feedback, end_type.value
+                                researcher_report, archive_feedback, end_type.value
                             )
                         except Exception as e:
                             logger.warning(f"Report save failed: {e}")

@@ -1,6 +1,7 @@
 # STT Service - FunASR Integration
 
 import os
+import re
 import sys
 import gc
 from dataclasses import dataclass, field
@@ -43,15 +44,21 @@ import torch
 import tempfile
 import soundfile as sf
 
+try:  # optional: only used when a capture device refuses 16 kHz
+    import soxr as _soxr
+except ImportError:  # pragma: no cover - depends on the runtime environment
+    _soxr = None
+
 # Add parent directory to path for config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     FUNASR_MODEL_PATH, SAMPLE_RATE, CHANNELS,
     USE_VAD_AUTO_STOP, VAD_SILENCE_THRESHOLD,
-    VAD_SILENCE_DURATION, VAD_SPEECH_MIN_DURATION
+    VAD_SILENCE_DURATION, VAD_SPEECH_MIN_DURATION,
+    VAD_MODEL_PATH,
 )
 from services.fsmn_vad_adapter import FSMNVADAdapter, VadEvent
-from services.logger import get_logger
+from services.logger import get_logger, text_meta
 
 logger = get_logger(__name__)
 
@@ -59,8 +66,305 @@ logger = get_logger(__name__)
 _RECORDING_SENTINEL = object()
 
 
+# Device names that capture the sound card's own output rather than a room
+# microphone.  They must never win over a real capture endpoint: on a Windows
+# machine whose default input device is unset, "立体声混音" (Stereo Mix) is
+# often the only device carrying the audio vendor's name, so a plain keyword
+# scan records the speakers instead of the participant.
+_LOOPBACK_DEVICE_MARKERS = (
+    "stereo mix", "立体声混音", "what u hear", "loopback", "wave out mix",
+    "cable output", "virtual", "vb-audio", "线路输入", "line input",
+)
+_MICROPHONE_PATTERN = re.compile(
+    r"(microphone|\bmic\b|麦克风|话筒|headset|\barray\b)", re.IGNORECASE
+)
+_VENDOR_MARKERS = ("realtek", "nvidia", "amd", "intel", "usb audio")
+_INPUT_DEVICE_ENV = "VOICECHAT_INPUT_DEVICE"
+
+
+def _match_input_by_spec(devices, spec: str):
+    """Resolve ``VOICECHAT_INPUT_DEVICE`` given a device index or name fragment."""
+    spec = str(spec).strip()
+    if not spec:
+        return None
+    if spec.isdigit():
+        index = int(spec)
+        if 0 <= index < len(devices) and devices[index].get("max_input_channels", 0) > 0:
+            return index
+        return None
+    low = spec.lower()
+    for index, device in enumerate(devices):
+        if device.get("max_input_channels", 0) <= 0:
+            continue
+        if low in str(device.get("name", "")).lower():
+            return index
+    return None
+
+
+def select_input_device(devices, *, default_index=None):
+    """Return ``(index, reason)`` for the most plausible microphone.
+
+    Order: a real microphone name, then a vendor capture endpoint, then the
+    system default, then any remaining capture endpoint.  Loopback devices are
+    only used when nothing else exists, because they record playback rather
+    than the participant's voice.
+
+    ``VOICECHAT_INPUT_DEVICE`` overrides the choice by index or name fragment.
+    That is how a machine with no physical microphone runs the loopback
+    self-test (TTS -> CABLE -> ASR) without the automatic rule refusing the
+    virtual endpoint.
+    """
+    forced = os.environ.get(_INPUT_DEVICE_ENV, "").strip()
+    if forced:
+        matched = _match_input_by_spec(devices, forced)
+        if matched is not None:
+            return matched, f"{_INPUT_DEVICE_ENV}={forced}"
+
+    inputs = [
+        (index, device)
+        for index, device in enumerate(devices)
+        if device.get("max_input_channels", 0) > 0
+    ]
+
+    def name_of(device):
+        return str(device.get("name", "")).lower()
+
+    def is_loopback(name):
+        return any(marker in name for marker in _LOOPBACK_DEVICE_MARKERS)
+
+    capture = [(index, device) for index, device in inputs if not is_loopback(name_of(device))]
+    loopback = [(index, device) for index, device in inputs if is_loopback(name_of(device))]
+
+    for index, device in capture:
+        if _MICROPHONE_PATTERN.search(name_of(device)):
+            return index, f"microphone: {device.get('name')}"
+    for index, device in capture:
+        if any(marker in name_of(device) for marker in _VENDOR_MARKERS):
+            return index, f"vendor capture: {device.get('name')}"
+
+    if default_index is not None and default_index >= 0:
+        return default_index, f"system default input (index {default_index})"
+
+    for index, device in capture:
+        return index, f"first capture input: {device.get('name')}"
+    for index, device in loopback:
+        return index, f"loopback input: {device.get('name')}"
+    return None, "no input device"
+
+
 class RecordingStartError(RuntimeError):
     """Raised when a microphone recording cannot be started."""
+
+
+# Capture is requested in 64 ms blocks because that is what 1024 frames at
+# 16 kHz already was; keeping the period constant means the VAD chunker and the
+# silence timers see the same cadence whichever native rate the device runs at.
+_CAPTURE_BLOCK_MS = 64
+_CAPTURE_RATE_ENV = "VOICECHAT_CAPTURE_RATE"
+_CAPTURE_RATE_FALLBACKS = (SAMPLE_RATE, 48000, 44100)
+
+
+class _CaptureResampler:
+    """Block resampler from a device's native rate down to ``SAMPLE_RATE``.
+
+    Stateful on purpose.  Calling ``resample_poly`` on every 64 ms block
+    restarts the FIR filter at each boundary, which leaves an audible click
+    roughly fifteen times per second in the saved utterance and feeds the VAD
+    a discontinuous signal.  ``soxr.ResampleStream`` carries its filter state
+    across blocks, so the 16 kHz stream is continuous end to end.
+
+    When the device already runs at 16 kHz this object is a passthrough and no
+    resampling dependency is touched.
+    """
+
+    def __init__(self, in_rate: int) -> None:
+        self.in_rate = int(in_rate)
+        self.enabled = self.in_rate != SAMPLE_RATE
+        self._stream = None
+        if not self.enabled:
+            return
+        if _soxr is None:
+            raise RuntimeError(
+                f"input device runs at {self.in_rate} Hz and the 'soxr' package "
+                f"is missing, so it cannot be resampled to {SAMPLE_RATE} Hz"
+            )
+        self._stream = _soxr.ResampleStream(
+            self.in_rate,
+            SAMPLE_RATE,
+            CHANNELS,
+            dtype="float32",
+            quality="HQ",
+        )
+
+    @property
+    def blocksize(self) -> int:
+        """Frames per callback that keep a constant 64 ms capture period."""
+        return max(1, int(round(self.in_rate * _CAPTURE_BLOCK_MS / 1000)))
+
+    def process(self, block, *, last: bool = False):
+        """Return the block at ``SAMPLE_RATE``, or ``None`` when it yields nothing."""
+        if not self.enabled:
+            return block
+        out = self._stream.resample_chunk(
+            np.ascontiguousarray(block, dtype=np.float32),
+            last=last,
+        )
+        return out if out.size else None
+
+
+def _hostapi_rank(devices, device_index: int) -> int:
+    """Rank a capture backend, lowest first.
+
+    PortAudio's WDM-KS path is the one backend that can open a device and then
+    deliver no frames at all (seen on Windows 10 + Realtek: callbacks never
+    fire, and a blocking read returns uninitialised memory).  Because "the
+    stream opened" is not proof of capture, the backends that go through the
+    Windows audio engine are tried first and WDM-KS is demoted to last resort.
+    Unknown shapes stay in the middle so nothing is ever dropped.
+    """
+    try:
+        api_index = int(devices[device_index].get("hostapi"))
+        name = str(sd.query_hostapis(api_index).get("name", "")).lower()
+    except Exception:
+        return 3
+    if "wasapi" in name:
+        return 0
+    if "directsound" in name:
+        return 1
+    if "mme" in name:
+        return 2
+    if "wdm" in name:
+        return 9
+    return 3
+
+
+def _device_is_loopback(device) -> bool:
+    """True for endpoints that carry the system's own playback."""
+    try:
+        name = str(device.get("name", "")).lower()
+    except Exception:
+        return False
+    return any(marker in name for marker in _LOOPBACK_DEVICE_MARKERS)
+
+
+def order_input_candidates(devices, preferred: int | None = None) -> list[int]:
+    """Capture endpoints in the order they should be opened.
+
+    A real microphone always precedes a loopback endpoint.  The host-API rank
+    alone is not enough on a machine with VB-Cable installed: WASAPI exposes
+    "CABLE Output" (rank 0) and a working Realtek microphone appears only under
+    WDM-KS (rank 9), so backend-first ordering would hand the recording to the
+    virtual cable and capture the system's own playback instead of the person.
+    Loopback devices stay in the list, ranked after real ones, so a machine
+    with no usable microphone can still record by playing the voice aloud.
+    """
+    candidates = [
+        index
+        for index, device in enumerate(devices)
+        if device.get("max_input_channels", 0) > 0
+    ]
+    return sorted(
+        candidates,
+        key=lambda i: (
+            # An explicitly preferred endpoint goes first even when it is a
+            # loopback one -- that is the whole point of
+            # ``VOICECHAT_INPUT_DEVICE`` on a machine without a microphone.
+            0 if i == preferred else _device_is_loopback(devices[i]),
+            0 if i == preferred else 1,
+            _hostapi_rank(devices, i),
+            i,
+        ),
+    )
+
+
+def _resolve_capture_rate(device_id: int, devices, *, log=None) -> int:
+    """Return the rate to open ``device_id`` at.
+
+    16 kHz is tried first so the common case stays a passthrough and behaves
+    exactly as before.  Only when the driver refuses it (many Realtek capture
+    endpoints expose 44.1/48 kHz only) do we fall back to the device's own
+    default and let :class:`_CaptureResampler` bring it down to 16 kHz.
+
+    ``VOICECHAT_CAPTURE_RATE`` forces a specific rate.  If nothing can be
+    verified the configured ``SAMPLE_RATE`` is returned unchanged, so opening
+    the stream still fails with the driver's own error rather than a guess.
+    """
+    forced = os.environ.get(_CAPTURE_RATE_ENV)
+    candidates: list[int] = []
+    if forced:
+        try:
+            candidates.append(int(forced))
+        except ValueError:
+            if log is not None:
+                log.warning("ignoring %s=%r: not an integer", _CAPTURE_RATE_ENV, forced)
+    try:
+        native = int(devices[device_id].get("default_samplerate") or 0)
+    except Exception:
+        native = 0
+    candidates.extend(_CAPTURE_RATE_FALLBACKS)
+    if native:
+        candidates.append(native)
+
+    seen: set[int] = set()
+    for rate in candidates:
+        if rate <= 0 or rate in seen:
+            continue
+        seen.add(rate)
+        try:
+            sd.check_input_settings(
+                device=device_id,
+                samplerate=rate,
+                channels=CHANNELS,
+                dtype="float32",
+            )
+        except Exception:
+            continue
+        return rate
+    return SAMPLE_RATE
+
+
+class _AutoModelInference:
+    """Adapt ``funasr.AutoModel`` to the ``inference(data_in=[...])`` contract.
+
+    Some Fun-ASR-Nano checkpoints ship without the ``model.py`` entry point
+    that ``FunASRNano.from_pretrained`` imports, even though the same
+    ``model.pt`` loads fine through funasr's own AutoModel.  The service only
+    ever calls ``inference(data_in=[path], language=...)`` and reads back a
+    list of ``{"text": ...}`` segments, so mapping that signature is enough.
+    """
+
+    def __init__(self, model) -> None:
+        self._model = model
+
+    def inference(self, data_in=None, **kwargs):
+        language = kwargs.get("language") or "zh"
+        results = []
+        for path in data_in or []:
+            try:
+                out = self._model.generate(
+                    input=path,
+                    cache={},
+                    batch_size_s=60,
+                    language=language,
+                    use_itn=True,
+                )
+            except Exception as exc:
+                logger.warning("AutoModel inference failed on %s: %s", path, exc)
+                out = []
+            results.append(out if out else [{"text": ""}])
+        return results
+
+    # load_model() normalizes dtypes and calls eval() on the returned object.
+    # AutoModel owns its own module graph and already applied the checkpoint's
+    # own loading path, so these are deliberately no-ops.
+    def parameters(self):
+        return iter(())
+
+    def float(self):
+        return self
+
+    def eval(self):
+        return self
 
 
 @dataclass
@@ -78,6 +382,7 @@ class _RecordingState:
     stream: object | None = None
     accepting_frames: bool = False
     stop_requested: bool = False
+    cancelled: bool = False
     sentinel_enqueued: bool = False
     vad_triggered: bool = False
     vad_silence_frames: int = 0
@@ -85,6 +390,8 @@ class _RecordingState:
     vad_buffer: list = field(default_factory=list, repr=False)
     vad_buffer_samples: int = 0
     vad_speech_started: bool = False
+    capture_rate: int = SAMPLE_RATE
+    resampler: object | None = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     collector_thread: threading.Thread | None = field(default=None, repr=False)
 
@@ -124,11 +431,15 @@ class STTService:
             if self.model_path not in sys.path:
                 sys.path.insert(0, self.model_path)
 
+            FunASRNano = None
             try:
-                from model import FunASRNano
+                from model import FunASRNano  # checkpoint-local entry point
             except ImportError:
-                logger.warning(f"Could not import FunASRNano from {self.model_path}, checking path...")
-                raise
+                logger.warning(
+                    "No model.py beside %s (the FunASRNano entry point is absent); "
+                    "loading the same weights through funasr.AutoModel instead.",
+                    self.model_path,
+                )
 
             _orig_module_to = torch.nn.Module.to
 
@@ -168,14 +479,33 @@ class STTService:
                         return self_mod
                     raise
 
-            torch.nn.Module.to = _patched_module_to
-            try:
-                self.model, self.model_kwargs = FunASRNano.from_pretrained(
-                    model=self.model_path,
-                    device=self.device
+            if FunASRNano is not None:
+                torch.nn.Module.to = _patched_module_to
+                try:
+                    self.model, self.model_kwargs = FunASRNano.from_pretrained(
+                        model=self.model_path,
+                        device=self.device
+                    )
+                finally:
+                    torch.nn.Module.to = _orig_module_to
+            else:
+                from funasr import AutoModel
+
+                auto_device = self.device or "cpu"
+                if auto_device == "cuda":
+                    auto_device = "cuda:0"
+                self.model = _AutoModelInference(
+                    AutoModel(
+                        model=self.model_path,
+                        device=auto_device,
+                        vad_model=None,
+                        punc_model=None,
+                        disable_update=True,
+                        disable_pbar=True,
+                        disable_log=True,
+                    )
                 )
-            finally:
-                torch.nn.Module.to = _orig_module_to
+                self.model_kwargs = {}
 
             self.model_kwargs['language'] = 'zh'
             # The bundled Fun-ASR-Nano checkpoint mixes bf16 LLM weights with
@@ -222,7 +552,7 @@ class STTService:
             return
 
         self._vad_adapter_attempted = True
-        adapter = FSMNVADAdapter(device=self._vad_device)
+        adapter = FSMNVADAdapter(device=self._vad_device, model_id=VAD_MODEL_PATH)
         try:
             adapter.load()
         except Exception as exc:
@@ -302,96 +632,130 @@ class STTService:
                 self.vad_adapter = None
                 self._vad_backend = "RMS_FALLBACK"
         
-        def audio_callback(indata, frames, time, status):
-            if status:
-                logger.debug(f"Audio status: {status}")
-            with recording_state.lock:
-                if not recording_state.accepting_frames:
-                    return
+        def _make_audio_callback(resampler: _CaptureResampler):
+            """Build the stream callback for one already-resolved device.
 
-                # Put the accepted frame before requesting stop.  The same
-                # recording lock protects this ordering against manual stop.
-                recording_state.audio_queue.put(indata.copy())
+            The device may deliver 44.1/48 kHz blocks; converting here keeps
+            every consumer below (VAD chunk accounting, silence timers, the
+            saved wav, ASR) receiving exactly the 16 kHz stream it expects.
+            """
+
+            def audio_callback(indata, frames, time, status):
+                if status:
+                    logger.debug(f"Audio status: {status}")
+                with recording_state.lock:
+                    if not recording_state.accepting_frames:
+                        return
+
+                    # Put the accepted frame before requesting stop.  The same
+                    # recording lock protects this ordering against manual stop.
+                    block = resampler.process(indata)
+                    if block is not None and len(block):
+                        recording_state.audio_queue.put(block)
+
+            return audio_callback
         
         try:
             device_id = None
-            # Find the best input device
+            # Find the best input device without ever preferring a loopback
+            # endpoint that records playback instead of the participant.
             devices = sd.query_devices()
-            best_device_id = None
+            try:
+                default_index = sd.query_devices(kind="input")["index"]
+            except Exception:
+                default_index = None
 
-            # Default: prefer real microphone
-            mic_keywords = ["mic", "microphone", "麦克风", "array", "realtek"]
-            virtual_keywords = ["cable", "virtual", "stereo mix"]
-
-            # Priority 1: Real microphone
-            for i, dev in enumerate(devices):
-                if dev['max_input_channels'] > 0:
-                    name = dev['name'].lower()
-                    if any(k in name for k in mic_keywords):
-                        best_device_id = i
-                        logger.info(f"[ASRDebug] Selected microphone: {dev['name']} (Index {i})")
-                        break
-
-            # Priority 2: Virtual/cable (only if no mic found)
-            if best_device_id is None:
-                for i, dev in enumerate(devices):
-                    if dev['max_input_channels'] > 0:
-                        name = dev['name'].lower()
-                        if any(k in name for k in virtual_keywords):
-                            best_device_id = i
-                            logger.info(f"[ASRDebug] Selected virtual input: {dev['name']} (Index {i})")
-                            break
-
-            # Priority 3: Default input device
-            if best_device_id is None:
-                try:
-                    default_device = sd.query_devices(kind='input')
-                    best_device_id = default_device['index']
-                    logger.info(f"[ASRDebug] Using default input: {default_device['name']}")
-                except Exception:
-                    pass
-
-            # Priority 4: ANY input device
-            if best_device_id is None:
-                for i, dev in enumerate(devices):
-                    if dev['max_input_channels'] > 0:
-                        best_device_id = i
-                        logger.info(f"[ASRDebug] Fallback device: {dev.get('name')} (Index {i})")
-                        break
-            
+            best_device_id, reason = select_input_device(devices, default_index=default_index)
             if best_device_id is None:
                 raise RuntimeError("No microphone found! Please check your audio settings.")
-            
-            device_id = best_device_id
+            logger.info(f"[ASRDebug] Selected input device: {reason} (Index {best_device_id})")
+
+            # Open order comes from a helper so the rule stays testable without
+            # a sound device: real capture endpoints first, loopback last.
+            candidates = order_input_candidates(devices, preferred=best_device_id)
 
             # Keep a newly constructed stream local until the complete startup
             # attempt has passed its stale/cancellation checks.  Publishing it
             # early would let a late start thread overwrite a newer recording.
-            candidate_stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype=np.float32,
-                callback=audio_callback,
-                blocksize=1024,
-                device=device_id
-            )
+            candidate_stream = None
+            candidate_resampler = None
+            candidate_rate = SAMPLE_RATE
+            last_open_error: Optional[Exception] = None
+            for candidate_id in candidates:
+                try:
+                    capture_rate = _resolve_capture_rate(candidate_id, devices, log=logger)
+                    resampler = _CaptureResampler(capture_rate)
+                    candidate_stream = sd.InputStream(
+                        samplerate=capture_rate,
+                        channels=CHANNELS,
+                        dtype=np.float32,
+                        callback=_make_audio_callback(resampler),
+                        blocksize=resampler.blocksize,
+                        device=candidate_id
+                    )
+                except Exception as exc:
+                    last_open_error = exc
+                    self._close_stream_handle(candidate_stream)
+                    candidate_stream = None
+                    logger.warning(
+                        "[ASRDebug] input device %s failed to open: %s; trying next candidate",
+                        candidate_id, exc,
+                    )
+                    continue
+                device_id = candidate_id
+                candidate_resampler = resampler
+                candidate_rate = capture_rate
+                try:
+                    api_name = sd.query_hostapis(int(devices[candidate_id].get("hostapi")))["name"]
+                except Exception:
+                    api_name = "unknown"
+                if resampler.enabled:
+                    logger.info(
+                        "[ASRDebug] device %s via %s captures at %d Hz; resampling to "
+                        "%d Hz (soxr stream, %d-frame blocks)",
+                        candidate_id, api_name, capture_rate, SAMPLE_RATE,
+                        resampler.blocksize,
+                    )
+                else:
+                    logger.info(
+                        "[ASRDebug] device %s via %s captures natively at %d Hz "
+                        "(no resampling)",
+                        candidate_id, api_name, capture_rate,
+                    )
+                if candidate_id != best_device_id:
+                    if _device_is_loopback(devices[candidate_id]):
+                        logger.warning(
+                            "[ASRDebug] falling back to 内录/loopback device %s: the "
+                            "recording captures SYSTEM PLAYBACK, not a microphone. "
+                            "Play the participant's voice through the speakers.",
+                            candidate_id,
+                        )
+                    else:
+                        logger.warning(
+                            "[ASRDebug] falling back to input device %s (preferred device "
+                            "could not be opened)", candidate_id,
+                        )
+                break
+
+            if candidate_stream is None or device_id is None:
+                raise RuntimeError(
+                    f"No usable input device could be opened (last error: {last_open_error}). "
+                    "Check Windows sound settings: the recording device may be disabled."
+                )
 
             if not self._startup_attempt_is_current(recording_state):
                 self._close_stream_handle(candidate_stream)
                 return False
 
-            # PortAudio may block here.  The candidate remains unpublished so
-            # a concurrent stop can retire this attempt safely.
+            # Start only after the stale/cancellation checks so a cancelled
+            # startup never activates the device.  A start failure falls into
+            # the outer handler below, which closes the stream and reports
+            # the error.
             candidate_stream.start()
 
-            if not self._startup_attempt_is_current(recording_state):
-                self._close_stream_handle(candidate_stream)
-                return False
-
-            # Start the collector before opening the stream.  A device may
-            # deliver a callback immediately after ``start()``; the recording
-            # queue already exists and the collector is committed atomically
-            # below before startup is reported successful.
+            # A concurrent stop can still retire this attempt safely; the
+            # collector below is committed atomically before startup is
+            # reported successful.
             def collect_audio():
                 while True:
                     audio_chunk = recording_state.audio_queue.get()
@@ -403,6 +767,20 @@ class STTService:
                         recording_state.audio_queue.task_done()
 
                     self._process_vad_audio(recording_state, audio_chunk)
+
+                # Drain the resampler's internal delay so the tail of the last
+                # syllable is not dropped.  A flush failure is harmless: it
+                # costs at most a few milliseconds at the very end.
+                resampler = recording_state.resampler
+                if resampler is not None and resampler.enabled:
+                    try:
+                        tail = resampler.process(
+                            np.zeros((0, CHANNELS), dtype=np.float32), last=True
+                        )
+                        if tail is not None and len(tail):
+                            recording_state.recorded_audio.append(tail)
+                    except Exception as exc:
+                        logger.debug("resampler flush skipped: %s", exc)
 
                 # VAD auto-stop (or manual stop) reached: close the recording
                 # stream from this collector thread, not from the audio
@@ -430,6 +808,8 @@ class STTService:
                     ):
                         recording_state.stream = candidate_stream
                         recording_state.collector_thread = collector
+                        recording_state.resampler = candidate_resampler
+                        recording_state.capture_rate = candidate_rate
                         self.stream = candidate_stream
                         self.collect_thread = collector
                         collector.start()
@@ -623,6 +1003,23 @@ class STTService:
         self._close_stream_handle(stream)
         self.stream = None
 
+    def cancel(self) -> None:
+        """Abandon an in-flight capture; stop_recording() then yields no audio.
+
+        Implements the unified voice cancel interface.  The lossless stop
+        request still runs so the queue drains and the stream closes
+        deterministically, but the captured frames are discarded at the
+        return boundary instead of being transcribed.
+        """
+        recording_state = self._recording_state
+        if recording_state is None:
+            self.is_recording = False
+            self._stop_stream()
+            return
+        with recording_state.lock:
+            recording_state.cancelled = True
+        self._request_recording_stop(recording_state)
+
     def stop_recording(self) -> np.ndarray:
         """Stop recording and return the audio data."""
         recording_state = self._recording_state
@@ -659,6 +1056,12 @@ class STTService:
                         self.recorded_audio = []
                     if self.audio_queue is recording_state.audio_queue:
                         self.audio_queue = queue.Queue()
+
+            if recording_state.cancelled:
+                # cancel() was requested: the drain above still ran so the
+                # capture lifecycle stays deterministic, but no frames are
+                # handed back for transcription.
+                return np.array([])
 
             chunks = completed_chunks
 
@@ -708,7 +1111,7 @@ class STTService:
                 # res seems to be a list of results (one per input file)
                 # each result is a list of segments?
                 
-                logger.debug(f"Raw result: {res}")
+                logger.debug(f"Raw result: {text_meta('raw', res, limit=1000)}")
                 
                 if res and len(res) > 0:
                     item = res[0]
@@ -721,7 +1124,10 @@ class STTService:
                     
                     # Check if result is primarily Chinese, if not retry with forced Chinese
                     if text and not self._is_chinese_text(text):
-                        logger.warning(f"Non-Chinese text detected: {text}, retrying with forced Chinese...")
+                        logger.warning(
+                            "Non-Chinese text detected: "
+                            f"{text_meta('text', text)}, retrying with forced Chinese..."
+                        )
                         # Retry with explicit Chinese language setting
                         retry_kwargs = dict(self.model_kwargs)
                         retry_kwargs['language'] = 'zh'
@@ -735,7 +1141,7 @@ class STTService:
                                 text = retry_item[0].get("text", "").strip()
                             elif isinstance(retry_item, dict):
                                 text = retry_item.get("text", "").strip()
-                        logger.info(f"Retry result: {text}")
+                        logger.info(f"Retry result: {text_meta('retry_result', text)}")
                     
                     # Post-processing: correct common misrecognitions
                     text = self._correct_common_errors(text)
@@ -765,7 +1171,7 @@ class STTService:
             # This helps avoid edge cases in model processing
             dummy_audio = np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.01
             result = self.transcribe(dummy_audio)
-            logger.info(f"STT warmup complete. Test result: '{result}'")
+            logger.info(f"STT warmup complete. {text_meta('warmup_result', result)}")
             return True
         except Exception as e:
             logger.warning(f"STT Warmup had issue (non-fatal): {e}")
@@ -858,8 +1264,24 @@ class STTService:
 # Singleton instance
 _stt_service = None
 
+
 def get_stt_service() -> STTService:
+    """Return the shared speech-input service for the configured provider.
+
+    The ASR provider is selected by runtime configuration
+    (config/runtime.yaml -> asr.provider).  ``funasr`` is currently the
+    only implementation; an unknown provider is a hard error so a
+    misconfiguration cannot silently disable speech input.
+    """
     global _stt_service
+    from config import ASR_PROVIDER
+    from deployment.runtime_config import ASR_PROVIDERS, ASR_PROVIDER_FUNASR
+
+    if ASR_PROVIDER != ASR_PROVIDER_FUNASR:
+        raise ValueError(
+            f"unknown ASR provider {ASR_PROVIDER!r}; "
+            f"supported providers: {', '.join(sorted(ASR_PROVIDERS))}"
+        )
     if _stt_service is None:
         _stt_service = STTService()
     return _stt_service

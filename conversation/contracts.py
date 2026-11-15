@@ -51,16 +51,38 @@ class RouterAction(str, Enum):
 
 
 class RouterProposal(_FrozenContract):
-    """A Router suggestion that cannot directly mutate runtime state."""
+    """A Router suggestion that cannot directly mutate runtime state.
+
+    ``offer`` distinguishes a suggestion to *invite* from a suggestion to
+    *execute*.  ``offer="scale"`` with ``action=START_SCALE`` means "ask the
+    participant whether they are willing to do this questionnaire"; it does not
+    start anything.  ``TurnPolicy`` is the only place that difference is
+    resolved, and it resolves it into ``TurnAction.OFFER_SCALE``.
+
+    ``clarify`` marks a proposal to ask the participant what they meant, which
+    the policy may convert into ``CLARIFY_INPUT``.
+    """
 
     action: RouterAction = RouterAction.CHAT
     scale_name: Optional[str] = None
+    offer: Optional[str] = None
+    clarify: bool = False
     intervention_type: Optional[str] = None
     emotion: str = "neutral"
     intensity: float = Field(default=0.0, ge=0.0, le=1.0)
     needs_rag: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
+    #: Conversational move and whether the turn ends in a question.  See
+    #: :mod:`decision.posture`.  ``None`` means the decision layer did not
+    #: supply one (legacy router, degraded decision), and the writer keeps its
+    #: general guidance.  These are language instructions, not permissions:
+    #: they can never start a scale or end a session.
+    strategy: Optional[str] = None
+    stance: Optional[str] = None
+    #: Which dimension of experience the question should land on.  Only set
+    #: when the turn asks something; see ``decision.posture.resolve_focus``.
+    focus: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_scale(self) -> "RouterProposal":
@@ -68,6 +90,10 @@ class RouterProposal(_FrozenContract):
             raise ValueError(f"unknown scale_name: {self.scale_name}")
         if self.action is RouterAction.START_SCALE and self.scale_name is None:
             raise ValueError("START_SCALE requires scale_name")
+        if self.offer not in (None, "scale", "relaxation"):
+            raise ValueError(f"unknown offer kind: {self.offer}")
+        if self.offer == "scale" and self.scale_name is None:
+            raise ValueError("a scale offer requires scale_name")
         return self
 
     @classmethod
@@ -145,6 +171,10 @@ class TurnStateSnapshot(_FrozenContract):
     active_scale: Optional[str] = None
     current_item: Optional[int] = Field(default=None, ge=1)
     waiting_for_answer: bool = False
+    #: The participant asked to stop the questions for now.  A paused scale is
+    #: still the active scale, but it no longer owns the turn: chatting must
+    #: not silently resume it, only an explicit request to go back may.
+    scale_paused: bool = False
     completed_scales: tuple[str, ...] = ()
     relaxation_used: bool = False
     # Policy fact: a proactive recommendation has already been offered in
@@ -154,6 +184,43 @@ class TurnStateSnapshot(_FrozenContract):
     game_active: bool = False
     time_limit_reached: bool = False
 
+    # -- invitation state -------------------------------------------------
+    # Registered scales the runtime can still start.  Empty means "there is
+    # nothing to offer", which the policy treats as a hard stop rather than as
+    # an invitation to invent a scale name.
+    scale_candidates: tuple[str, ...] = ()
+    #: Deterministic symptom evidence per scale name, produced by the routing
+    #: table.  ``scale_candidates`` is already ordered by this score; the map is
+    #: carried separately so a reader can tell "chosen because the participant
+    #: described these symptoms" apart from "chosen because it was the only
+    #: option".  A missing key reads as zero.
+    scale_candidate_evidence: dict[str, int] = Field(default_factory=dict)
+    pending_offer: Optional[str] = None          # "scale" | "relaxation"
+    pending_offer_target: Optional[str] = None   # scale name for a scale offer
+    pending_offer_round: Optional[int] = Field(default=None, ge=0)
+    #: "pending" | "clarifying" | "none".  A clarifying invitation is still
+    #: open; it is waiting for an explanation, not for consent.
+    pending_offer_status: str = "none"
+    offered_scales: tuple[str, ...] = ()
+    declined_scales: tuple[str, ...] = ()
+    last_scale_decline_round: Optional[int] = Field(default=None, ge=0)
+    relaxation_offered: bool = False
+    relaxation_declined: bool = False
+    last_relaxation_decline_round: Optional[int] = Field(default=None, ge=0)
+    # Safety flow owns this flag; the policy must never trade it for an
+    # activity invitation.
+    risk_marker: bool = False
+    #: A safety signal was raised earlier in this session and the safety path has
+    #: not cleared it.  ``risk_marker`` is about *this* utterance; this flag is
+    #: about the conversation.  Without it, one calm turn after a disclosure
+    #: ("有时候会这么想") looks like an ordinary moment and an invitation slips
+    #: through in the middle of a risk conversation.
+    risk_in_session: bool = False
+    #: How many turns in a row have ended in CLARIFY_INPUT.  Used to stop the
+    #: policy from asking "你指的是什么？" indefinitely at a participant who
+    #: keeps answering "不知道".
+    clarifications_in_a_row: int = Field(default=0, ge=0)
+
 
 class TurnSignals(_FrozenContract):
     """Pure observations collected before a decision is formed."""
@@ -161,18 +228,55 @@ class TurnSignals(_FrozenContract):
     explicit_end_requested: bool = False
     active_scale_pause_requested: bool = False
     active_scale_refusal: bool = False
+    #: The participant asked to return to the questions that were paused
+    #: ("接着问吧", "刚才那几个问题").  Only meaningful while paused.
+    active_scale_resume_requested: bool = False
     explicit_relaxation_requested: bool = False
+    explicit_relaxation_type: Optional[str] = None
+    explicit_scale_requested: bool = False
     explicit_game_requested: bool = False
     deterministic_scale_candidate: Optional[str] = None
     proactive_relaxation_candidate: Optional[str] = None
     legacy_relaxation_candidate: Optional[str] = None
     legacy_game_candidate: bool = False
+    semantic_ambiguity: bool = False
+    semantic_target: Optional[str] = None
+    semantic_reason: str = ""
+
+    # -- answer to a pending invitation -----------------------------------
+    # These are pure text observations gated by ``snapshot.pending_offer``: a
+    # "yes" only counts when an invitation is actually outstanding, so an
+    # unrelated agreement cannot be mistaken for consent.
+    offer_accepted: bool = False
+    offer_declined: bool = False
+    #: The participant asked what the invitation involves ("多久？做什么？").
+    #: Neither consent nor refusal: the invitation stays open.
+    offer_question: bool = False
+    #: The participant pushed the invitation to later ("待会再说") without
+    #: refusing.  The invitation stays open.
+    offer_deferred: bool = False
+    offer_answer_ambiguous: bool = False
+
+    #: The participant explicitly asked for the floor this turn ("let me
+    #: finish").  An invitation would interrupt them, so the new invitation
+    #: branches refuse; the legacy branches are untouched.
+    participant_wants_to_talk: bool = False
+    risk_marker: bool = False
 
 
 class TurnAction(str, Enum):
-    """The only actions that the execution layer may receive."""
+    """The only actions that the execution layer may receive.
+
+    ``OFFER_SCALE`` / ``OFFER_RELAXATION`` are invitations, not executions.
+    They change no assessment state: they ask the participant a question.
+    ``START_SCALE`` and ``RECOMMEND_RELAXATION`` remain the executable steps
+    and require an answer (or an explicit user request) to reach.
+    """
 
     CHAT = "chat"
+    CLARIFY_INPUT = "clarify_input"
+    OFFER_SCALE = "offer_scale"
+    OFFER_RELAXATION = "offer_relaxation"
     START_SCALE = "start_scale"
     CONTINUE_SCALE = "continue_scale"
     PAUSE_SCALE = "pause_scale"
@@ -190,10 +294,17 @@ class TurnDecision(_FrozenContract):
     accepted_score: Optional[int] = Field(default=None, ge=0, le=4)
     next_item: Optional[int] = Field(default=None, ge=1)
     intervention_type: Optional[str] = None
+    semantic_target: Optional[str] = None
     end_reason: Optional[str] = None
     needs_rag: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
+    #: Carried through from the proposal that the policy accepted.  Only
+    #: meaningful on a CHAT turn; task turns get no posture.
+    strategy: Optional[str] = None
+    stance: Optional[str] = None
+    #: The dimension this turn's question should address, if it asks one.
+    focus: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_action_fields(self) -> "TurnDecision":
@@ -203,6 +314,18 @@ class TurnDecision(_FrozenContract):
                 raise ValueError("START_SCALE requires a registered scale_name")
             if any(value is not None for value in (self.answered_item, self.accepted_score, self.next_item)):
                 raise ValueError("START_SCALE cannot carry answer fields")
+        elif self.action is TurnAction.OFFER_SCALE:
+            # An invitation names the questionnaire it is about, but it is not
+            # allowed to carry any answer or item state.
+            if self.scale_name not in _known_scales():
+                raise ValueError("OFFER_SCALE requires a registered scale_name")
+            if any(value is not None for value in (self.answered_item, self.accepted_score, self.next_item)):
+                raise ValueError("OFFER_SCALE cannot carry answer fields")
+            if self.end_reason is not None:
+                raise ValueError("OFFER_SCALE cannot carry end_reason")
+        elif self.action is TurnAction.OFFER_RELAXATION:
+            if any(value is not None for value in scale_fields) or self.end_reason is not None:
+                raise ValueError("OFFER_RELAXATION cannot carry scale or end fields")
         elif self.action in (TurnAction.CONTINUE_SCALE, TurnAction.PAUSE_SCALE):
             if self.scale_name not in _known_scales():
                 raise ValueError(f"{self.action.value} requires a registered scale_name")
@@ -211,9 +334,9 @@ class TurnDecision(_FrozenContract):
                 raise ValueError("END_SESSION requires end_reason")
             if any(value is not None for value in scale_fields):
                 raise ValueError("END_SESSION cannot carry scale fields")
-        elif self.action is TurnAction.CHAT:
+        elif self.action in (TurnAction.CHAT, TurnAction.CLARIFY_INPUT):
             if any(value is not None for value in scale_fields) or self.end_reason is not None:
-                raise ValueError("CHAT cannot carry control fields")
+                raise ValueError(f"{self.action.value} cannot carry control fields")
         elif self.action is TurnAction.RECOMMEND_GAME:
             if any(value is not None for value in scale_fields):
                 raise ValueError("RECOMMEND_GAME cannot carry scale fields")

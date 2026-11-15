@@ -70,7 +70,17 @@ def test_relaxation_decision_cannot_carry_game_media_type():
         intervention_type="game",
     )
     assert decision.action is TurnAction.RECOMMEND_RELAXATION
-    assert decision.intervention_type == "breathing"
+    assert decision.intervention_type is None
+
+
+def test_generic_explicit_relaxation_does_not_inherit_router_type():
+    decision = decide(
+        text="我想放松一下",
+        signals=TurnSignals(explicit_relaxation_requested=True),
+        intervention_type="breathing",
+    )
+    assert decision.action is TurnAction.RECOMMEND_RELAXATION
+    assert decision.intervention_type is None
 
 
 def test_proactive_relaxation_before_threshold_is_rejected():
@@ -92,7 +102,17 @@ def test_proactive_relaxation_after_threshold_is_approved_once():
         intervention_type="breathing",
     )
     assert decision.action is TurnAction.RECOMMEND_RELAXATION
+    assert decision.intervention_type is None
     assert decision.reason == "proactive_relaxation_accepted"
+
+
+def test_proactive_deterministic_candidate_does_not_select_content():
+    decision = decide(
+        action=RouterAction.CHAT,
+        signals=TurnSignals(proactive_relaxation_candidate="muscle"),
+    )
+    assert decision.action is TurnAction.RECOMMEND_RELAXATION
+    assert decision.intervention_type is None
 
 
 def test_proactive_relaxation_is_rejected_after_session_allowance_is_used():
@@ -137,6 +157,7 @@ def test_game_requires_explicit_user_request():
         signals=TurnSignals(explicit_game_requested=True),
     )
     assert explicit.action is TurnAction.RECOMMEND_GAME
+    assert explicit.intervention_type is None
 
     boredom = decide(
         text="我好无聊",

@@ -1,0 +1,82 @@
+# ============================================================================
+# voicechat3 离线演示运行配置 —— Tacit-4B 决策模型对照组（完全离线）
+# ============================================================================
+# 与 runtime_offline_5090.yaml 的唯一差异：decision.model_path 指向 Tacit-4B。
+# 用途：把"决策模型规模"作为单一变量做对照，其余（主模型、ASR、TTS、阈值、
+# 回退策略）逐字相同。切换方式：
+#   set VOICECHAT_RUNTIME_CONFIG=config/runtime_offline_5090_tacit4b.yaml
+#
+# 为什么换 4B（2026-11-09 实测，24 条单轮 focus 判别 + 6 轮真实访谈）：
+#   Tacit-1.7B  16/24  48ms   —— 8 个错判里 5 个塌到 "Energy and fatigue"，
+#                                睡眠/注意力/食欲被系统性吸到同一维
+#   Tacit-4B    22/24  103ms  —— 同一个 provider、同一份 tacit_decision.py
+#                                （md5 相同）、同一读法，只换权重
+#   4B 的 2 个残差（"天天加班到十点"、"我妈打电话我烦了"）本身标注可争议。
+#   再往上 9B 的官方 JevBench 只比 4B 高 10 分，而本任务 4B 已 22/24，
+#   上限只剩 2 条，故不默认上 9B。
+#
+# 显存：Tacit-4B bf16 约 8GB（1.7B 约 4GB）；主模型 27B 仍在 WSL 的 :8000。
+# 加载：首次 8-12s，之后每轮 100-160ms（1.7B 为 45-70ms）。
+# ============================================================================
+
+dialogue:
+  provider: openai_compatible
+  engine: llamacpp
+  base_url: http://127.0.0.1:8000/v1
+  model: Qwen3.8-27B-Q4_K_S
+  api_key: EMPTY
+  timeout: 120
+  max_tokens: 1024
+  temperature: 0.35
+  top_p: 0.8
+  top_k: null
+  presence_penalty: null
+  enable_thinking: false
+  request_mode: chat
+  system_role_mode: native
+  system_prompt_override: null
+
+agent:
+  enabled: true
+  provider: openai_compatible
+  engine: llamacpp
+  base_url: http://127.0.0.1:8001/v1
+  model: Qwen3-4B-Instruct-2507
+  api_key: EMPTY
+  timeout: 10
+  temperature: 0.1
+
+asr:
+  provider: funasr
+  model_path: auto
+
+tts:
+  provider: voxcpm
+  model_path: auto
+  voice_prompt_path: auto
+
+runtime:
+  strict_preflight: true
+  immutable_contract: true
+  manage_model_servers: false
+  enable_streaming_tts: true
+
+decision:
+  mode: jev
+  backend: tacit
+  transport: inprocess
+  timeout: 30.0
+  abstain_threshold: 0.55
+  escalation_mode: deterministic   # 不为 legacy 回退启动 8001 / Qwen3-4B
+  shadow_backend: null
+  endpoint: null
+  model: null
+  model_path: D:/models/tacit/Tacit-4B
+  model_dtype: bfloat16
+  batch: true
+  use_grammar: true
+  allow_remote_endpoint: false
+  allow_model_download: false
+  journal_path: null
+  clinical_review:
+    enabled: false

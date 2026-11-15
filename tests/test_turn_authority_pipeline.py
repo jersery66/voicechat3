@@ -119,3 +119,70 @@ def test_explicit_end_does_not_enqueue_a_competing_timeout_check():
 
     assert result.turn_decision.action is TurnAction.END_SESSION
     assert "time_limit_check" not in [kind for kind, _ in events]
+
+
+def test_pause_lasts_until_the_participant_asks_to_return():
+    """A paused scale must not resume just because the next turn exists.
+
+    The real bug was one turn deep: "先别问了" paused it, the very next
+    sentence resumed it and asked the next question again, so the participant
+    never actually got to change the subject.
+    """
+    policy = SpyPolicy()
+    pipeline = build_pipeline(policy=policy)
+    pipeline.scale_runtime.start("PHQ-9")
+    pipeline.scale_runtime.accept_answer(scale_name="PHQ-9", item=1, score=1)
+    pipeline.scale_runtime.present_current_item()
+    try:
+        paused = pipeline.execute(
+            PipelineConfig(user_text="先别问了，我想聊点别的"), lambda *_: None
+        )
+        chatting = pipeline.execute(
+            PipelineConfig(user_text="这两天翻来覆去到天亮，白天一点精神都没有"),
+            lambda *_: None,
+        )
+        state_while_chatting = pipeline.scale_runtime.snapshot()
+        resumed = pipeline.execute(
+            PipelineConfig(user_text="行，那你接着问吧"), lambda *_: None
+        )
+        state_after_resume = pipeline.scale_runtime.snapshot()
+    finally:
+        pipeline.shutdown()
+
+    assert paused.turn_decision.action is TurnAction.PAUSE_SCALE
+    assert chatting.turn_decision.action is TurnAction.CHAT
+    assert chatting.turn_decision.reason == "active_scale_paused"
+    # The unanswered item stayed parked through the chat turn.
+    assert state_while_chatting.paused is True
+    assert state_while_chatting.current_item == 2
+    assert resumed.turn_decision.action is TurnAction.CONTINUE_SCALE
+    assert resumed.turn_decision.reason == "active_scale_resume"
+    assert state_after_resume.paused is False
+
+
+def test_completing_turn_gets_a_closing_note_not_the_first_question():
+    """The last answer must close the set, not loop back to item 1.
+
+    The Runtime clears ``current_item`` on completion, so the question hint
+    was built from ``current_item or 1`` -- the writer was handed item 1 again
+    on the very turn the scale finished, and settled for "好，那咱们继续。"
+    """
+    llm = FakeLLM()
+    pipeline = build_pipeline(llm=llm)
+    pipeline.scale_runtime.start("GAD-7")
+    for item in range(1, 7):
+        if item > 1:
+            pipeline.scale_runtime.present_current_item()
+        pipeline.scale_runtime.accept_answer(scale_name="GAD-7", item=item, score=1)
+    pipeline.scale_runtime.present_current_item()
+    try:
+        result = pipeline.execute(
+            PipelineConfig(user_text="有几天会这样"), lambda *_: None
+        )
+    finally:
+        pipeline.shutdown()
+
+    assert result.scale_completed is True
+    suffix = llm.calls[-1]["system_suffix"]
+    assert "【本轮收束】" in suffix
+    assert "当前需要自然表达的问题是" not in suffix

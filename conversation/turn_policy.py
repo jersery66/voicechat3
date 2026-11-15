@@ -1,10 +1,28 @@
-"""Pure, deterministic authority for one conversation turn."""
+"""Pure, deterministic authority for one conversation turn.
+
+The policy approves or refuses; it never proposes.  Two additions on this
+branch matter for interview timing:
+
+- **Invitations are a separate stage.**  ``OFFER_SCALE`` / ``OFFER_RELAXATION``
+  ask the participant a question and change no assessment state.  Only an
+  answer (or an explicit user request) can reach ``START_SCALE`` /
+  ``RECOMMEND_RELAXATION``.
+- **Refusals are remembered.**  A declined offer enters a cooldown, so the same
+  questionnaire is not proposed again a turn later.
+
+Every gate here is a floor, not a trigger.  ``MIN_ROUNDS_BEFORE_SCALE`` and
+``MIN_ROUNDS_FOR_RELAXATION`` say "not before", never "once you reach this
+round, start something".
+"""
 
 from __future__ import annotations
 
 from config import (
+    MAX_CONSECUTIVE_CLARIFICATIONS,
     MIN_ROUNDS_BEFORE_SCALE,
     MIN_ROUNDS_FOR_RELAXATION,
+    OFFER_RELAXATION_COOLDOWN_ROUNDS,
+    OFFER_SCALE_COOLDOWN_ROUNDS,
     RELAX_ROUTE_CONFIDENCE,
     SCALE_ROUTE_CONFIDENCE,
 )
@@ -15,6 +33,17 @@ from conversation.contracts import (
     TurnDecision,
     TurnSignals,
     TurnStateSnapshot,
+)
+from decision.contracts import SCALE_TARGET_UNDETERMINED
+from decision.timing import (
+    OFFER_REASON_ANSWER_AMBIGUOUS,
+    OFFER_REASON_CLARIFYING,
+    OFFER_REASON_DEFERRED,
+    OFFER_REASON_RELAXATION_ACCEPTED,
+    OFFER_REASON_RELAXATION_DECLINED,
+    OFFER_REASON_SCALE_ACCEPTED,
+    OFFER_REASON_SCALE_DECLINED,
+    OFFER_REASON_TARGET_MISSING,
 )
 
 
@@ -31,8 +60,37 @@ _RELAXATION_TYPE_ALIASES = {
 }
 
 
-def _relaxation_type(value: str | None) -> str:
-    return _RELAXATION_TYPE_ALIASES.get(str(value or "").strip().lower(), "breathing")
+def _relaxation_type(value: str | None) -> str | None:
+    """Canonicalize only an explicit user content preference.
+
+    A missing value means "open the relaxation flow"; it must never silently
+    become breathing merely because a Router or deterministic candidate did
+    not name a specific content item.
+    """
+    if value is None or not str(value).strip():
+        return None
+    return _RELAXATION_TYPE_ALIASES.get(str(value).strip().lower())
+
+
+def _primary_scale_candidate(snapshot: TurnStateSnapshot) -> str | None:
+    """The instrument an explicit request should start.
+
+    Reads the evidence map rather than the list position, so the choice
+    survives a caller that hands over an unsorted candidate tuple.  Ties fall
+    back to the first candidate, which is the pipeline's own ranking and, with
+    no evidence at all, the registry order.
+
+    Deliberately silent about *why* it picked what it picked: the reason string
+    the policy emits is ``user_scale_request`` either way, and the evidence
+    itself is already logged by the pipeline.
+    """
+    candidates = snapshot.scale_candidates
+    if not candidates:
+        return None
+    evidence = getattr(snapshot, "scale_candidate_evidence", None) or {}
+    if not evidence:
+        return candidates[0]
+    return max(candidates, key=lambda name: int(evidence.get(name, 0) or 0))
 
 
 class TurnPolicy:
@@ -53,7 +111,16 @@ class TurnPolicy:
     ) -> TurnDecision:
         del user_text  # Kept in the signature for deterministic auditability.
 
-        # Priority 1: explicit user ending always wins.
+        # Priority 0: a safety signal owns the turn.
+        #
+        # The risk path is a separate flow with its own escalation.  Trading it
+        # for a questionnaire or an exercise is the one failure this layer must
+        # make impossible, including when the participant also asks to stop.
+        # The decision here only refuses to act; it never concludes "no risk".
+        if signals.risk_marker or snapshot.risk_marker or snapshot.risk_in_session:
+            return self._chat("offer_blocked_risk")
+
+        # Priority 1: explicit user ending always wins over ordinary work.
         if signals.explicit_end_requested:
             return TurnDecision(
                 action=TurnAction.END_SESSION,
@@ -69,12 +136,86 @@ class TurnPolicy:
         if signals.explicit_relaxation_requested:
             return TurnDecision(
                 action=TurnAction.RECOMMEND_RELAXATION,
-                intervention_type=_relaxation_type(proposal.intervention_type),
+                intervention_type=_relaxation_type(signals.explicit_relaxation_type),
                 confidence=1.0,
                 reason="user_relaxation_request",
             )
 
-        # Priority 2: an active scale owns an answer/refusal turn.  This also
+        # Priority 2: an outstanding invitation owns the answer.
+        # This sits above every proposal so a Router cannot talk over a
+        # question the participant is already being asked.
+        offer_decision = self._resolve_pending_offer(snapshot, signals)
+        if offer_decision is not None:
+            return offer_decision
+
+        # An explicit request for an assessment is the participant's own
+        # initiative.  Asking "would you like to?" back at someone who just
+        # asked would be obtuse, so the policy starts the next planned
+        # instrument directly -- but only from the registered candidate list.
+        #
+        # The instrument is chosen by *evidence*, not by list position.  Taking
+        # ``candidates[0]`` was how every session, whatever the participant had
+        # described, ended up on PHQ-9: registry order put it first and nothing
+        # downstream could tell "best match" from "only option".
+        #
+        # The minimum-round floor deliberately does not apply here: it exists to
+        # stop the *system* from proposing an assessment too early, not to
+        # refuse a participant who asks for one.
+        if signals.explicit_scale_requested and not snapshot.active_scale:
+            primary = _primary_scale_candidate(snapshot)
+            if primary is None:
+                return self._chat("user_scale_request_no_candidate")
+            return TurnDecision(
+                action=TurnAction.START_SCALE,
+                scale_name=primary,
+                confidence=1.0,
+                reason="user_scale_request",
+                needs_rag=False,
+            )
+
+        # Critical transcript ambiguity is an observation, not an action. The
+        # policy owns the decision to ask for clarification. Active-scale
+        # turns remain CONTINUE_SCALE so ScaleAnswerInterpreter can clarify
+        # the current Runtime-owned item without bypassing the scale flow.
+        #
+        # Clarifying is capped.  This branch sits above the questionnaire and
+        # the exercise invitation, so an uncapped "你指的是什么？" is what a
+        # withdrawn participant gets *instead of* the whole programme: a real
+        # session answered "不知道 / 就那样 / 不想聊" and every one of ten turns
+        # came back as CLARIFY_INPUT, with no instrument and no exercise ever
+        # offered.  After two attempts the interview stops asking and lets the
+        # ordinary priorities run.
+        clarification_allowed = (
+            snapshot.clarifications_in_a_row < MAX_CONSECUTIVE_CLARIFICATIONS
+        )
+        if signals.semantic_ambiguity and not snapshot.active_scale and clarification_allowed:
+            return TurnDecision(
+                action=TurnAction.CLARIFY_INPUT,
+                semantic_target=signals.semantic_target,
+                confidence=1.0,
+                reason=signals.semantic_reason or "critical_input_ambiguity",
+                needs_rag=False,
+            )
+
+        # A decision backend may also observe that the turn needs clarifying.
+        # It is an observation like the one above, and equally gated.  A
+        # stage-2 target resolution that came back undetermined carries its
+        # own marker; the policy surfaces it verbatim so the journal can tell
+        # "which instrument?" apart from "what do you mean?".
+        if proposal.clarify and not snapshot.active_scale and clarification_allowed:
+            if proposal.reason == SCALE_TARGET_UNDETERMINED:
+                clarify_reason = SCALE_TARGET_UNDETERMINED
+            else:
+                clarify_reason = "router_clarify_first"
+            return TurnDecision(
+                action=TurnAction.CLARIFY_INPUT,
+                semantic_target=signals.semantic_target,
+                confidence=proposal.confidence,
+                reason=signals.semantic_reason or clarify_reason,
+                needs_rag=False,
+            )
+
+        # Priority 3: an active scale owns an answer/refusal turn.  This also
         # prevents a Router proposal from switching to another scale.
         if snapshot.active_scale:
             if signals.active_scale_pause_requested or signals.active_scale_refusal:
@@ -85,15 +226,29 @@ class TurnPolicy:
                     reason="active_scale_pause",
                     needs_rag=False,
                 )
+            # A paused scale no longer owns the turn.  Resuming it because the
+            # participant said anything at all made "先别问了" last exactly one
+            # turn: the next sentence dragged them back into the questions.
+            # Only an explicit "接着问吧" hands the turn back.
+            if snapshot.scale_paused:
+                if not signals.active_scale_resume_requested:
+                    return self._chat("active_scale_paused", proposal)
+                return TurnDecision(
+                    action=TurnAction.CONTINUE_SCALE,
+                    scale_name=snapshot.active_scale,
+                    confidence=1.0,
+                    reason="active_scale_resume",
+                    needs_rag=False,
+                )
             return TurnDecision(
                 action=TurnAction.CONTINUE_SCALE,
                 scale_name=snapshot.active_scale,
                 confidence=1.0,
                 reason="active_scale_waiting" if snapshot.waiting_for_answer else "active_scale",
-                needs_rag=True,
+                needs_rag=False,
             )
 
-        # Priority 3: no new work can be started once the lifecycle is ending.
+        # Priority 4: no new work can be started once the lifecycle is ending.
         if snapshot.session_state in _ENDING_STATES:
             return TurnDecision(
                 action=TurnAction.END_SESSION,
@@ -107,24 +262,67 @@ class TurnPolicy:
             # choice is consumed must not silently become END_SESSION.
             return self._chat("time_limit_pending_choice")
 
-        # Priority 4: deterministic scale observations are approved here, not
+        # Priority 5: invitations.  Checked before any executable scale or
+        # relaxation branch, because a proposal that is only an invitation must
+        # never be turned into an execution.
+        if proposal.action is RouterAction.START_SCALE and proposal.offer == "scale":
+            return self._scale_offer(proposal, snapshot, signals)
+        if proposal.action is RouterAction.RECOMMEND_RELAXATION and proposal.offer == "relaxation":
+            return self._relaxation_offer(proposal, snapshot, signals)
+
+        # Priority 6: deterministic scale observations are approved here, not
         # at their detection site.  A Router start proposal follows the same
         # gates and never controls an item number.
         requested_scale = proposal.scale_name if proposal.action is RouterAction.START_SCALE else None
-        candidate_scale = requested_scale or signals.deterministic_scale_candidate
-        if candidate_scale:
-            if snapshot.round_count < MIN_ROUNDS_BEFORE_SCALE:
-                return self._chat("router_before_min_rounds")
-            if requested_scale and proposal.confidence < SCALE_ROUTE_CONFIDENCE:
-                return self._chat("router_below_confidence")
-            if candidate_scale in snapshot.completed_scales:
-                return self._chat("router_scale_completed")
+        router_eligible = bool(
+            requested_scale
+            and snapshot.round_count >= MIN_ROUNDS_BEFORE_SCALE
+            and proposal.confidence >= SCALE_ROUTE_CONFIDENCE
+            and requested_scale not in snapshot.completed_scales
+        )
+        deterministic_scale = signals.deterministic_scale_candidate
+        deterministic_eligible = bool(
+            deterministic_scale
+            and snapshot.round_count >= MIN_ROUNDS_BEFORE_SCALE
+            and deterministic_scale not in snapshot.completed_scales
+        )
+        if requested_scale and snapshot.round_count < MIN_ROUNDS_BEFORE_SCALE:
+            return self._chat("router_before_min_rounds")
+        if requested_scale and proposal.confidence < SCALE_ROUTE_CONFIDENCE and not deterministic_eligible:
+            return self._chat("router_below_confidence")
+        if requested_scale and requested_scale in snapshot.completed_scales and not deterministic_eligible:
+            return self._chat("router_scale_completed")
+
+        if router_eligible and deterministic_eligible:
+            if requested_scale != deterministic_scale:
+                return TurnDecision(
+                    action=TurnAction.CHAT,
+                    needs_rag=False,
+                    confidence=1.0,
+                    reason="scale_candidate_conflict",
+                )
             return TurnDecision(
                 action=TurnAction.START_SCALE,
-                scale_name=candidate_scale,
-                confidence=proposal.confidence if requested_scale else 1.0,
-                reason=("router_start_scale_accepted" if requested_scale else "deterministic_scale_signal"),
-                needs_rag=True,
+                scale_name=requested_scale,
+                confidence=proposal.confidence,
+                reason="router_deterministic_agreement",
+                needs_rag=False,
+            )
+        if router_eligible:
+            return TurnDecision(
+                action=TurnAction.START_SCALE,
+                scale_name=requested_scale,
+                confidence=proposal.confidence,
+                reason="router_start_scale_accepted",
+                needs_rag=False,
+            )
+        if deterministic_eligible:
+            return TurnDecision(
+                action=TurnAction.START_SCALE,
+                scale_name=deterministic_scale,
+                confidence=1.0,
+                reason="deterministic_scale_signal",
+                needs_rag=False,
             )
         if proposal.action is RouterAction.START_SCALE:
             return self._chat("router_invalid_scale")
@@ -144,6 +342,8 @@ class TurnPolicy:
             or bool(signals.proactive_relaxation_candidate)
         )
         if proactive_relaxation:
+            if signals.risk_marker:
+                return self._chat("proactive_relaxation_blocked_risk")
             if snapshot.relaxation_used or snapshot.proactive_relaxation_offered:
                 return self._chat("proactive_relaxation_already_offered")
             if snapshot.round_count < MIN_ROUNDS_FOR_RELAXATION:
@@ -152,10 +352,7 @@ class TurnPolicy:
                 return self._chat("router_below_confidence")
             return TurnDecision(
                 action=TurnAction.RECOMMEND_RELAXATION,
-                intervention_type=_relaxation_type(
-                    proposal.intervention_type
-                    or signals.proactive_relaxation_candidate
-                ),
+                intervention_type=None,
                 confidence=proposal.confidence if proposal.action is RouterAction.RECOMMEND_RELAXATION else 1.0,
                 reason="proactive_relaxation_accepted",
             )
@@ -167,7 +364,7 @@ class TurnPolicy:
                 return self._chat("game_requires_explicit_request")
             return TurnDecision(
                 action=TurnAction.RECOMMEND_GAME,
-                intervention_type=proposal.intervention_type,
+                intervention_type=None,
                 confidence=proposal.confidence,
                 reason="router_game_accepted",
             )
@@ -179,6 +376,159 @@ class TurnPolicy:
 
         return self._chat("router_fallback" if proposal.reason == "router_fallback" else "default_chat", proposal)
 
+    # -- invitation handling ----------------------------------------------
+
+    def _resolve_pending_offer(
+        self, snapshot: TurnStateSnapshot, signals: TurnSignals
+    ) -> TurnDecision | None:
+        """Turn an answer to an outstanding invitation into a decision.
+
+        Returns ``None`` when there is nothing to resolve, so the turn continues
+        through the ordinary path.  ``START_SCALE`` is only reachable from an
+        accepted scale invitation or an explicit user request -- never from a
+        model suggestion alone.
+        """
+        pending = snapshot.pending_offer
+        if not pending or snapshot.active_scale:
+            return None
+
+        if signals.offer_accepted:
+            if pending == "scale":
+                target = snapshot.pending_offer_target
+                if not target:
+                    return self._chat(OFFER_REASON_TARGET_MISSING)
+                if snapshot.scale_candidates and target not in snapshot.scale_candidates:
+                    return self._chat(OFFER_REASON_TARGET_MISSING)
+                if target in snapshot.completed_scales:
+                    return self._chat("offer_scale_completed")
+                if snapshot.round_count < MIN_ROUNDS_BEFORE_SCALE:
+                    return self._chat("offer_scale_before_min_rounds")
+                return TurnDecision(
+                    action=TurnAction.START_SCALE,
+                    scale_name=target,
+                    confidence=1.0,
+                    reason=OFFER_REASON_SCALE_ACCEPTED,
+                    needs_rag=False,
+                )
+            return TurnDecision(
+                action=TurnAction.RECOMMEND_RELAXATION,
+                intervention_type=_relaxation_type(signals.explicit_relaxation_type),
+                confidence=1.0,
+                reason=OFFER_REASON_RELAXATION_ACCEPTED,
+            )
+
+        if signals.offer_declined:
+            reason = (
+                OFFER_REASON_SCALE_DECLINED
+                if pending == "scale"
+                else OFFER_REASON_RELAXATION_DECLINED
+            )
+            return self._chat(reason)
+
+        if signals.offer_question:
+            # "What would that involve?" keeps the invitation open.  The reply
+            # must explain, not start anything and not ask them to repeat.
+            return self._chat(OFFER_REASON_CLARIFYING)
+
+        if signals.offer_deferred:
+            # "Not now, later" is not a refusal; the invitation survives and may
+            # later expire only if the conversation actually moves on.
+            return self._chat(OFFER_REASON_DEFERRED)
+
+        if signals.offer_answer_ambiguous:
+            # Ask what they meant instead of assuming either answer.
+            return TurnDecision(
+                action=TurnAction.CLARIFY_INPUT,
+                semantic_target="offer_answer",
+                confidence=1.0,
+                reason=OFFER_REASON_ANSWER_AMBIGUOUS,
+                needs_rag=False,
+            )
+        return None
+
+    def _scale_offer(
+        self,
+        proposal: RouterProposal,
+        snapshot: TurnStateSnapshot,
+        signals: TurnSignals,
+    ) -> TurnDecision:
+        """Approve asking about a questionnaire.  Never starts one."""
+        scale = proposal.scale_name
+        if not scale:
+            return self._chat("offer_scale_without_target")
+        if snapshot.round_count < MIN_ROUNDS_BEFORE_SCALE:
+            # The programme floor is a hard gate, not a schedule.
+            return self._chat("offer_scale_before_min_rounds")
+        if proposal.confidence < SCALE_ROUTE_CONFIDENCE:
+            return self._chat("router_below_confidence")
+        if scale in snapshot.completed_scales:
+            return self._chat("offer_scale_completed")
+        if snapshot.scale_candidates and scale not in snapshot.scale_candidates:
+            return self._chat("offer_scale_not_a_candidate")
+        if scale in snapshot.declined_scales:
+            return self._chat("offer_scale_declined_before")
+        if snapshot.pending_offer is not None:
+            return self._chat("offer_already_pending")
+        if self._scale_cooldown_active(snapshot):
+            return self._chat("offer_scale_cooldown")
+        if signals.risk_marker or snapshot.risk_marker or snapshot.risk_in_session:
+            # A safety situation is not an assessment opportunity; the risk
+            # path owns this turn.
+            return self._chat("offer_blocked_risk")
+        if signals.participant_wants_to_talk:
+            # They just asked for the floor.  An invitation is an interruption.
+            return self._chat("offer_blocked_wants_to_talk")
+        return TurnDecision(
+            action=TurnAction.OFFER_SCALE,
+            scale_name=scale,
+            confidence=proposal.confidence,
+            reason="offer_scale_proposed",
+            needs_rag=False,
+        )
+
+    def _relaxation_offer(
+        self,
+        proposal: RouterProposal,
+        snapshot: TurnStateSnapshot,
+        signals: TurnSignals,
+    ) -> TurnDecision:
+        """Approve inviting a relaxation exercise.  Never starts one."""
+        if snapshot.round_count < MIN_ROUNDS_FOR_RELAXATION:
+            return self._chat("offer_relaxation_before_min_rounds")
+        if proposal.confidence < RELAX_ROUTE_CONFIDENCE:
+            return self._chat("router_below_confidence")
+        if snapshot.relaxation_used or snapshot.proactive_relaxation_offered:
+            return self._chat("offer_relaxation_already_done")
+        if snapshot.pending_offer is not None:
+            return self._chat("offer_already_pending")
+        if self._relaxation_cooldown_active(snapshot):
+            return self._chat("offer_relaxation_cooldown")
+        if signals.risk_marker or snapshot.risk_marker:
+            return self._chat("offer_blocked_risk")
+        if signals.participant_wants_to_talk:
+            return self._chat("offer_blocked_wants_to_talk")
+        return TurnDecision(
+            action=TurnAction.OFFER_RELAXATION,
+            intervention_type=None,
+            confidence=proposal.confidence,
+            reason="offer_relaxation_proposed",
+            needs_rag=False,
+        )
+
+    @staticmethod
+    def _scale_cooldown_active(snapshot: TurnStateSnapshot) -> bool:
+        declined_at = snapshot.last_scale_decline_round
+        if declined_at is None or OFFER_SCALE_COOLDOWN_ROUNDS <= 0:
+            return False
+        return (snapshot.round_count - declined_at) < OFFER_SCALE_COOLDOWN_ROUNDS
+
+    @staticmethod
+    def _relaxation_cooldown_active(snapshot: TurnStateSnapshot) -> bool:
+        declined_at = snapshot.last_relaxation_decline_round
+        if declined_at is None or OFFER_RELAXATION_COOLDOWN_ROUNDS <= 0:
+            return False
+        return (snapshot.round_count - declined_at) < OFFER_RELAXATION_COOLDOWN_ROUNDS
+
     @staticmethod
     def _chat(reason: str, proposal: RouterProposal | None = None) -> TurnDecision:
         proposal = proposal or RouterProposal.fallback(reason)
@@ -187,4 +537,9 @@ class TurnPolicy:
             needs_rag=proposal.needs_rag,
             confidence=proposal.confidence,
             reason=reason,
+            # Already reconciled at the decision boundary; the policy only
+            # carries them, it never invents a posture of its own.
+            strategy=proposal.strategy,
+            stance=proposal.stance,
+            focus=proposal.focus,
         )

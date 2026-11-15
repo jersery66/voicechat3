@@ -23,33 +23,33 @@ def _initialize_error_monitor():
 
 
 def _run_preflight() -> int | None:
-    """Run the selected profile's preflight and return a failure status if needed."""
-    from deployment.profiles import get_deployment_profile
+    """Run the configured runtime's preflight and return a failure status if needed."""
+    from deployment.runtime_config import get_runtime_config
 
     try:
-        profile = get_deployment_profile()
+        runtime = get_runtime_config()
     except Exception as exc:
-        print(f"FATAL: Deployment profile could not be loaded: {exc}")
+        print(f"FATAL: Runtime configuration could not be loaded: {exc}")
         return 2
 
     try:
         from scripts.check_config import run_check
         ok = run_check()
     except Exception as exc:
-        if profile.strict_preflight:
+        if runtime.runtime.strict_preflight:
             print(
-                "FATAL: Deployment preflight could not complete for profile "
-                f"'{profile.name}': {exc}"
+                "FATAL: Deployment preflight could not complete for runtime config "
+                f"{runtime.source_path}: {exc}"
             )
             return 2
         print(f"WARNING: Config check failed: {exc}")
         return None
 
     if not ok:
-        if profile.strict_preflight:
+        if runtime.runtime.strict_preflight:
             print(
-                "FATAL: Deployment preflight failed for profile "
-                f"'{profile.name}'. The application will not start."
+                "FATAL: Deployment preflight failed for runtime config "
+                f"{runtime.source_path}. The application will not start."
             )
             return 2
         print("WARNING: Some configuration checks failed. The application may not work correctly.")
@@ -66,10 +66,10 @@ def main() -> int:
 
     # Print actual model configuration
     from config import (
-        DIALOGUE_BACKEND, DIALOGUE_BASE_URL, OLLAMA_MODEL, print_model_status,
+        DIALOGUE_PROVIDER, DIALOGUE_BASE_URL, DIALOGUE_MODEL, print_model_status,
     )
-    print(f"[VoiceChat] Using LLM model: {OLLAMA_MODEL}")
-    print(f"[VoiceChat] Dialogue backend: {DIALOGUE_BACKEND} ({DIALOGUE_BASE_URL})")
+    print(f"[VoiceChat] Using LLM model: {DIALOGUE_MODEL}")
+    print(f"[VoiceChat] Dialogue provider: {DIALOGUE_PROVIDER} ({DIALOGUE_BASE_URL})")
     print_model_status()
 
     # High DPI scaling

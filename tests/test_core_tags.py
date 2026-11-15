@@ -57,3 +57,42 @@ class TestCoreTagsCleaning:
     def test_internal_leak_detector(self):
         assert _contains_internal_leak("策略选择：共情") is True
         assert _contains_internal_leak("普通对话") is False
+
+
+class TestOrphanThinkMarker:
+    """The serving stack returns ``</think>`` without its opening partner.
+
+    Observed on a real session: the closing marker stayed in the reply, the TTS
+    voice read it out, and the sentence was spoken twice.  The paired pattern
+    ``<think>...</think>`` cannot match a lone closer, so the cleaning step has
+    to treat it as a boundary on its own.
+    """
+
+    SPOKEN = "可以试试肌肉放松，就在左边“轻松一下”里，点开就能开始。"
+
+    def test_orphan_closer_does_not_repeat_the_sentence(self):
+        raw = self.SPOKEN + "</think>" + self.SPOKEN
+        assert clean_for_display(raw) == self.SPOKEN
+
+    def test_orphan_closer_never_reaches_tts(self):
+        raw = self.SPOKEN + "</think>" + self.SPOKEN
+        out = clean_for_tts(raw)
+        assert "think" not in out.lower()
+        assert out == self.SPOKEN
+
+    def test_reasoning_before_closer_is_dropped(self):
+        raw = "让我想想该怎么说。</think>" + self.SPOKEN
+        assert clean_for_display(raw) == self.SPOKEN
+
+    def test_trailing_closer_keeps_the_reply(self):
+        assert clean_for_display(self.SPOKEN + "</think>") == self.SPOKEN
+
+    def test_paired_block_still_removed(self):
+        raw = "<think>内部推理</think>" + self.SPOKEN
+        assert clean_for_display(raw) == self.SPOKEN
+
+    def test_marker_only_reply_becomes_empty(self):
+        assert clean_for_display("</think>") == ""
+
+    def test_plain_reply_untouched(self):
+        assert clean_for_display(self.SPOKEN) == self.SPOKEN

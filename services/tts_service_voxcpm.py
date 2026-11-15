@@ -22,6 +22,125 @@ logger = get_logger(__name__)
 VOXCPM_MIN_GPU_MEMORY_GB = 8
 VOXCPM_PLAYBACK_BUFFER_SECONDS = 120
 
+# Playback device resolution.
+#
+# The machine may expose VB-Cable as the Windows default playback device (it
+# does here).  Without an explicit device PortAudio then plays the avatar's
+# voice into the virtual cable -- into the very endpoint the recorder reads
+# from -- so the participant hears nothing while the loop looks healthy.
+# Resolve a real loudspeaker instead, and let ``VOICECHAT_OUTPUT_DEVICE``
+# override it by index or by name substring.
+_OUTPUT_DEVICE_ENV = "VOICECHAT_OUTPUT_DEVICE"
+_VIRTUAL_OUTPUT_MARKERS = (
+    "cable", "vb-audio", "voicemeeter", "virtual", "stereo mix", "立体声混音",
+    "sound mapper", "主声音驱动", "primary sound", "what u hear", "loopback",
+)
+
+
+def _output_hostapi_rank(devices, index: int) -> int:
+    """Prefer backends that do their own format conversion.
+
+    WDM-KS ranks last because it is exclusive: a browser holding the endpoint
+    makes the open fail outright.
+    """
+    try:
+        api = str(sd.query_hostapis(devices[index]["hostapi"])["name"]).lower()
+    except Exception:
+        return 3
+    if "wasapi" in api:
+        return 0
+    if "directsound" in api:
+        return 1
+    if "mme" in api:
+        return 2
+    if "wdm" in api:
+        return 9
+    return 3
+
+
+def _is_virtual_output(name: str) -> bool:
+    low = str(name).lower()
+    return any(marker in low for marker in _VIRTUAL_OUTPUT_MARKERS)
+
+
+def _match_output_by_spec(devices, spec: str):
+    """Resolve an env override given either a device index or a name fragment."""
+    spec = str(spec).strip()
+    if not spec:
+        return None
+    if spec.isdigit():
+        index = int(spec)
+        if 0 <= index < len(devices) and devices[index].get("max_output_channels", 0) > 0:
+            return index
+        return None
+    low = spec.lower()
+    for index, device in enumerate(devices):
+        if device.get("max_output_channels", 0) <= 0:
+            continue
+        if low in str(device.get("name", "")).lower():
+            return index
+    return None
+
+
+def resolve_output_device(devices=None, default_index=None, samplerate=None):
+    """Pick a playback endpoint that a human can actually hear.
+
+    Returns ``(index, reason)``.  ``index`` is None only when the machine has
+    no output endpoint at all.
+    """
+    if devices is None:
+        devices = list(sd.query_devices())
+    if default_index is None:
+        try:
+            default_index = sd.query_devices(kind="output")["index"]
+        except Exception:
+            default_index = None
+
+    def _opens(index: int) -> bool:
+        if samplerate is None:
+            return True
+        try:
+            sd.check_output_settings(
+                device=index, channels=1, samplerate=samplerate, dtype="float32"
+            )
+            return True
+        except Exception:
+            return False
+
+    def _valid(index) -> bool:
+        return (
+            index is not None
+            and 0 <= index < len(devices)
+            and devices[index].get("max_output_channels", 0) > 0
+        )
+
+    forced = os.environ.get(_OUTPUT_DEVICE_ENV, "").strip()
+    if forced:
+        matched = _match_output_by_spec(devices, forced)
+        if matched is not None:
+            return matched, f"{_OUTPUT_DEVICE_ENV}={forced}"
+
+    if _valid(default_index):
+        name = str(devices[default_index].get("name", ""))
+        if not _is_virtual_output(name) and _opens(default_index):
+            return default_index, f"system default: {name[:36]}"
+
+    candidates = [
+        index
+        for index, device in enumerate(devices)
+        if device.get("max_output_channels", 0) > 0
+        and not _is_virtual_output(device.get("name", ""))
+        and _opens(index)
+    ]
+    candidates.sort(key=lambda i: (_output_hostapi_rank(devices, i), i))
+    if candidates:
+        best = candidates[0]
+        return best, f"real output: {str(devices[best].get('name', ''))[:36]}"
+
+    if _valid(default_index):
+        return default_index, "only virtual outputs found, using system default"
+    return None, "no output device"
+
 
 @dataclass
 class _PlaybackState:
@@ -43,6 +162,9 @@ class TTSService:
         self._play_lock = __import__('threading').Lock()
         self._active_playback: Optional[_PlaybackState] = None
         self._active_playback_lock = threading.RLock()
+        self._output_device: Optional[int] = None
+        self._output_device_reason: str = "unresolved"
+        self._output_device_resolved: bool = False
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_audio")
         os.makedirs(self.temp_dir, exist_ok=True)
         self._cleanup_old_temps(max_age_seconds=3600)
@@ -56,6 +178,30 @@ class TTSService:
                     os.remove(fp)
         except Exception as e:
             logger.warning(f"Temp cleanup failed: {e}")
+
+    def _playback_device(self) -> Optional[int]:
+        """Resolve (once) the endpoint the avatar's voice should go to."""
+        if getattr(self, "_output_device_resolved", False):
+            return getattr(self, "_output_device", None)
+        try:
+            device, reason = resolve_output_device(samplerate=self.sample_rate)
+        except Exception as exc:
+            logger.warning("Playback device resolution failed: %s", exc)
+            return None
+        self._output_device = device
+        self._output_device_reason = reason
+        self._output_device_resolved = True
+        if device is None:
+            logger.warning("Playback device: none (%s)", reason)
+        else:
+            logger.info("Playback device: %s -> %s", device, reason)
+        return device
+
+    def refresh_output_device(self) -> Optional[int]:
+        """Re-resolve after a hot-plug; callers use this after an open failure."""
+        self._output_device = None
+        self._output_device_resolved = False
+        return self._playback_device()
 
     @staticmethod
     def get_load_blocker() -> str | None:
@@ -148,12 +294,20 @@ class TTSService:
         if prompt_wav and os.path.exists(prompt_wav):
             logger.info(f"Voice prompt: {prompt_wav}")
             try:
+                # Reference-only cache.  The previous build passed the same wav
+                # as BOTH prompt and reference ("ref_continuation" mode), which
+                # makes the model continue *from the prompt audio*: every
+                # synthesis started by re-singing the prompt sentence (~2-8s
+                # of leaked audio) before the requested text, on the speaker
+                # and in every saved file.  Reference mode conditions on the
+                # voice without carrying the prompt audio into the decode.
                 self.prompt_cache = self.model.tts_model.build_prompt_cache(
-                    prompt_text=prompt_text or "",
-                    prompt_wav_path=prompt_wav,
+                    prompt_text=None,
+                    prompt_wav_path=None,
                     reference_wav_path=prompt_wav,
+                    trim_silence_vad=True,
                 )
-                logger.info("Voice prompt cache built for VoxCPM2 ultimate cloning")
+                logger.info("Voice prompt cache built (reference mode, no continuation leak)")
             except Exception as e:
                 logger.warning(f"Failed to build prompt cache: {e}")
                 self.prompt_cache = None
@@ -315,7 +469,10 @@ class TTSService:
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
-        logger.debug(f"generate_and_play called with text length: {len(text)}")
+        logger.debug(
+            "generate_and_play called with text length: %s text=%r",
+            len(text), text[:30],
+        )
         self.is_playing = True
         state = _PlaybackState()
         with self._active_playback_lock:
@@ -429,10 +586,30 @@ class TTSService:
                 if state.cancel_event.is_set():
                     return
                 started.set()
-                stream = sd.OutputStream(
-                    samplerate=self.sample_rate, channels=1,
-                    dtype='float32', blocksize=0, callback=_callback,
-                )
+                device = self._playback_device()
+                try:
+                    stream = sd.OutputStream(
+                        samplerate=self.sample_rate, channels=1,
+                        dtype='float32', blocksize=0, callback=_callback,
+                        device=device,
+                    )
+                except Exception as exc:
+                    if device is None:
+                        raise
+                    # WDM-KS is exclusive: another application may be holding
+                    # the loudspeaker.  Re-resolve and, if it lands on the same
+                    # endpoint, fall back to whatever the OS default is.
+                    logger.warning(
+                        "Playback device %s unavailable (%s), retrying", device, exc
+                    )
+                    fallback = self.refresh_output_device()
+                    if fallback == device:
+                        fallback = None
+                    stream = sd.OutputStream(
+                        samplerate=self.sample_rate, channels=1,
+                        dtype='float32', blocksize=0, callback=_callback,
+                        device=fallback,
+                    )
                 if not self._publish_stream(state, stream):
                     return
                 entered = False
@@ -613,6 +790,10 @@ class TTSService:
             except Exception as exc:
                 logger.warning("Legacy VoxCPM stream stop failed: %s", exc)
 
+    def cancel(self):
+        """Cancel the current synthesis/playback (unified voice cancel interface)."""
+        self.stop_playing()
+
     def play_audio(self, audio: np.ndarray):
         with self._play_lock:
             self.stop_playing()
@@ -631,7 +812,19 @@ class TTSService:
             # This is the legacy convenience-stream path; it is intentionally
             # separate from explicit OutputStream cancellation above.
             sd.stop()
-            sd.play(audio, samplerate=self.sample_rate)
+            device = self._playback_device()
+            try:
+                sd.play(audio, samplerate=self.sample_rate, device=device)
+            except Exception as exc:
+                if device is None:
+                    raise
+                logger.warning(
+                    "Playback device %s unavailable (%s), retrying", device, exc
+                )
+                fallback = self.refresh_output_device()
+                if fallback == device:
+                    fallback = None
+                sd.play(audio, samplerate=self.sample_rate, device=fallback)
         except Exception as e:
             logger.error(f"play_audio error: {e}")
             logger.exception("Exception occurred")

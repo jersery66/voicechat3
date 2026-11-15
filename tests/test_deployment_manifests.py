@@ -5,47 +5,44 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from urllib.parse import urlparse
 
-from deployment.profiles import get_deployment_profile, resolve_runtime_models
+from deployment.runtime_config import get_runtime_config
 from scripts.deployment import manifest
 
 
-def test_deployment_manifest_is_derived_from_baseline_profile():
-    profile = get_deployment_profile("rtxpro6000_96g")
-    models = resolve_runtime_models(profile, environment={})
+def test_deployment_manifest_is_derived_from_the_runtime_configuration():
+    config = get_runtime_config()
     result = manifest.build_deployment_manifest(
-        profile.name,
         generated_at="2026-08-17T00:00:00+00:00",
         git_commit="test-commit",
     )
 
     assert result["artifact_type"] == "DEPLOYMENT_EXPECTATION"
     assert result["evidence_type"] == "CONFIGURATION"
-    assert result["source_of_truth"] == "deployment.profiles.DeploymentProfile"
-    assert result["profile"] == profile.name
+    assert result["source_of_truth"] == "deployment.runtime_config.RuntimeConfig"
+    assert result["runtime_config"] == str(config.source_path)
     assert result["git_commit"] == "test-commit"
-    assert result["dialogue"]["model"] == profile.dialogue_model
-    assert result["dialogue"]["resolved_model"] == models.dialogue
-    assert result["dialogue"]["endpoint"]["url"] == profile.dialogue_base_url
-    assert result["agent"]["model"] == profile.agent_model
-    assert result["agent"]["resolved_model"] == models.router
-    assert result["agent"]["expected_port"] == 8001
+    assert result["dialogue"]["model"] == config.dialogue.model
+    assert result["dialogue"]["provider"] == config.dialogue.provider
+    assert result["dialogue"]["endpoint"]["url"] == config.dialogue.base_url
+    assert result["dialogue"]["expected_port"] == urlparse(config.dialogue.base_url).port
+    assert result["agent"]["model"] == config.agent.model
+    assert result["agent"]["enabled"] is config.agent.enabled
 
 
-def test_candidate_manifest_keeps_candidate_identity_and_nonthinking_contract():
-    profile = get_deployment_profile("rtxpro6000_96g_qwen38_candidate")
-    result = manifest.build_deployment_manifest(profile.name, git_commit="test-commit")
+def test_manifest_records_the_configured_voice_providers():
+    config = get_runtime_config()
+    result = manifest.build_deployment_manifest(git_commit="test-commit")
 
-    assert result["dialogue"]["model"] == "Qwen/Qwen3.8-27B-FP8"
-    assert result["dialogue"]["generation_contract"]["enable_thinking"] is False
-    assert result["dialogue"]["expected_port"] == 8000
-    assert result["agent"]["model"] == "Qwen/Qwen2.5-3B-Instruct-AWQ"
-    assert result["profile"] != "rtxpro6000_96g"
+    assert result["asr"]["provider"] == config.asr.provider
+    assert result["tts"]["provider"] == config.tts.provider
+    assert result["dialogue"]["generation_contract"]["enable_thinking"] == config.dialogue.enable_thinking
 
 
 def test_manifests_contain_no_measured_hardware_result():
-    deployment = manifest.build_deployment_manifest("rtxpro6000_96g", git_commit="test-commit")
-    acceptance = manifest.build_acceptance_manifest("rtxpro6000_96g", git_commit="test-commit")
+    deployment = manifest.build_deployment_manifest(git_commit="test-commit")
+    acceptance = manifest.build_acceptance_manifest(git_commit="test-commit")
 
     assert deployment["measured_hardware"] == "NOT DECLARED"
     assert deployment["measured_vram"] == "NOT DECLARED"
@@ -61,7 +58,6 @@ def test_manifests_contain_no_measured_hardware_result():
 
 def test_write_manifests_records_both_artifacts_and_provenance(tmp_path):
     deployment_path, acceptance_path = manifest.write_manifests(
-        "rtxpro6000_96g",
         output_root=tmp_path,
         generated_at="2026-08-17T00:00:00+00:00",
         git_commit="test-commit",
@@ -72,7 +68,7 @@ def test_write_manifests_records_both_artifacts_and_provenance(tmp_path):
     assert deployment_path.name == "deployment_manifest.json"
     assert acceptance_path.name == "acceptance_manifest.json"
     assert deployment["git_commit"] == acceptance["git_commit"] == "test-commit"
-    assert deployment["profile"] == acceptance["profile"] == "rtxpro6000_96g"
+    assert deployment["runtime_config"] == acceptance["runtime_config"] == str(get_runtime_config().source_path)
 
 
 def test_manifest_cli_supports_direct_script_invocation(tmp_path):
@@ -80,8 +76,6 @@ def test_manifest_cli_supports_direct_script_invocation(tmp_path):
         [
             sys.executable,
             str(manifest.PROJECT_ROOT / "scripts" / "deployment" / "manifest.py"),
-            "--profile",
-            "rtxpro6000_96g",
             "--output-root",
             str(tmp_path),
         ],
@@ -99,6 +93,6 @@ def test_manifest_module_is_not_consumed_by_production_runtime():
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    production_files = [root / "main.py", root / "config.py", root / "deployment" / "profiles.py"]
+    production_files = [root / "main.py", root / "config.py", root / "deployment" / "runtime_config.py"]
     for path in production_files:
         assert "deployment.manifest" not in path.read_text(encoding="utf-8")
