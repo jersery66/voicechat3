@@ -12,12 +12,22 @@ from .widgets import FrostedPanel, MessageBubble, StatusIndicator
 
 class ChatInput(QTextEdit):
     """Text input that sends on Enter, newline on Shift+Enter."""
+
     submit = Signal()
+
+    # A single 12 px line measures 23 px inside the document; the rest of the
+    # chrome (QSS padding, border, breathing room) adds 25 px. The field starts
+    # at one line and grows with the text instead of reserving five empty
+    # lines' worth of white above the keyboard shortcut hint.
+    MIN_HEIGHT = 48
+    MAX_HEIGHT = 120
+    CHROME_HEIGHT = 25
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText("输入消息，按 Enter 发送...")
-        self.setFixedHeight(60)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setFixedHeight(self.MIN_HEIGHT)
         self.setStyleSheet("""
             QTextEdit {
                 background: rgba(255,255,255,0.85);
@@ -29,6 +39,28 @@ class ChatInput(QTextEdit):
             }
             QTextEdit:focus { border: 1px solid #8b7355; }
         """)
+        self.textChanged.connect(self._sync_height)
+
+    def _sync_height(self):
+        document = self.document().documentLayout()
+        if document is None:
+            return
+        wanted = int(round(document.documentSize().height())) + self.CHROME_HEIGHT
+        wanted = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, wanted))
+        if wanted != self.height():
+            self.setFixedHeight(wanted)
+            # Shrinking has to be pushed through: setFixedHeight invalidates
+            # this widget only, and the composer frame - capped at its size
+            # hint - kept the taller geometry after the text was cleared.
+            self.updateGeometry()
+            parent = self.parentWidget()
+            if parent is not None and parent.layout() is not None:
+                parent.layout().activate()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Re-wrapping on a narrower field changes the line count too.
+        self._sync_height()
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not event.modifiers() & Qt.ShiftModifier:
@@ -178,7 +210,7 @@ class ChatPanel(FrostedPanel):
         input_layout.addWidget(self.text_input)
 
         self.btn_send = QPushButton("发送")
-        self.btn_send.setFixedSize(50, 60)
+        self.btn_send.setFixedSize(50, ChatInput.MIN_HEIGHT)
         self.btn_send.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2F6B4F, stop:1 #3C8163);
@@ -192,12 +224,18 @@ class ChatPanel(FrostedPanel):
         """)
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self._on_send)
-        input_layout.addWidget(self.btn_send)
+        # Bottom-aligned so it stays level with the field as the field grows.
+        input_layout.addWidget(self.btn_send, 0, Qt.AlignBottom)
 
         # Opaque composer base: keeps typed text readable and hides the
         # photo's own bottom-right watermark that bled through the glass card.
+        # Its height must follow the content: with the default Preferred policy
+        # the frame also absorbed whatever the scroll area left over, which
+        # stretched the composer into a tall white slab with the buttons
+        # stranded at the bottom.
         footer = QFrame()
         footer.setObjectName("chatFooter")
+        footer.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         footer.setStyleSheet("""
             #chatFooter {
                 background-color: rgba(255, 255, 255, 0.97);
