@@ -1,0 +1,17 @@
+# Normalise text files, but keep Windows scripts on CRLF so they still run
+# when the repository is cloned on a machine with core.autocrlf=false.
+* text=auto
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.mp4 binary
+*.gguf binary
+*.wav binary
+*.flac binary

@@ -663,6 +663,40 @@ cd voicechat3
 
 ---
 
+#### ⚡ 一键启动（推荐）
+
+不想逐条执行下面 5.3–5.9 的步骤时，直接双击项目根目录的
+`Start-HeartDoctor.bat`，或在桌面创建快捷方式后点「心医生」：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\launch\install_shortcut.ps1
+```
+
+启动器会按顺序完成，并把每一步结果打在窗口里：
+
+| 步骤 | 内容 |
+|------|------|
+| 1 | 定位 Python；`.venv` 缺失或损坏时自动重建 |
+| 2 | 检测依赖，缺失的核心包自动安装（默认源失败则切清华镜像） |
+| 3 | 补齐 `logs` / `test_output` / `data` / `cache` 与 `.env` |
+| 4 | 检查知识库、`models` 权重、放松媒体 |
+| 5 | 检查 `:8000` / `:8001`，未就绪则自动拉起 llama-server 并等待加载 |
+| 6 | 启动图形界面 |
+
+可选参数：
+
+```powershell
+Start-HeartDoctor.bat -CheckOnly    # 只自检，不开界面
+Start-HeartDoctor.bat -NoRepair     # 只报告，不改磁盘
+Start-HeartDoctor.bat -FullRepair   # 连 torch / funasr / transformers 也自动装
+Start-HeartDoctor.bat -Deep         # 追加 doctor.py 深度只读诊断
+```
+
+每次运行都会在 `logs\bootstrap_*.log` 留下完整日志；出问题先看这份文件。
+`torch`、`funasr`、`transformers` 体积很大，默认只提示不安装，装了才能用语音输入输出。
+
+---
+
 #### 🐍 5.3 第二步：创建 Python 虚拟环境
 
 ```bash
@@ -1703,6 +1737,42 @@ evidence from the target workstation.
 git clone https://github.com/jersery66/voicechat3.git
 cd voicechat3
 ```
+
+---
+
+#### ⚡ One-click launch (recommended)
+
+Instead of walking through steps 5.3–5.9 below, double-click
+`Start-HeartDoctor.bat` in the project root, or create a desktop shortcut first
+and click 「心医生」:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\launch\install_shortcut.ps1
+```
+
+The launcher prints what it does, step by step:
+
+| Step | Action |
+|------|--------|
+| 1 | Locate Python; rebuild `.venv` if missing or broken |
+| 2 | Detect dependencies and install missing core packages (falls back to the Tsinghua mirror) |
+| 3 | Create `logs` / `test_output` / `data` / `cache` and `.env` |
+| 4 | Check the knowledge base, `models` weights, and relaxation media |
+| 5 | Probe `:8000` / `:8001`, start llama-server if down, wait for model load |
+| 6 | Launch the GUI |
+
+Options:
+
+```powershell
+Start-HeartDoctor.bat -CheckOnly    # self-check only, do not open the GUI
+Start-HeartDoctor.bat -NoRepair     # report only, change nothing
+Start-HeartDoctor.bat -FullRepair   # also install torch / funasr / transformers
+Start-HeartDoctor.bat -Deep         # add read-only doctor.py diagnostics
+```
+
+Every run writes a full log to `logs\bootstrap_*.log`; check it first when
+something goes wrong. `torch`, `funasr`, and `transformers` are large, so they
+are reported but not installed unless you ask — voice input and output need them.
 
 ---
 
