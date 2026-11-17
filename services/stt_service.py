@@ -40,7 +40,10 @@ import queue
 import threading
 import numpy as np
 import sounddevice as sd
-import torch
+try:
+    import torch
+except ImportError:  # lightweight install: text chat works, STT stays disabled
+    torch = None
 import tempfile
 import soundfile as sf
 
@@ -401,7 +404,9 @@ class STTService:
     
     def __init__(self, model_path: str = FUNASR_MODEL_PATH, device: str = None):
         self.model_path = model_path
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or (
+            "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
+        )
         self.model = None
         self.model_kwargs = {}
         self.is_recording = False
@@ -426,7 +431,13 @@ class STTService:
         """Load the FunASR model."""
         if progress_callback:
             progress_callback("Loading STT model...")
-            
+
+        if torch is None:
+            raise RuntimeError(
+                "STT unavailable: torch is not installed in this environment "
+                "(use the launcher's -FullRepair, or pip install torch torchaudio)"
+            )
+
         try:
             if self.model_path not in sys.path:
                 sys.path.insert(0, self.model_path)
@@ -1196,7 +1207,7 @@ class STTService:
                 logger.warning(f"Error releasing FunASR model: {exc}")
             self.model = None
         gc.collect()
-        if torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def _correct_common_errors(self, text: str) -> str:

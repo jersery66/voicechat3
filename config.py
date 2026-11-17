@@ -369,10 +369,29 @@ VOICE_PROMPT_TEXT = _VOICE_PROMPT_TEXT_DETECTED
 
 # Data Storage Root. Portable/offline launchers set VOICECHAT_DATA_DIR so
 # session audio, transcripts, and reports stay beside the copied bundle.
-DATA_ROOT = os.environ.get(
-    "VOICECHAT_DATA_DIR",
-    r"D:\program\voice_chat_data",
-)
+#
+# Resolution order (first hit wins):
+#   1. VOICECHAT_DATA_DIR                -- explicit operator override.
+#   2. <program>/runtime/data            -- portable default next to the code.
+#   3. D:\program\voice_chat_data        -- legacy workstation layout, used
+#      only when that directory already exists, so an existing site keeps its
+#      session history after the code is copied to another machine.
+# A relative override is resolved against APP_ROOT, never the shell's cwd:
+# launching from a shortcut must not silently relocate the recordings.
+def _resolve_data_root() -> str:
+    override = os.environ.get("VOICECHAT_DATA_DIR", "").strip()
+    if override:
+        if os.path.isabs(override):
+            return override
+        return os.path.abspath(os.path.join(APP_ROOT, override))
+    portable = os.path.join(PROGRAM_ROOT, "runtime", "data")
+    legacy = r"D:\program\voice_chat_data"
+    if not os.path.isdir(portable) and os.path.isdir(legacy):
+        return legacy
+    return portable
+
+
+DATA_ROOT = _resolve_data_root()
 
 
 def print_model_status():

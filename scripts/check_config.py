@@ -185,7 +185,14 @@ def check_voxcpm() -> bool:
         _ok(f"VoxCPM2 (not the configured TTS provider: {TTS_PROVIDER})")
         return True
 
-    from services.tts_service_voxcpm import TTSService
+    try:
+        from services.tts_service_voxcpm import TTSService
+    except Exception as exc:
+        # A lightweight install (no torch) must still reach the GUI: the voice
+        # path degrades to text, and the preflight reports it exactly that way
+        # instead of aborting the whole check list.
+        _warn("VoxCPM2", f"TTS service import failed ({type(exc).__name__}: {exc}); TTS disabled")
+        return True
 
     blocker = TTSService.get_load_blocker()
     if blocker:

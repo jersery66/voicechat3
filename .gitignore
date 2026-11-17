@@ -40,6 +40,14 @@ voice_chat_data/
 cache/
 test_output/
 models/
+
+# Machine-specific runtime configuration written by
+# scripts/launch/autoconfigure.py. The production contract stays in
+# config/runtime.yaml and is always versioned.
+config/runtime.local.yaml
+
+# Portable runtime data root (sessions, transcripts, reports)
+runtime/
 offline_deploy/dist/
 offline_deploy/wheels/
 offline_deploy/installers/
