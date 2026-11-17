@@ -17,7 +17,14 @@ def _autostart() -> None:
     nothing is set, the machine is probed, the model stack is started if needed,
     and ``config/runtime.local.yaml`` is written. Any failure is a warning, never
     a hard stop: a broken probe must not be able to prevent the GUI from opening.
+
+    Skipped under pytest: importing this module during a test run would probe the
+    developer's machine and export ``VOICECHAT_RUNTIME_CONFIG`` for every later
+    test in the session, which silently re-points config assertions at the local
+    file. Tests that exercise autostart call it directly.
     """
+    if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     try:
         from deployment.autostart import ensure
 

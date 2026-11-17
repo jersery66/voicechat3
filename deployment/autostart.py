@@ -58,6 +58,12 @@ ENV_NO_AUTOSTART = "VOICECHAT_NO_AUTOSTART"
 ENV_ALLOW_STUB = "VOICECHAT_ALLOW_STUB"
 ENV_ALLOW_DOWNLOAD = "VOICECHAT_ALLOW_DOWNLOAD"
 
+# Set once ensure() exported the generated config. Without it, the second call
+# in the same process would mistake our own export for an operator-pinned
+# contract and return immediately — which is exactly what made "services stopped
+# -> start them again" silently do nothing.
+_self_configured = False
+
 # Weights that are never in a git checkout. Destination is relative to the
 # models root the runtime config points at; both ids are the ones the speech
 # services themselves use (FunASR's own from_pretrained default, and the
@@ -346,6 +352,8 @@ def ensure(*, allow_start: bool = True, wait_seconds: int = 180,
     Returns ``None`` when autostart is disabled (the caller then keeps whatever
     ``config/runtime.yaml`` says).
     """
+    global _self_configured
+
     def say(message: str) -> None:
         if verbose:
             print(f"[autostart] {message}", flush=True)
@@ -354,7 +362,8 @@ def ensure(*, allow_start: bool = True, wait_seconds: int = 180,
         return None
 
     explicit = os.environ.get(ENV_RUNTIME_CONFIG, "").strip()
-    if explicit:
+    ours = bool(explicit) and _self_configured and Path(explicit) == LOCAL_CONFIG
+    if explicit and not ours:
         # An operator pinned a contract: never re-point it behind their back.
         say(f"使用显式配置 {explicit}")
         return explicit
@@ -402,6 +411,7 @@ def ensure(*, allow_start: bool = True, wait_seconds: int = 180,
 
     if LOCAL_CONFIG.is_file():
         os.environ[ENV_RUNTIME_CONFIG] = str(LOCAL_CONFIG)
+        _self_configured = True
         if _chosen_is_real(state):
             say(f"对话 {chosen.get('base_url')} · {state.get('dialogue_model')}")
         return str(LOCAL_CONFIG)
