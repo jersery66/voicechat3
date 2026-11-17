@@ -35,6 +35,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -180,8 +181,35 @@ def _to_wsl_path(win_path: Path) -> str:
     return posix
 
 
+def _keeper_alive() -> bool:
+    """Is the WSL keep-alive session from a previous start still running?
+
+    Services can outlive the process that started them for a few seconds: the
+    keeper is gone but llama-server still answers. If ensure() then returns
+    early because the ports are ready, those orphans are reaped moments later
+    and the session dies mid-use. So readiness alone is not enough — the keeper
+    has to be there too.
+    """
+    try:
+        pid = int(PID_FILE.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return False
+    if not pid:
+        return False
+    try:
+        result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                                capture_output=True, timeout=20, text=True,
+                                encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    out = (result.stdout or "").lower()
+    # A bare PID is not enough: Windows reuses PIDs, so a stale file can point at
+    # an unrelated process and make us believe the keeper still exists.
+    return "wsl.exe" in out and str(pid) in out
+
+
 def start_model_stack(*, wait_seconds: int = 180, bind: str = "0.0.0.0") -> bool:
-    """Start the WSL llama.cpp stack and wait until both ports answer.
+    """Start the WSL llama.cpp stack (and its keeper) and wait until both ports answer.
 
     Binding ``0.0.0.0`` is deliberate: WSL2's localhost forwarding only covers
     wildcard-bound sockets on some hosts, and a loopback-bound server is then
@@ -189,7 +217,7 @@ def start_model_stack(*, wait_seconds: int = 180, bind: str = "0.0.0.0") -> bool
     so this does not publish the model.
     """
     status = service_status()
-    if status["ready"]:
+    if status["ready"] and _keeper_alive():
         return True
 
     wsl = shutil.which("wsl")
@@ -341,6 +369,59 @@ def report_weights(state: dict[str, Any]) -> None:
         print(f"[autostart] 缺少{spec['label']}（约 {spec['size_gb']}GB）", flush=True)
     print("[autostart] 自动下载：Start-HeartDoctor-Local.bat -ProvisionModels"
           f"，或设 {ENV_ALLOW_DOWNLOAD}=1 后重启", flush=True)
+
+
+# ------------------------------------------------------------------ watchdog
+_watchdog: Optional[threading.Thread] = None
+
+
+def start_watchdog(interval: float = 15.0, *, restarts_before_give_up: int = 0,
+                   on_event=None) -> bool:
+    """Keep the model services alive for the lifetime of this process.
+
+    llama-server lives inside WSL2, which is free to reclaim the distro when it
+    decides the machine is idle — an orphaned service can vanish a minute into a
+    session. Rather than trying to out-guess that policy, the app simply checks
+    the endpoints and restarts the stack when they stop answering.
+
+    Returns True when a watchdog is running afterwards (idempotent).
+    """
+    global _watchdog
+    if _watchdog is not None and _watchdog.is_alive():
+        return True
+
+    def loop() -> None:
+        misses = 0
+        restarts = 0
+        while True:
+            time.sleep(interval)
+            try:
+                if service_status()["ready"]:
+                    misses = 0
+                    continue
+                misses += 1
+                if misses < 2:          # one missed probe is not a death
+                    continue
+                restarts += 1
+                recovered = start_model_stack(wait_seconds=240)
+                misses = 0
+                if on_event:
+                    try:
+                        on_event(recovered)
+                    except Exception:   # noqa: BLE001 - a callback must not kill the loop
+                        pass
+                if not recovered and restarts_before_give_up and restarts >= restarts_before_give_up:
+                    return
+            except Exception:           # noqa: BLE001 - never let the watchdog die
+                time.sleep(interval)
+
+    _watchdog = threading.Thread(target=loop, name="model-watchdog", daemon=True)
+    _watchdog.start()
+    return True
+
+
+def watchdog_running() -> bool:
+    return _watchdog is not None and _watchdog.is_alive()
 
 
 # ------------------------------------------------------------------- ensure

@@ -26,9 +26,12 @@ def _autostart() -> None:
     if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
         return
     try:
-        from deployment.autostart import ensure
+        from deployment.autostart import ensure, start_watchdog
 
         ensure()
+        # WSL2 may reclaim the distro mid-session; keep the services alive for
+        # as long as the window is open instead of failing on the next turn.
+        start_watchdog()
     except Exception as exc:  # noqa: BLE001 - startup must survive anything here
         print(f"WARNING: autostart skipped ({type(exc).__name__}: {exc})")
 

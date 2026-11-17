@@ -209,7 +209,41 @@ Python 3.11.9 的 **torch 2.8.0+cu128 + torchaudio 2.8.0+cu128**，直接复制�
 > 它不产生任何真实的语言理解或评估结果，**不得用于真实访谈**，
 > 也不能把它的输出当作模型输出写进研究数据。
 
-## 十、已知限制
+## 十、自测
+
+仓库自带一套端到端自检，用来验收一台机器（也是这次反复测试用的同一套清单）：
+
+```powershell
+python scripts\launch\selfcheck.py                # 全量，约 5 分钟
+python scripts\launch\selfcheck.py --quick        # 跳过语音与界面，约 1 分钟
+python scripts\launch\selfcheck.py --no-recovery  # 不停服务，避免打断正在用的人
+```
+
+它检查 13 项：模块编译、服务就绪、权重齐全、自动探测、Agent 识别、配置体检、
+依赖体检、启动器自检、**停服务后自动拉起**、语音识别（与 `data/S1.txt` 比对）、
+语音合成（RTF<1）、界面冒烟（离屏开窗跑完一轮真实对话）。退出码 0 才算通过。
+
+单元测试在 `tests/`。Windows 上请把临时目录放到仓库外，否则 pytest 结束时清理
+几百个临时目录会触发系统的批量删除保护，导致汇总行丢失、退出码失真：
+
+```powershell
+python -m pytest -q --basetemp=%TEMP%\pt_run
+```
+
+最近一次结果：`1920 passed, 4 skipped`；连续三轮 `selfcheck` 均 13/13。
+
+### 服务为什么需要看门狗
+
+`llama-server` 跑在 WSL2 里，而 WSL2 会在它认为空闲时回收整个发行版——启动它的
+会话一消失，服务可能在一分钟后一起没掉。与其去猜 WSL 的空闲策略，应用直接在
+`main.py` 里起一个 15 秒间隔的看门狗（`deployment/autostart.py::start_watchdog`）：
+探测不到就重新拉起模型栈，窗口开着期间服务始终可用。
+
+另外 `ensure()` 不会因为"端口能通"就直接返回：它还会确认保活会话（`wsl.exe`）
+真的在，否则孤儿服务会在几秒后被回收。判断时不只看 PID——Windows 会复用 PID，
+所以连进程名一起核对。
+
+## 十一、已知限制
 
 - `scripts\` 下的一批 `test_asr*.py / test_tts.py / test_loop.py` 仍写着实验机的
   `D:\voicechat3`、`D:\models\voicechat3` 绝对路径，属单机诊断脚本，未纳入自动适配。

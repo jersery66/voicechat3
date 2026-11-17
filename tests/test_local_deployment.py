@@ -34,12 +34,14 @@ def _isolate_process_state():
     """
     saved = dict(os.environ)
     autostart._self_configured = False
+    autostart._watchdog = None
     try:
         yield
     finally:
         os.environ.clear()
         os.environ.update(saved)
         autostart._self_configured = False
+        autostart._watchdog = None
 
 
 # --------------------------------------------------------------- manifest
@@ -239,6 +241,55 @@ def test_probe_models_returns_none_when_nothing_listens():
     assert autostart.probe_models("127.0.0.1", 1, timeout=0.3) is None
 
 
+# ------------------------------------------------- keeper (WSL session)
+def _fake_stack_env(monkeypatch, tmp_path, *, ready: bool, keeper: bool):
+    script = tmp_path / "stack.sh"
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setattr(autostart, "WSL_STACK_SCRIPT", script)
+    monkeypatch.setattr(autostart, "PID_FILE", tmp_path / "keeper.pid")
+    monkeypatch.setattr(autostart, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(autostart, "service_status",
+                        lambda: {"dialogue": ["m"] if ready else None,
+                                 "agent": ["a"] if ready else None, "ready": ready})
+    monkeypatch.setattr(autostart, "_keeper_alive", lambda: keeper)
+    monkeypatch.setattr(autostart, "find_wsl_distro", lambda: "Ubuntu")
+    monkeypatch.setattr(autostart.shutil, "which", lambda name: "wsl")
+    spawned: list[list[str]] = []
+
+    class _Proc:
+        pid = 4242
+
+    def fake_popen(args, **_kwargs):
+        spawned.append(list(args))
+        return _Proc()
+
+    monkeypatch.setattr(autostart.subprocess, "Popen", fake_popen)
+    return spawned
+
+
+def test_ready_services_without_a_keeper_get_adopted(monkeypatch, tmp_path):
+    """Orphaned services (keeper gone) must be re-attached, not trusted."""
+    spawned = _fake_stack_env(monkeypatch, tmp_path, ready=True, keeper=False)
+    assert autostart.start_model_stack(wait_seconds=1) is True
+    assert spawned, "服务在跑但保活会话没了，应当补一个保活"
+
+
+def test_ready_services_with_a_live_keeper_are_left_alone(monkeypatch, tmp_path):
+    spawned = _fake_stack_env(monkeypatch, tmp_path, ready=True, keeper=True)
+    assert autostart.start_model_stack(wait_seconds=1) is True
+    assert spawned == [], "已有保活会话时不应重复启动"
+
+
+def test_keeper_alive_reads_the_pid_file(monkeypatch, tmp_path):
+    pid_file = tmp_path / "keeper.pid"
+    monkeypatch.setattr(autostart, "PID_FILE", pid_file)
+    assert autostart._keeper_alive() is False        # no file
+    pid_file.write_text("", encoding="ascii")
+    assert autostart._keeper_alive() is False        # empty
+    pid_file.write_text("not-a-pid", encoding="ascii")
+    assert autostart._keeper_alive() is False        # garbage
+
+
 # ---------------------------------------------------------- lazy package
 def test_deployment_package_does_not_import_yaml_eagerly():
     """A fresh machine has no PyYAML; the provisioning modules must still import.
@@ -312,3 +363,39 @@ def test_stub_config_is_not_strict():
     text = ac.render_yaml(state)
     assert "strict_preflight: false" in text
     assert "enabled: false" in text          # agent stays off without a real server
+
+
+# -------------------------------------------------------------- watchdog
+def test_watchdog_restarts_services_that_disappear(monkeypatch):
+    """WSL2 may reclaim the distro mid-session; the app must heal by itself."""
+    import time
+
+    states = [True, False, False, False]
+    monkeypatch.setattr(autostart, "service_status",
+                        lambda: {"dialogue": None, "agent": None,
+                                 "ready": states.pop(0) if states else False})
+    restarts: list[int] = []
+    monkeypatch.setattr(autostart, "start_model_stack",
+                        lambda **_kwargs: restarts.append(1) or True)
+    monkeypatch.setattr(autostart, "_watchdog", None)
+
+    assert autostart.start_watchdog(interval=0.01, restarts_before_give_up=1)
+    deadline = time.time() + 5
+    while time.time() < deadline and not restarts:
+        time.sleep(0.02)
+    assert restarts, "服务消失后应触发一次重启"
+    # 重启成功后线程继续守护（daemon，随进程退出）
+    assert autostart._watchdog is not None and autostart._watchdog.daemon
+
+
+def test_watchdog_is_idempotent(monkeypatch):
+    import time
+
+    monkeypatch.setattr(autostart, "service_status",
+                        lambda: {"dialogue": None, "agent": None, "ready": True})
+    monkeypatch.setattr(autostart, "_watchdog", None)
+    assert autostart.start_watchdog(interval=0.05) is True
+    first = autostart._watchdog
+    assert autostart.start_watchdog(interval=0.05) is True
+    assert autostart._watchdog is first
+    time.sleep(0.02)
