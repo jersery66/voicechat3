@@ -105,6 +105,32 @@ PyTorch 官方源装 CUDA 版，通道由驱动报告的 CUDA 版本决定（这
 实测：卸掉 `pydub` 后 `--check` 报 `缺少: pydub（约 1 MB）`，
 `--install --tier core` 两秒补回。
 
+**torch 优先复用本机已有安装**：这台线路到 download.pytorch.org 只有约
+**0.7 MB/s**，一个 CUDA 轮子要 70 分钟以上。所以装之前先扫本机其它虚拟环境
+（`*/.venv/Lib/site-packages` 两层深度，不做全盘遍历），找到**同 Python 版本**
+（cp311 的轮子不能用 cp313 加载）且带 CUDA 的 torch，直接 robocopy 过来再验证
+`torch.cuda.is_available()`；失败才回退下载。`--no-reuse-torch` 可强制下载。
+
+复用要求 **torch 和 torchaudio 同时在供体里**：只有 torch 的供体会造出一个
+"`import torch` 成功、但每个语音服务都挂在 `import torchaudio`" 的假成功环境。
+
+### 全新设备实录
+
+在 `D://voicechat3-fresh`（`git archive` 导出、无 `.venv`、无 `models/`、无
+`config/runtime.local.yaml`）跑一键启动：
+
+| 步骤 | 结果 |
+|---|---|
+| 建虚拟环境 | Python 3.11.9 |
+| 界面依赖（20 个） | 88s |
+| 语音依赖 | 132s（torch 复用本地 cu128，funasr/transformers/librosa 走镜像） |
+| 语音合成依赖 | 约 40s |
+| 服务探测 / 配置生成 | `:8000` / `:8001` 就绪 |
+| 自检 | **9 项全通过，0 警告 0 失败，总耗时 5m13s** |
+| 启动界面并完成一轮对话 | 65s（含 TTS 预热），27B 正常回复 |
+
+对比：如果不用复用、纯下载 torch，同样是这一步但要多等一个多小时。
+
 ## 四、探测规则
 
 `scripts/launch/autoconfigure.py`（纯标准库，装依赖之前就能跑）依次判断：
