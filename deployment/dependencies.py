@@ -184,6 +184,161 @@ def torch_channels(gpu: dict[str, object]) -> list[str]:
     return channels + ["cpu"]
 
 
+# ------------------------------------------------------------ torch reuse
+def _py_version_of(venv_python: Path) -> Optional[tuple[int, int]]:
+    try:
+        out = subprocess.run(
+            [str(venv_python), "-c", "import sys;print('%d.%d'%sys.version_info[:2])"],
+            capture_output=True, timeout=20, text=True, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        major, minor = out.stdout.strip().split(".")[:2]
+        return int(major), int(minor)
+    except ValueError:
+        return None
+
+
+def _site_packages_candidates() -> list[Path]:
+    """Other local virtualenvs' site-packages, without walking whole drives.
+
+    The layouts below cover every environment seen on these workstations, and
+    globbing two levels is orders of magnitude cheaper than an os.walk of a
+    multi-terabyte drive.
+    """
+    patterns = (
+        "*/.venv/Lib/site-packages",
+        "*/*/.venv/Lib/site-packages",
+        "*/venv/Lib/site-packages",
+        "*/*/venv/Lib/site-packages",
+        "*/envs/*/Lib/site-packages",
+    )
+    found: list[Path] = []
+    own = APP_ROOT.resolve()
+    for letter in "CDEFGH":
+        drive = Path(f"{letter}:/")
+        try:
+            if not drive.exists():
+                continue
+        except OSError:
+            continue
+        for pattern in patterns:
+            try:
+                for path in drive.glob(pattern):
+                    try:
+                        if own in path.resolve().parents:
+                            continue
+                    except OSError:
+                        continue
+                    # torchaudio must come along: a torch-only donor produces an
+                    # environment where `import torch` succeeds but the speech
+                    # services still fail on `import torchaudio`.
+                    if any(path.glob("torch-*+cu*.dist-info")) and \
+                            any(path.glob("torchaudio-*.dist-info")):
+                        found.append(path)
+            except (OSError, ValueError):
+                continue
+    return found
+
+
+def find_reusable_torch() -> Optional[dict[str, object]]:
+    """A CUDA torch already installed for this exact Python version, elsewhere.
+
+    Downloading torch from download.pytorch.org measures about 0.7 MB/s from
+    Chinese networks (≈1 hour for the wheel), so when the machine already has a
+    matching CUDA build in another virtualenv, copying 7 GB locally is both
+    faster and offline-safe. Python ABI must match exactly — a cp313 wheel
+    cannot be loaded by cp311.
+    """
+    current = (sys.version_info.major, sys.version_info.minor)
+    best: Optional[dict[str, object]] = None
+    for site in _site_packages_candidates():
+        venv_root = site.parents[1]
+        python = venv_root / "Scripts" / "python.exe"
+        if not python.is_file():
+            continue
+        if _py_version_of(python) != current:
+            continue
+        infos = sorted(site.glob("torch-*+cu*.dist-info"))
+        if not infos:
+            continue
+        channel = ""
+        for info in infos:
+            match = re.search(r"\+(cu\d+)", info.name)
+            if match:
+                channel = match.group(1)
+        try:
+            audio = sorted(site.glob("torchaudio-*.dist-info"))[0].name
+        except IndexError:
+            continue
+        candidate = {"site": site, "channel": channel,
+                     "torch_info": infos[0].name, "audio_info": audio}
+        if best is None or str(candidate["channel"]) > str(best["channel"]):
+            best = candidate
+    return best
+
+
+def _copy_tree(src: Path, dst: Path) -> bool:
+    """Copy with robocopy on Windows (long paths), shutil elsewhere."""
+    robocopy = shutil.which("robocopy")
+    if robocopy:
+        result = subprocess.run(
+            [robocopy, str(src), str(dst), "/E", "/NFL", "/NDL", "/NJH", "/NJS",
+             "/MT:16", "/R:1", "/W:1"],
+            capture_output=True, timeout=1800,
+        )
+        # robocopy: 0-7 are success codes, >=8 means at least one file failed.
+        return result.returncode < 8
+    try:
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def reuse_torch(candidate: dict[str, object]) -> tuple[bool, str]:
+    """Copy a matching CUDA torch into this environment and prove it imports."""
+    site = Path(str(candidate["site"]))
+    target = Path(sysconfig_site_packages() or "")
+    if not target.is_dir():
+        return False, "找不到当前环境的 site-packages"
+    packages = ("torch", "torchaudio", "torio", "torchgen")
+    copied = []
+    for name in packages:
+        src = site / name
+        if not src.is_dir():
+            continue
+        if not _copy_tree(src, target / name):
+            return False, f"复制 {name} 失败"
+        copied.append(name)
+    for info in list(site.glob("torch-*+cu*.dist-info")) + list(site.glob("torchaudio-*.dist-info")) \
+            + list(site.glob("torio-*.dist-info")):
+        if not _copy_tree(info, target / info.name):
+            return False, f"复制 {info.name} 失败"
+    if not present("torch"):
+        return False, "复制后仍无法导入 torch"
+    try:
+        import torch  # noqa: PLC0415 - verify what actually landed
+
+        if not torch.cuda.is_available():
+            return False, f"复制的是 {torch.__version__}，但 CUDA 不可用"
+        return True, f"复用 {site.parents[2]} 的 {torch.__version__}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"复制后 torch 不可用: {type(exc).__name__}"
+
+
+def sysconfig_site_packages() -> Optional[str]:
+    try:
+        import sysconfig
+
+        return sysconfig.get_paths().get("purelib")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ---------------------------------------------------------------- install
 def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -220,8 +375,19 @@ def _pip(args: list[str], *, quiet: bool = False) -> tuple[int, str]:
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
-def install_torch(gpu: dict[str, object], *, quiet: bool = True) -> tuple[bool, str]:
-    """Install torch/torchaudio from the best CUDA channel available."""
+def install_torch(gpu: dict[str, object], *, quiet: bool = True,
+                  reuse: bool = True) -> tuple[bool, str]:
+    """Get a working torch: reuse a local CUDA build, else install from the index."""
+    if reuse and not present("torch"):
+        candidate = find_reusable_torch()
+        if candidate:
+            print(f"  发现本机已有的 CUDA torch（{candidate['channel']}）: "
+                  f"{candidate['site']}", flush=True)
+            ok, detail = reuse_torch(candidate)
+            if ok:
+                return True, detail
+            print(f"  复用失败（{detail}），改为下载", flush=True)
+
     for channel in torch_channels(gpu):
         if channel == "cpu":
             args = ["torch", "torchaudio"]
@@ -248,7 +414,7 @@ def install(items: Iterable[Dependency], *, mirror: Optional[str] = None,
     return code == 0, log
 
 
-def provision(tier: str = "all", *, gpu_mode: str = "auto",
+def provision(tier: str = "all", *, gpu_mode: str = "auto", reuse: bool = True,
               quiet: bool = True) -> dict[str, object]:
     """Install everything missing for ``tier`` and return a report."""
     report: dict[str, object] = {"tier": tier, "installed": [], "failed": [], "notes": []}
@@ -268,7 +434,7 @@ def provision(tier: str = "all", *, gpu_mode: str = "auto",
 
     torch_items = [d for d in todo if d.module in ("torch", "torchaudio")]
     if torch_items:
-        ok, label = install_torch(gpu, quiet=quiet)
+        ok, label = install_torch(gpu, quiet=quiet, reuse=reuse)
         (report["installed"] if ok else report["failed"]).append(f"torch({label})")
         if ok:
             report["notes"].append(f"torch 通道: {label}")
@@ -357,13 +523,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--install", action="store_true", help="安装缺失项")
     parser.add_argument("--tier", default="all", choices=TIERS)
     parser.add_argument("--gpu", default="auto", choices=("auto", "off"))
+    parser.add_argument("--no-reuse-torch", action="store_true",
+                        help="不复制本机其他环境里已有的 CUDA torch，强制下载")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
     if args.install:
         started = time.time()
-        result = provision(args.tier, gpu_mode=args.gpu, quiet=not args.verbose)
+        result = provision(args.tier, gpu_mode=args.gpu,
+                           reuse=not args.no_reuse_torch, quiet=not args.verbose)
         if args.json:
             print(json.dumps(result, ensure_ascii=True))
         else:

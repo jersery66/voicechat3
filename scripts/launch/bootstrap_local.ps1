@@ -114,16 +114,17 @@ function Test-MinVersion([string]$Version, [int]$Major, [int]$Minor) {
 
 Write-Step '1/5 Python 与虚拟环境'
 
+# 只在最后汇报一次结果，避免"先警告 .venv 不存在、随后又创建成功"这种
+# 自相矛盾的两行。
+$venvNote = '.venv 不存在'
 if (Test-Path $script:VenvPython) {
     $ver = Test-PythonVersion $script:VenvPython @()
     if ($ver -and (Test-MinVersion $ver 3 10)) {
         $script:PyExe = $script:VenvPython
         Add-Check 'OK' '虚拟环境' "已存在，Python $ver"
     } else {
-        Add-Check 'WARN' '虚拟环境' '存在但不可用，需要重建'
+        $venvNote = '存在但不可用，需要重建'
     }
-} else {
-    Add-Check 'WARN' '虚拟环境' '.venv 不存在'
 }
 
 if (-not $script:PyExe) {
@@ -148,7 +149,7 @@ if (-not $script:PyExe) {
             if (Test-Path (Join-Path $script:Root '.venv')) {
                 Remove-Item -Recurse -Force (Join-Path $script:Root '.venv') -ErrorAction SilentlyContinue
             }
-            Write-Host '  创建 .venv ...' -ForegroundColor Yellow
+            Write-Host ("  创建 .venv（{0}）..." -f $venvNote) -ForegroundColor Yellow
             & $baseExe @baseArgs -m venv (Join-Path $script:Root '.venv')
             if (Test-Path $script:VenvPython) {
                 $script:PyExe = $script:VenvPython
@@ -237,9 +238,19 @@ if (-not $script:PyExe) {
     if ($NoStub) { $env:VOICECHAT_ALLOW_STUB = '0' } else { $env:VOICECHAT_ALLOW_STUB = '1' }
     if ($ProvisionModels) { $env:VOICECHAT_ALLOW_DOWNLOAD = '1' } else { $env:VOICECHAT_ALLOW_DOWNLOAD = '0' }
 
-    & $script:PyExe -m deployment.autostart
-    if ($LASTEXITCODE -ne 0) {
-        Add-Check 'WARN' '自动配置' ("autostart 返回码 " + $LASTEXITCODE)
+    # 捕获输出：失败时给一行可读的原因，而不是把 Python traceback 直接甩到屏幕上。
+    $autoOut = & $script:PyExe -m deployment.autostart 2>&1
+    $autoCode = $LASTEXITCODE
+    foreach ($line in $autoOut) { Write-Host ("  " + $line) }
+    if ($autoCode -ne 0) {
+        $tail = @($autoOut | Where-Object { $_ -match 'Error|错误|Traceback' } | Select-Object -Last 1)
+        $detail = 'autostart 返回码 ' + $autoCode
+        if ($tail.Count -gt 0) {
+            $reason = [string]$tail[0]
+            $reason = $reason -replace '^.*?(Error|错误)[:：]\s*', ''
+            if ($reason) { $detail = $reason }
+        }
+        Add-Check 'WARN' '自动配置' $detail
     }
 
     # 状态用 JSON 读，不解析面向人的中文文本：Windows 控制台代码页和子进程
