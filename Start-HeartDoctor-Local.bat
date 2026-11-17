@@ -7,10 +7,11 @@ REM    Start-HeartDoctor.bat        lab machine (fixed models, strict preflight)
 REM    Start-HeartDoctor-Local.bat  any machine (auto-detect, degrade instead of dying)
 REM
 REM  Arguments are forwarded to scripts\launch\bootstrap_local.ps1:
-REM    -CheckOnly    self-check and write the config, do not open the GUI
-REM    -NoRepair     report only, change nothing
-REM    -NoStub       never start the offline stub when no model server answers
-REM    -FullRepair   also install torch / funasr / transformers (voice)
+REM    -CheckOnly        self-check and write the config, do not open the GUI
+REM    -NoRepair         report only, change nothing
+REM    -NoStub           never start the offline stub when no model server answers
+REM    -TextOnly         skip torch / funasr / voxcpm (text-only install)
+REM    -ProvisionModels  download missing speech weights (FunASR ~2GB, VoxCPM2 ~4.7GB)
 REM ============================================================
 chcp 65001 >nul 2>nul
 setlocal

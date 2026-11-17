@@ -56,6 +56,26 @@ STUB_PORT = 8010
 ENV_RUNTIME_CONFIG = "VOICECHAT_RUNTIME_CONFIG"
 ENV_NO_AUTOSTART = "VOICECHAT_NO_AUTOSTART"
 ENV_ALLOW_STUB = "VOICECHAT_ALLOW_STUB"
+ENV_ALLOW_DOWNLOAD = "VOICECHAT_ALLOW_DOWNLOAD"
+
+# Weights that are never in a git checkout. Destination is relative to the
+# models root the runtime config points at; both ids are the ones the speech
+# services themselves use (FunASR's own from_pretrained default, and the
+# ModelScope id in tts_service_voxcpm._download_model).
+WEIGHT_SOURCES: dict[str, dict[str, Any]] = {
+    "funasr": {
+        "repo": "FunAudioLLM/Fun-ASR-Nano-2512",
+        "target": "funasr/Fun-ASR-Nano-2512",
+        "size_gb": 2.0,
+        "label": "语音识别 (Fun-ASR-Nano-2512)",
+    },
+    "voxcpm": {
+        "repo": "OpenBMB/VoxCPM2",
+        "target": "VoxCPM2",
+        "size_gb": 4.7,
+        "label": "语音合成 (VoxCPM2)",
+    },
+}
 
 # Windows: detach the keeper so it outlives this process (the WSL distro is torn
 # down when its last session ends, and takes every llama-server with it).
@@ -254,8 +274,72 @@ def start_offline_stub() -> bool:
     return False
 
 
+# ------------------------------------------------------------------- assets
+def missing_weights(state: dict[str, Any]) -> list[str]:
+    """Which speech-weight packages the probe could not find."""
+    voice = (state or {}).get("voice") or {}
+    missing = []
+    if not voice.get("funasr"):
+        missing.append("funasr")
+    if not voice.get("voxcpm"):
+        missing.append("voxcpm")
+    return missing
+
+
+def download_weights(kinds: list[str], *, models_root: Optional[Path] = None,
+                     verbose: bool = True) -> list[str]:
+    """Fetch missing weights from ModelScope into ``<models_root>/<target>``.
+
+    ModelScope is used rather than Hugging Face because the machines this runs
+    on are usually in China and it is the mirror the speech services themselves
+    prefer. Failures are reported, never raised: a missing layer only costs the
+    matching capability.
+    """
+    if not kinds:
+        return []
+    root = Path(models_root or APP_ROOT / "models")
+    done: list[str] = []
+    try:
+        from modelscope import snapshot_download  # noqa: PLC0415 - optional dep
+    except Exception as exc:  # noqa: BLE001
+        if verbose:
+            print(f"[autostart] 无法自动下载：modelscope 不可用（{type(exc).__name__}）", flush=True)
+        return done
+
+    for kind in kinds:
+        spec = WEIGHT_SOURCES.get(kind)
+        if not spec:
+            continue
+        target = root / str(spec["target"])
+        target.mkdir(parents=True, exist_ok=True)
+        if verbose:
+            print(f"[autostart] 下载 {spec['label']} 约 {spec['size_gb']}GB → {target}",
+                  flush=True)
+        try:
+            snapshot_download(str(spec["repo"]), local_dir=str(target))
+            done.append(kind)
+        except Exception as exc:  # noqa: BLE001
+            if verbose:
+                print(f"[autostart] {spec['label']} 下载失败：{type(exc).__name__}: {exc}",
+                      flush=True)
+    return done
+
+
+def report_weights(state: dict[str, Any]) -> None:
+    """Tell the operator exactly what is missing and how to get it."""
+    missing = missing_weights(state)
+    if not missing:
+        return
+    for kind in missing:
+        spec = WEIGHT_SOURCES[kind]
+        print(f"[autostart] 缺少{spec['label']}（约 {spec['size_gb']}GB）", flush=True)
+    print("[autostart] 自动下载：Start-HeartDoctor-Local.bat -ProvisionModels"
+          f"，或设 {ENV_ALLOW_DOWNLOAD}=1 后重启", flush=True)
+
+
 # ------------------------------------------------------------------- ensure
 def ensure(*, allow_start: bool = True, wait_seconds: int = 180,
+           provision_models: Optional[bool] = None,
            verbose: bool = True) -> Optional[str]:
     """Make this machine runnable and return the config path to use.
 
@@ -300,6 +384,21 @@ def ensure(*, allow_start: bool = True, wait_seconds: int = 180,
         else:
             say("没有可用的模型服务；界面会提示连接失败。"
                 f"需要联调可设 {ENV_ALLOW_STUB}=1 使用离线桩。")
+
+    # Weights are the one thing a fresh device cannot guess. Download them only
+    # when the operator opted in; otherwise state exactly what is missing.
+    want_download = provision_models if provision_models is not None else (
+        os.environ.get(ENV_ALLOW_DOWNLOAD, "").strip() not in ("", "0", "false", "False")
+    )
+    kinds = missing_weights(state)
+    if kinds:
+        if want_download:
+            fetched = download_weights(kinds, verbose=verbose)
+            if fetched:
+                state = run_autoconfigure(write=True)
+                chosen = state.get("chosen") or {}
+        else:
+            report_weights(state)
 
     if LOCAL_CONFIG.is_file():
         os.environ[ENV_RUNTIME_CONFIG] = str(LOCAL_CONFIG)
@@ -361,6 +460,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--start-services", action="store_true", help="启动 WSL 模型栈")
     parser.add_argument("--stop-services", action="store_true", help="停止模型栈")
     parser.add_argument("--write-config", action="store_true", help="只探测并写配置")
+    parser.add_argument("--models", action="store_true", help="报告缺失的语音权重")
+    parser.add_argument("--download-models", action="store_true",
+                        help="下载缺失的语音权重（数 GB）")
     parser.add_argument("--json", action="store_true", help="输出探测结果 JSON")
     parser.add_argument("--wait", type=int, default=180, help="等待模型就绪的秒数")
     parser.add_argument("--bind", default="0.0.0.0", help="llama-server 绑定地址")
@@ -385,7 +487,26 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"配置已写入 {LOCAL_CONFIG}")
         return 0 if state else 4
 
-    path = ensure(allow_start=not args.status, wait_seconds=args.wait)
+    if args.models or args.download_models:
+        state = run_autoconfigure(write=True)
+        kinds = missing_weights(state)
+        if args.download_models and kinds:
+            fetched = download_weights(kinds)
+            if fetched:
+                state = run_autoconfigure(write=True)
+            kinds = missing_weights(state)
+        if args.json:
+            print(json.dumps({"missing": kinds,
+                              "sources": {k: WEIGHT_SOURCES[k]["repo"] for k in kinds}},
+                             ensure_ascii=True))
+        elif not kinds:
+            print("语音权重齐全")
+        else:
+            report_weights(state)
+        return 0 if not kinds else 5
+
+    path = ensure(allow_start=not args.status, wait_seconds=args.wait,
+                  provision_models=True if args.download_models else None)
     if args.json:
         print(json.dumps(run_autoconfigure(write=False), ensure_ascii=False))
     return 0 if path else 0

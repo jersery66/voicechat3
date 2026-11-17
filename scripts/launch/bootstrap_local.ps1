@@ -9,9 +9,10 @@
 
     本脚本按顺序做：
       1. 找 Python 3.10+，必要时建 .venv
-      2. 按需补装核心依赖（重型 torch/funasr 只提示，-FullRepair 才装）
+      2. 检查依赖，缺什么装什么（清单在 deployment\dependencies.py；
+         torch 按显卡自动选 CUDA 通道，没有 N 卡就装 CPU 版）
       3. 探测本机已有的 /v1 模型服务、ASR/TTS 权重、音色提示
-      4. 都没有时，拉起离线桩服务（仅界面/流程联调），再生成运行配置
+      4. 服务没起来就拉 WSL 模型栈；权重缺失时按需下载；再生成运行配置
       5. 用生成的 config\runtime.local.yaml 启动图形界面
 
     生成的 config\runtime.local.yaml 只是本机的，不入库；
@@ -26,8 +27,14 @@
 .PARAMETER NoStub
     即使没有模型服务，也不拉起离线桩（此时界面会因连不上模型而拒绝启动）。
 
+.PARAMETER TextOnly
+    只装界面必需依赖，跳过 torch/funasr/voxcpm（纯文字使用）。
+
+.PARAMETER ProvisionModels
+    缺少语音权重时自动下载（FunASR ≈2GB、VoxCPM2 ≈4.7GB，从 ModelScope）。
+
 .PARAMETER FullRepair
-    连 torch / funasr / transformers 一起装（体积大，语音功能需要）。
+    兼容保留：现在默认就会把语音依赖补齐，此开关等同于默认行为。
 
 .PARAMETER Config
     指定 runtime 配置；缺省用自动生成的 config\runtime.local.yaml。
@@ -40,6 +47,8 @@ param(
     [switch]$CheckOnly,
     [switch]$NoRepair,
     [switch]$NoStub,
+    [switch]$TextOnly,
+    [switch]$ProvisionModels,
     [switch]$FullRepair,
     [string]$Config = ''
 )
@@ -154,72 +163,48 @@ if (-not $script:PyExe) {
 # --------------------------------------------------------- 2. 依赖
 Write-Step '2/5 Python 依赖'
 
-$coreModules = @('PySide6', 'numpy', 'yaml', 'requests', 'sounddevice', 'soundfile',
-                 'pygame', 'openai', 'jieba', 'reportlab', 'moviepy', 'pydub', 'scipy', 'PIL')
-$heavyModules = @('torch', 'torchaudio', 'funasr', 'transformers')
-
-function Get-MissingModules([string[]]$Names) {
-    # Print one missing module per line. The probe is a single-quoted -c
-    # one-liner with no spaces, so PowerShell 5.1 cannot mangle the quoting when
-    # it hands the string to python.exe.
-    if (-not $script:PyExe) { return @() }
-    $probeCode = 'import importlib.util,sys;print(chr(10).join([n for n in sys.argv[1:] if importlib.util.find_spec(n) is None]))'
-    $raw = & $script:PyExe -c $probeCode @Names 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
-    return @($raw | ForEach-Object { ("$_").Trim() } | Where-Object { $_ })
-}
-
-function Install-Pip([string[]]$Names) {
-    & $script:PyExe -m pip install --disable-pip-version-check --no-input --quiet @Names
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host '  默认源失败，改用清华镜像重试 ...' -ForegroundColor Yellow
-        & $script:PyExe -m pip install --disable-pip-version-check --no-input --quiet `
-            -i https://pypi.tuna.tsinghua.edu.cn/simple @Names
-    }
-    return $LASTEXITCODE -eq 0
-}
-
 if (-not $script:PyExe) {
     Add-Check 'SKIP' '依赖检查' '没有可用 Python'
 } else {
-    $missingCore = @(Get-MissingModules $coreModules)
-    if ($missingCore.Count -eq 0) {
-        Add-Check 'OK' '核心依赖' '全部就绪'
-    } elseif ($NoRepair) {
-        Add-Check 'WARN' '核心依赖缺失' (($missingCore -join ', ') + '（NoRepair 未安装）')
+    # 依赖清单只有一份，在 deployment\dependencies.py 里：模块名、pip 名、分层、
+    # 体积、以及 torch 该装哪个 CUDA 通道，都由它决定。这里只负责调用和汇报。
+    $env:PYTHONPATH = $script:Root
+    $env:PYTHONIOENCODING = 'utf-8'
+    $env:PYTHONUTF8 = '1'
+
+    if ($NoRepair) {
+        Add-Check 'SKIP' '依赖检查' 'NoRepair 模式，只报告不安装'
+        & $script:PyExe -m deployment.dependencies --check | Out-Host
     } else {
-        $pipNames = @()
-        foreach ($m in $missingCore) {
-            switch ($m) {
-                'PIL'  { $pipNames += 'pillow' }
-                'yaml' { $pipNames += 'PyYAML' }
-                default { $pipNames += $m }
+        Write-Host '  检查并补齐界面依赖 ...' -ForegroundColor Yellow
+        & $script:PyExe -m deployment.dependencies --install --tier core | Out-Host
+        if ($LASTEXITCODE -eq 0) {
+            Add-Check 'OK' '界面依赖' '已就绪（缺什么补什么）'
+        } else {
+            Add-Check 'FAIL' '界面依赖' '安装未成功，请检查网络后重试'
+        }
+
+        if ($TextOnly) {
+            Add-Check 'SKIP' '语音依赖' 'TextOnly 模式，未安装'
+        } else {
+            Write-Host '  检查并补齐语音依赖（torch 按显卡选 CUDA 通道，体积较大）...' -ForegroundColor Yellow
+            & $script:PyExe -m deployment.dependencies --install --tier voice | Out-Host
+            if ($LASTEXITCODE -eq 0) {
+                Add-Check 'OK' '语音依赖' '已就绪'
+            } else {
+                Add-Check 'WARN' '语音依赖' '安装未完成，语音功能将不可用'
+            }
+
+            & $script:PyExe -m deployment.dependencies --install --tier tts | Out-Host
+            if ($LASTEXITCODE -eq 0) {
+                Add-Check 'OK' '语音合成依赖' '已就绪'
+            } else {
+                Add-Check 'WARN' '语音合成依赖' '安装未完成，将只有文字输出'
             }
         }
-        Write-Host ("  安装: {0}" -f ($pipNames -join ' ')) -ForegroundColor Yellow
-        if ($pipNames.Count -eq 0) {
-            Add-Check 'WARN' '核心依赖' '探测结果异常，请手动执行 pip install -r requirements-core.txt'
-        } elseif (Install-Pip $pipNames) {
-            Add-Check 'OK' '安装核心依赖' (($missingCore -join ', ') + ' 已补齐')
-        } else {
-            Add-Check 'FAIL' '安装核心依赖' 'pip 失败，请检查网络'
-        }
-    }
-
-    $missingHeavy = @(Get-MissingModules $heavyModules)
-    if ($missingHeavy.Count -eq 0) {
-        Add-Check 'OK' '语音 / GPU 依赖' '全部就绪'
-    } elseif ($FullRepair -and -not $NoRepair) {
-        Write-Host '  安装重型依赖（体积大，含 torch）...' -ForegroundColor Yellow
-        if (Install-Pip $missingHeavy) {
-            Add-Check 'OK' '语音 / GPU 依赖' '已补齐'
-        } else {
-            Add-Check 'WARN' '语音 / GPU 依赖' '安装未成功，语音输入输出不可用'
-        }
-    } else {
-        Add-Check 'WARN' '语音 / GPU 依赖缺失' (($missingHeavy -join ', ') + '（文字对话可用；语音请加 -FullRepair）')
     }
 }
+
 
 # ------------------------------------------------- 3. 运行目录
 Write-Step '3/5 运行目录'
@@ -250,6 +235,7 @@ if (-not $script:PyExe) {
     $env:PYTHONIOENCODING = 'utf-8'
     $env:PYTHONUTF8 = '1'
     if ($NoStub) { $env:VOICECHAT_ALLOW_STUB = '0' } else { $env:VOICECHAT_ALLOW_STUB = '1' }
+    if ($ProvisionModels) { $env:VOICECHAT_ALLOW_DOWNLOAD = '1' } else { $env:VOICECHAT_ALLOW_DOWNLOAD = '0' }
 
     & $script:PyExe -m deployment.autostart
     if ($LASTEXITCODE -ne 0) {
