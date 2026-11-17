@@ -22,18 +22,47 @@ Start-HeartDoctor-Local.bat -NoRepair    :: 只报告，不动磁盘
 Start-HeartDoctor-Local.bat -NoStub      :: 没模型服务也不启动离线桩
 ```
 
-模型服务单独管理：
+桌面上的「小微老师（本机）」入口指向同一个启动器，双击即可，不需要开终端。
+
+**直接 `python main.py` 也行**：`main.py` 在最前面调用
+`deployment/autostart.py::ensure()`，先探测机器、必要时拉起模型栈、生成运行配置，
+然后才 import `config`。所以不需要先跑任何脚本，也不用设环境变量。
+
+模型服务单独管理（内部同样走 autostart，不再有第二份实现）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\launch\start_model_stack.ps1 -Status
-powershell -ExecutionPolicy Bypass -File scripts\launch\start_model_stack.ps1          # 起 WSL llama.cpp 栈
-powershell -ExecutionPolicy Bypass -File scripts\launch\start_model_stack.ps1 -Stop    # 停
+python -m deployment.autostart --status          :: 看 :8000 / :8001
+python -m deployment.autostart --start-services  :: 起 WSL llama.cpp 栈
+python -m deployment.autostart --stop-services   :: 停
+python -m deployment.autostart --write-config    :: 只探测并写配置
 ```
 
-## 二、自动适配做了什么
+对应的 PowerShell 包装脚本仍是 `scripts\launch\start_model_stack.ps1`。
+
+## 二、零配置启动：一次启动做四件事
+
+`deployment/autostart.py` 在 `config.py` 被 import 之前运行（`config` 在 import 时
+读环境变量，晚一步就失效），按顺序：
+
+1. **尊重显式配置**：若 `VOICECHAT_RUNTIME_CONFIG` 已指向一个存在的文件，直接用它，
+   绝不偷偷改写——固定契约的实验不能被"自动修复"破坏；
+2. **探测并写配置**：否则调用 `scripts/launch/autoconfigure.py --json` 一次完成
+   「探测 → 写 `config/runtime.local.yaml` → 回报结果」；
+3. **服务不在就拉起来**：探测不到真实模型服务时启动 WSL 模型栈，等待就绪后重新探测；
+4. **导出环境变量**：把 `VOICECHAT_RUNTIME_CONFIG` 指向生成的文件，后续 `config.py`
+   自然读到。
+
+全程 best-effort：任何一步失败只打印警告，绝不阻断界面启动。开关：
+
+| 环境变量 | 作用 |
+|---|---|
+| `VOICECHAT_NO_AUTOSTART=1` | 完全关闭自动探测（诊断、跑测试用） |
+| `VOICECHAT_ALLOW_STUB=1` | 没有真实模型时允许用离线联调桩 |
+| `VOICECHAT_RUNTIME_CONFIG=...` | 显式钉住某份配置，autostart 不再介入 |
+
+## 三、探测规则
 
 `scripts/launch/autoconfigure.py`（纯标准库，装依赖之前就能跑）依次判断：
-
 1. **模型服务**：探测 `127.0.0.1:{8000,8001,8080,11434,8010}` 的 `GET /v1/models`，
    以及 `wsl hostname -I` 得到的 NAT 地址（本机 WSL 的 localhost 转发只对通配
    绑定生效，所以两种地址都试）。真实权重服务永远优先于离线桩。
@@ -51,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts\launch\start_model_stack.ps1 -S
 `VOICECHAT_DATA_DIR` → `<程序目录>/runtime/data` → 仅当 `D:\program\voice_chat_data`
 已存在时才沿用（保留老机器的历史会话）。
 
-## 三、WSL 模型栈为什么要"保活"
+## 四、WSL 模型栈为什么要"保活"
 
 模型服务是 WSL2 里的 Linux 二进制 `llama-server`。WSL2 在没有会话时会回收整个
 发行版，`setsid`/`disown` 都留不住进程，服务会随会话一起消失。
@@ -64,7 +93,7 @@ powershell -ExecutionPolicy Bypass -File scripts\launch\start_model_stack.ps1 -S
 WSL 的 NAT 网段在物理局域网内不可路由，所以这不等于把模型暴露到网络上；
 生产机请加 `-BindLoopback` 保持原来的 `127.0.0.1`。
 
-## 四、本机实测结果
+## 五、本机实测结果
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -76,7 +105,7 @@ WSL 的 NAT 网段在物理局域网内不可路由，所以这不等于把模�
 | 启动耗时 | 59s | 含 STT/TTS 加载与预热（CPU 版需 5 分钟以上） |
 | CUDA | 已启用 | torch 2.8.0+cu128，RTX 5090 32GB |
 
-## 五、GPU 版 torch 的来源
+## 六、GPU 版 torch 的来源
 
 本机不需要重新下载 2.9 GB 的 CUDA 轮子：`D:\speech_alignment_B\.venv` 里已有一套
 Python 3.11.9 的 **torch 2.8.0+cu128 + torchaudio 2.8.0+cu128**，直接复制到本 venv 即可
@@ -90,7 +119,7 @@ Python 3.11.9 的 **torch 2.8.0+cu128 + torchaudio 2.8.0+cu128**，直接复制�
 
 装完后 `python scripts/launch/autoconfigure.py` 重新生成配置即可，代码无需改动。
 
-## 六、降级矩阵
+## 七、降级矩阵
 
 | 缺什么 | 自动行为 | 影响 |
 |---|---|---|
@@ -100,7 +129,7 @@ Python 3.11.9 的 **torch 2.8.0+cu128 + torchaudio 2.8.0+cu128**，直接复制�
 | VoxCPM2 权重或 voxcpm 包 | TTS 关闭 | 只有文字输出 |
 | 放松视频 mp4 | WARN | 放松中心只报缺文件 |
 
-## 七、离线桩服务
+## 八、离线桩服务
 
 `scripts/launch/offline_stub_server.py` 是协议兼容的假模型服务：
 实现 `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/completions`（含 SSE 流式），
@@ -109,7 +138,7 @@ Python 3.11.9 的 **torch 2.8.0+cu128 + torchaudio 2.8.0+cu128**，直接复制�
 > 它不产生任何真实的语言理解或评估结果，**不得用于真实访谈**，
 > 也不能把它的输出当作模型输出写进研究数据。
 
-## 八、已知限制
+## 九、已知限制
 
 - `scripts\` 下的一批 `test_asr*.py / test_tts.py / test_loop.py` 仍写着实验机的
   `D:\voicechat3`、`D:\models\voicechat3` 绝对路径，属单机诊断脚本，未纳入自动适配。

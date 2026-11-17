@@ -467,7 +467,12 @@ def main(argv: list[str] | None = None) -> int:
 
     state = discover()
 
+    # ``--json`` is the one-shot mode used by the application at startup: write
+    # the config *and* report what was found, in a single probe.
     if args.json:
+        if not args.check:
+            LOCAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            LOCAL_CONFIG.write_text(render_yaml(state), encoding="utf-8")
         print(json.dumps(state, ensure_ascii=False))
         return 0
 

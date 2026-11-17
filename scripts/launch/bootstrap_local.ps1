@@ -51,8 +51,6 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $script:Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $script:VenvPython = Join-Path $script:Root '.venv\Scripts\python.exe'
 $script:LocalConfig = Join-Path $script:Root 'config\runtime.local.yaml'
-$script:StubPort = 8010
-$script:StubPidFile = Join-Path $script:Root 'logs\offline_stub.pid'
 $script:Checks = New-Object System.Collections.ArrayList
 $script:PyExe = $null
 
@@ -239,95 +237,49 @@ if ($created.Count -gt 0) { Add-Check 'OK' '补齐目录' ($created -join ', ') 
 else { Add-Check 'OK' '运行目录' '齐全' }
 
 # ------------------------------------------------- 4. 模型服务与配置
-Write-Step '4/5 模型服务探测'
-
-$autoScript = Join-Path $script:Root 'scripts\launch\autoconfigure.py'
-$stubScript = Join-Path $script:Root 'scripts\launch\offline_stub_server.py'
-
-function Get-AutoState {
-    $raw = & $script:PyExe $autoScript --json 2>$null
-    if (-not $raw) { return $null }
-    try { return (($raw | Select-Object -Last 1) | ConvertFrom-Json) } catch { return $null }
-}
+Write-Step '4/5 模型服务探测与配置生成'
 
 if (-not $script:PyExe) {
     Add-Check 'SKIP' '模型服务' '没有可用 Python'
+} elseif ($NoRepair) {
+    Add-Check 'SKIP' '模型服务' 'NoRepair 模式，未探测也未启动'
 } else {
-    $state = Get-AutoState
-    $realEndpoints = @()
-    if ($state) { $realEndpoints = @($state.endpoints | Where-Object { -not $_.is_stub }) }
+    # 一次调用完成：探测 → 必要时启动 WSL 模型栈 → 写 config\runtime.local.yaml。
+    # 逻辑只有一份，在 deployment\autostart.py 里，应用启动时用的也是它。
+    $env:PYTHONPATH = $script:Root
+    $env:PYTHONIOENCODING = 'utf-8'
+    $env:PYTHONUTF8 = '1'
+    if ($NoStub) { $env:VOICECHAT_ALLOW_STUB = '0' } else { $env:VOICECHAT_ALLOW_STUB = '1' }
 
-    if ($realEndpoints.Count -gt 0) {
-        foreach ($ep in $realEndpoints) {
-            Add-Check 'OK' ("服务 " + $ep.base_url) ($ep.label + " / " + ($ep.models -join ','))
-        }
-    } else {
-        Add-Check 'WARN' '模型服务' '未发现任何 /v1 模型服务'
-
-        # Second chance before degrading to the stub: this machine may carry the
-        # production stack inside WSL2 (llama-server + gguf weights).
-        $stackReady = $false
-        if (-not $NoStub -and -not $NoRepair) {
-            $stackScript = Join-Path $script:Root 'scripts\launch\start_model_stack.ps1'
-            if (Test-Path $stackScript) {
-                Write-Host '  尝试启动 WSL 模型栈（llama.cpp）...' -ForegroundColor Yellow
-                & powershell -NoProfile -ExecutionPolicy Bypass -File $stackScript -WaitSeconds 180
-                if ($LASTEXITCODE -eq 0) { $stackReady = $true }
-            }
-        }
-        if ($stackReady) {
-            $state = Get-AutoState
-            if ($state) { $realEndpoints = @($state.endpoints | Where-Object { -not $_.is_stub }) }
-            foreach ($ep in $realEndpoints) {
-                Add-Check 'OK' ("服务 " + $ep.base_url) ($ep.label + " / " + ($ep.models -join ','))
-            }
-        }
-
-        if ($realEndpoints.Count -gt 0) {
-            # handled above
-        } elseif ($NoStub) {
-            Add-Check 'WARN' '离线桩' 'NoStub 已指定，未启动（界面将无法连接模型）'
-        } elseif ($NoRepair) {
-            Add-Check 'SKIP' '离线桩' 'NoRepair 模式，未启动'
-        } else {
-            $stubUp = $false
-            if ($state -and -not $state.stub_port_free) {
-                $check = & $script:PyExe $stubScript --check 2>$null
-                if ($LASTEXITCODE -eq 0) { $stubUp = $true }
-            }
-            if (-not $stubUp) {
-                Write-Host '  启动离线桩服务（仅界面/流程联调）...' -ForegroundColor Yellow
-                $stubOut = Join-Path $logDir 'offline_stub.out.log'
-                $proc = Start-Process -FilePath $script:PyExe `
-                    -ArgumentList @($stubScript, '--port', "$script:StubPort") `
-                    -WindowStyle Hidden -PassThru `
-                    -RedirectStandardOutput $stubOut `
-                    -RedirectStandardError (Join-Path $logDir 'offline_stub.err.log')
-                if ($proc) { Set-Content -Path $script:StubPidFile -Value $proc.Id -Encoding ascii }
-                $deadline = (Get-Date).AddSeconds(15)
-                while ((Get-Date) -lt $deadline) {
-                    & $script:PyExe $stubScript --check 2>$null | Out-Null
-                    if ($LASTEXITCODE -eq 0) { $stubUp = $true; break }
-                    Start-Sleep -Milliseconds 300
-                }
-            }
-            if ($stubUp) {
-                Add-Check 'WARN' '离线桩服务' "http://127.0.0.1:$script:StubPort/v1（非真实推理，仅联调）"
-            } else {
-                Add-Check 'FAIL' '离线桩服务' '启动失败，见 logs\offline_stub.err.log'
-            }
-        }
+    & $script:PyExe -m deployment.autostart
+    if ($LASTEXITCODE -ne 0) {
+        Add-Check 'WARN' '自动配置' ("autostart 返回码 " + $LASTEXITCODE)
     }
 
-    if (-not $NoRepair) {
-        & $script:PyExe $autoScript --quiet 2>$null | Out-Null
-        if (Test-Path $script:LocalConfig) {
-            Add-Check 'OK' '运行配置' 'config\runtime.local.yaml 已生成'
-        } else {
-            Add-Check 'FAIL' '运行配置' '生成失败'
+    # 状态用 JSON 读，不解析面向人的中文文本：Windows 控制台代码页和子进程
+    # 编码不一致时，抓回来的中文行会变成空串（这里踩过）。
+    $statusJson = & $script:PyExe -m deployment.autostart --status --json 2>$null
+    $svc = $null
+    try { $svc = (($statusJson | Select-Object -Last 1) | ConvertFrom-Json) } catch { }
+    if ($svc) {
+        foreach ($entry in @(@{ Key = 'dialogue'; Label = '对话' }, @{ Key = 'agent'; Label = 'Agent' })) {
+            $one = $svc.($entry.Key)
+            if (-not $one) { continue }
+            if ($one.ready) {
+                Add-Check 'OK' ("服务 :" + $one.port + " " + $entry.Label) (($one.models) -join ',')
+            } else {
+                Add-Check 'WARN' ("服务 :" + $one.port + " " + $entry.Label) '未就绪'
+            }
         }
+        if ($svc.wsl_distro) { Add-Check 'OK' 'WSL 发行版' $svc.wsl_distro }
     } else {
-        Add-Check 'SKIP' '运行配置' 'NoRepair 模式，未生成'
+        Add-Check 'WARN' '服务状态' '无法解析状态输出'
+    }
+
+    if (Test-Path $script:LocalConfig) {
+        Add-Check 'OK' '运行配置' 'config\runtime.local.yaml 已生成'
+    } else {
+        Add-Check 'FAIL' '运行配置' '生成失败'
     }
 }
 

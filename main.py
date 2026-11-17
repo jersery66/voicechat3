@@ -8,6 +8,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 os.environ["TORCHAUDIO_USE_BACKEND_DISPATCHER"] = "0"
 
+
+def _autostart() -> None:
+    """Detect this machine and pick a runtime config before ``config`` is imported.
+
+    ``config.py`` reads the environment at import time, so this has to run first.
+    An explicit ``VOICECHAT_RUNTIME_CONFIG`` is always honoured unchanged; when
+    nothing is set, the machine is probed, the model stack is started if needed,
+    and ``config/runtime.local.yaml`` is written. Any failure is a warning, never
+    a hard stop: a broken probe must not be able to prevent the GUI from opening.
+    """
+    try:
+        from deployment.autostart import ensure
+
+        ensure()
+    except Exception as exc:  # noqa: BLE001 - startup must survive anything here
+        print(f"WARNING: autostart skipped ({type(exc).__name__}: {exc})")
+
+
+_autostart()
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
