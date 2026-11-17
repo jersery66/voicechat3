@@ -71,20 +71,23 @@ WSL 的 NAT 网段在物理局域网内不可路由，所以这不等于把模�
 | 界面 | 正常 | PySide6 offscreen 冒烟通过，截图见 `test_output\smoke_*.png` |
 | 对话 27B | 正常 | WSL llama.cpp，`:8000`，Qwen3.8-27B-Q4_K_S |
 | Agent 4B | 正常 | `:8001`，Qwen3-4B-Instruct-2507 |
-| 语音识别 | 正常 | FunASR，7.4s 音频 → 1.7s，转写与 `data/S1.txt` 一致 |
-| 语音合成 | 可用但慢 | VoxCPM2 在 **CPU** 上 3.8s 语音 ≈ 22s，warmup 约 2 分钟 |
-| CUDA | 未启用 | 见下一节 |
+| 语音识别 | 正常 | GPU，7.4s 音频 → **0.46s**（首次调用含预热 1.4s） |
+| 语音合成 | 正常 | GPU，一句 ≈ **1.0–1.3s**（首次调用 9.4s 预热），显存 5.1 GB |
+| 启动耗时 | 59s | 含 STT/TTS 加载与预热（CPU 版需 5 分钟以上） |
+| CUDA | 已启用 | torch 2.8.0+cu128，RTX 5090 32GB |
 
-## 五、把语音换成 GPU（可选，建议）
+## 五、GPU 版 torch 的来源
 
-当前 venv 里是 **CPU 版 torch**（PyPI 镜像只有 CPU 轮子）。要跑满 5090：
+本机不需要重新下载 2.9 GB 的 CUDA 轮子：`D:\speech_alignment_B\.venv` 里已有一套
+Python 3.11.9 的 **torch 2.8.0+cu128 + torchaudio 2.8.0+cu128**，直接复制到本 venv 即可
+（`torch`、`torchaudio`、`torio` 及三者 dist-info）。这套是从本机迁移来的，
+所以文档里不写死路径；换机器时用下面的标准安装命令更稳妥：
 
 ```powershell
-.venv\Scripts\python.exe -m pip install --force-reinstall torch torchaudio ^
+.venv\Scripts\python.exe -m pip install torch torchaudio ^
     --index-url https://download.pytorch.org/whl/cu128
 ```
 
-体积约 2.9 GB。本机经代理实测只有 ~0.8 MB/s（约 1 小时），直连会快很多。
 装完后 `python scripts/launch/autoconfigure.py` 重新生成配置即可，代码无需改动。
 
 ## 六、降级矩阵
