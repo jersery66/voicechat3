@@ -161,20 +161,14 @@ $coreModules = @('PySide6', 'numpy', 'yaml', 'requests', 'sounddevice', 'soundfi
 $heavyModules = @('torch', 'torchaudio', 'funasr', 'transformers')
 
 function Get-MissingModules([string[]]$Names) {
+    # Print one missing module per line. The probe is a single-quoted -c
+    # one-liner with no spaces, so PowerShell 5.1 cannot mangle the quoting when
+    # it hands the string to python.exe.
     if (-not $script:PyExe) { return @() }
-    $probeCode = "import importlib.util,json,sys`n" +
-        "names=" + ($Names | ConvertTo-Json -Compress) + "`n" +
-        "missing=[n for n in names if importlib.util.find_spec(n) is None]`n" +
-        "print(json.dumps(missing))"
-    $probeFile = Join-Path $env:TEMP ("vc_dep_{0}.py" -f ([guid]::NewGuid().ToString('N')))
-    try {
-        [System.IO.File]::WriteAllText($probeFile, $probeCode, (New-Object System.Text.UTF8Encoding($false)))
-        $raw = & $script:PyExe $probeFile 2>$null
-        if ($raw) { return @(($raw | Select-Object -Last 1) | ConvertFrom-Json) }
-    } catch { } finally {
-        if (Test-Path $probeFile) { Remove-Item $probeFile -Force -ErrorAction SilentlyContinue }
-    }
-    return @()
+    $probeCode = 'import importlib.util,sys;print(chr(10).join([n for n in sys.argv[1:] if importlib.util.find_spec(n) is None]))'
+    $raw = & $script:PyExe -c $probeCode @Names 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+    return @($raw | ForEach-Object { ("$_").Trim() } | Where-Object { $_ })
 }
 
 function Install-Pip([string[]]$Names) {
@@ -205,7 +199,9 @@ if (-not $script:PyExe) {
             }
         }
         Write-Host ("  安装: {0}" -f ($pipNames -join ' ')) -ForegroundColor Yellow
-        if (Install-Pip $pipNames) {
+        if ($pipNames.Count -eq 0) {
+            Add-Check 'WARN' '核心依赖' '探测结果异常，请手动执行 pip install -r requirements-core.txt'
+        } elseif (Install-Pip $pipNames) {
             Add-Check 'OK' '安装核心依赖' (($missingCore -join ', ') + ' 已补齐')
         } else {
             Add-Check 'FAIL' '安装核心依赖' 'pip 失败，请检查网络'
