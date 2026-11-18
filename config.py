@@ -378,6 +378,25 @@ VOICE_PROMPT_TEXT = _VOICE_PROMPT_TEXT_DETECTED
 #      session history after the code is copied to another machine.
 # A relative override is resolved against APP_ROOT, never the shell's cwd:
 # launching from a shortcut must not silently relocate the recordings.
+def _is_writable(path: str) -> bool:
+    """Can this process actually create files under ``path``?
+
+    A deployment under Program Files (or any admin-owned folder) looks fine
+    until the first session save or audio buffer fails with PermissionError.
+    Probing once at import turns that into a startup fallback instead of a
+    failure in the middle of an interview.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".vc_write_probe")
+        with open(probe, "w", encoding="ascii") as handle:
+            handle.write("ok")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
 def _resolve_data_root() -> str:
     override = os.environ.get("VOICECHAT_DATA_DIR", "").strip()
     if override:
@@ -388,6 +407,14 @@ def _resolve_data_root() -> str:
     legacy = r"D:\program\voice_chat_data"
     if not os.path.isdir(portable) and os.path.isdir(legacy):
         return legacy
+    if _is_writable(portable):
+        return portable
+    # Read-only install directory: keep sessions somewhere always writable.
+    fallback_root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    fallback = os.path.join(fallback_root, "VoiceChat", "data")
+    if _is_writable(fallback):
+        print(f"[VoiceChat] 程序目录不可写，数据改存 {fallback}")
+        return fallback
     return portable
 
 

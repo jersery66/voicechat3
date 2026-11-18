@@ -190,6 +190,7 @@ class ControlPanel(FrostedPanel):
 
         self.record_button = RecordButton()
         self.record_button.setEnabled(False)
+        self.record_button.setToolTip("请先填写并确认基本信息")
         self.record_button.started.connect(self.record_started.emit)
         self.record_button.stopped.connect(self.record_stopped.emit)
         rec_layout.addWidget(self.record_button)
