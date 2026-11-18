@@ -25,6 +25,7 @@ class ControlPanel(FrostedPanel):
     play_game = Signal()
     play_media = Signal()
     open_relaxation_center = Signal()
+    open_settings = Signal()
 
     def __init__(self, parent=None):
         super().__init__(alpha=0.90, radius=20, parent=None)
@@ -343,6 +344,21 @@ class ControlPanel(FrostedPanel):
         self.status_label.setStyleSheet("color: #1565C0; font-size: 11px; padding: 4px;")
         layout.addWidget(self.status_label)
 
+        # 设置入口：麦克风/扬声器/界面缩放都允许现场手动改并保存
+        self.btn_settings = QPushButton("⚙ 设置（麦克风 / 显示）")
+        self.btn_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_settings.setToolTip("选择录音设备、试录确认、调整界面缩放；保存到 config\\user_settings.json")
+        self.btn_settings.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(30, 42, 50, 0.06); color: #4A5A52;
+                border: 1px solid rgba(30, 42, 50, 0.14); border-radius: 8px;
+                padding: 6px; font-size: 11px;
+            }
+            QPushButton:hover { background-color: rgba(30, 42, 50, 0.12); color: #1E2A32; }
+        """)
+        self.btn_settings.clicked.connect(self.open_settings.emit)
+        layout.addWidget(self.btn_settings)
+
         scroll.setWidget(container)
 
         # Main layout for the panel
@@ -381,6 +397,7 @@ class ControlPanel(FrostedPanel):
             QPushButton:hover { background-color: #F57C00; }
         """)
         self.record_button.setEnabled(True)
+        self.record_button.setToolTip("点击开始录音")
         self.confirm_user.emit(info)
 
     def _on_modify(self):
@@ -395,6 +412,7 @@ class ControlPanel(FrostedPanel):
             }
         """)
         self.record_button.setEnabled(False)
+        self.record_button.setToolTip("请先填写并确认基本信息")
         self.user_status_label.setText("请填写基本信息后开始对话")
         self.user_status_label.setStyleSheet("color: #A94432; font-size: 11px; padding: 2px 0;")
         self.modify_user.emit()
@@ -417,6 +435,13 @@ class ControlPanel(FrostedPanel):
 
     def set_status(self, text):
         self.status_label.setText(text)
+
+    def set_record_hint(self, text):
+        """Show an actionable hint under the record button (errors included)."""
+        self.rec_hint_label.setText(text)
+        color = "#A94432" if any(k in text for k in ("失败", "没有", "未加载", "请选择")) else "#7f8c8d"
+        self.rec_hint_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self.rec_hint_label.setWordWrap(True)
 
     def set_recording_state(self, recording):
         if recording:
@@ -481,6 +506,13 @@ class ControlPanel(FrostedPanel):
 
     def set_buttons_enabled(self, enabled):
         self.record_button.setEnabled(enabled and self._info_confirmed)
+        # 禁用状态下的按钮点了毫无反应，容易被当成"坏按钮"；把原因写在提示里。
+        if not enabled:
+            self.record_button.setToolTip("模型或服务仍在加载，稍后可用")
+        elif not self._info_confirmed:
+            self.record_button.setToolTip("请先填写并确认基本信息")
+        else:
+            self.record_button.setToolTip("点击开始录音")
         self.btn_breathing.setEnabled(enabled)
         self.btn_muscle.setEnabled(enabled)
         self.btn_meditation.setEnabled(enabled)

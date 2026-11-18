@@ -121,6 +121,52 @@ def check_dependencies() -> None:
           (r.stdout or "").strip().splitlines()[-2] if r.stdout else "")
 
 
+def check_settings() -> None:
+    """The settings file must round-trip, including a hand-typed scale."""
+    import tempfile
+
+    from services.user_settings import UserSettings
+
+    probe = Path(tempfile.gettempdir()) / "vc_selfcheck_settings.json"
+    probe.unlink(missing_ok=True)
+    saved = UserSettings(probe).load()
+    saved.set("ui.scale", 0.9)
+    ok = saved.save()
+    back = UserSettings(probe).load()
+    probe.unlink(missing_ok=True)
+    check("设置可保存可读回", ok and abs(back.scale - 0.9) < 1e-6, f"scale={back.scale}")
+
+
+def check_layout() -> None:
+    """No screen tier may push the chat column off the window."""
+    probe = """
+import sys
+sys.path.insert(0, '.')
+import main, config
+config.ENABLE_TTS = False
+config.ENABLE_STT = False
+from PySide6.QtWidgets import QApplication
+from ui.main_window import MainWindow
+app = QApplication([])
+w = MainWindow(); w.show()
+bad = []
+for width, height in ((1024, 700), (1280, 800), (1366, 730), (1920, 1080)):
+    w.resize(width, height); app.processEvents()
+    m = w._main_layout.contentsMargins()
+    need = w.control_panel.width() + w.chat_panel.width() + m.left() + m.right()
+    need += w._main_layout.spacing()
+    if need > width:
+        bad.append(str(width) + ':' + str(need))
+print('LAYOUT', 'OK' if not bad else '; '.join(bad))
+"""
+    r = child([str(PY), "-c", probe], timeout=300,
+              env_extra={"QT_QPA_PLATFORM": "offscreen"})
+    out = (r.stdout or "") + (r.stderr or "")
+    line = next((l for l in out.splitlines() if l.startswith("LAYOUT")), "")
+    ok = "LAYOUT OK" in line
+    check("小屏布局不溢出", ok, line[7:].strip() or out.strip()[-120:])
+
+
 def check_launcher() -> None:
     script = ROOT / "scripts" / "launch" / "bootstrap_local.ps1"
     if not script.is_file():
@@ -265,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     ensure(wait_seconds=240)      # 服务可能在检查期间被 WSL 回收
     check_health()
     check_dependencies()
+    check_settings()
+    check_layout()
     ensure(wait_seconds=240)
     check_launcher()
     if not args.no_recovery:

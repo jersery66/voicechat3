@@ -195,7 +195,17 @@ class MainWindow(QMainWindow):
         except Exception:
             title_mode = "模式未知"
         self.setWindowTitle(f"{APP_NAME}［决策模式：{title_mode}］")
-        self.setMinimumSize(1024, 768)
+        # 1024x768 在 1366x768 + 125% 缩放的机器上比可用区域还大，窗口会顶出屏幕，
+        # 表现为"页面偏离/看不全"。最小值按屏幕可用区域收窄，内容由滚动区承载。
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            available = screen.availableGeometry()
+            self.setMinimumSize(
+                min(1024, max(800, int(available.width() * 0.92))),
+                min(768, max(560, int(available.height() * 0.88))),
+            )
+        except Exception:
+            self.setMinimumSize(900, 600)
 
         # Load background image
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -226,6 +236,8 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(24, 24, 24, 24)
         main_layout.setSpacing(18)
+        self._main_layout = main_layout
+        self._applied_breakpoint = None
 
         # Left control panel (fixed rail)
         self.control_panel = ControlPanel()
@@ -243,11 +255,36 @@ class MainWindow(QMainWindow):
         self.loading_screen.setGeometry(central.rect())
         self.loading_screen.show()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.loading_screen and self.loading_screen.isVisible():
-            self.loading_screen.setGeometry(self.centralWidget().rect())
-        self.update()
+    # NOTE: MainWindow used to define resizeEvent twice; the later definition
+    # silently replaced this one, so nothing here ever ran. The live handler is
+    # further down and now calls _adapt_layout_to_width().
+
+    def _adapt_layout_to_width(self):
+        """Shrink the fixed rail and gutters on narrow screens.
+
+        The control rail is a fixed 348 px and the chat card wants 400+; with
+        24 px gutters that needs ~830 px, which a 1366×768 laptop at 125 %
+        scaling does not have. Rather than let the right column fall off-screen,
+        tiers trade margin for content.
+        """
+        width = self.width()
+        if width < 1100:
+            tier, margin, spacing, rail, chat_min = "narrow", 10, 10, 300, 340
+        elif width < 1300:
+            tier, margin, spacing, rail, chat_min = "medium", 16, 14, 320, 380
+        else:
+            tier, margin, spacing, rail, chat_min = "wide", 24, 18, 348, 400
+        if getattr(self, "_applied_breakpoint", None) == tier:
+            return
+        self._applied_breakpoint = tier
+        layout = getattr(self, "_main_layout", None)
+        if layout is None:
+            return
+        layout.setContentsMargins(margin, margin, margin, margin)
+        layout.setSpacing(spacing)
+        if hasattr(self, "control_panel"):
+            self.control_panel.setFixedWidth(rail)
+        self._chat_min = chat_min
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_T and event.modifiers() & Qt.ControlModifier:
@@ -366,12 +403,16 @@ class MainWindow(QMainWindow):
         if overlay is not None and central is not None:
             overlay.setGeometry(central.rect())
 
+        self._adapt_layout_to_width()
+
         panel = getattr(self, "chat_panel", None)
         if panel is None:
             return
         # Wider screens get a wider conversation column (up to 760px) instead
-        # of staying pinned at the 560px phone-like width.
-        target = max(400, min(760, int(self.width() * 0.38)))
+        # of staying pinned at the 560px phone-like width; the floor comes from
+        # the current width tier so a narrow window never clips it.
+        floor = int(getattr(self, "_chat_min", 400))
+        target = max(floor, min(760, int(self.width() * 0.38)))
         if panel.width() != target:
             panel.setFixedWidth(target)
 
@@ -406,6 +447,7 @@ class MainWindow(QMainWindow):
         self.control_panel.play_game.connect(self._play_game)
         self.control_panel.play_media.connect(self._open_media_panel)
         self.control_panel.open_relaxation_center.connect(self._open_relaxation_center)
+        self.control_panel.open_settings.connect(self._open_settings)
 
         # Chat panel signals
         self.chat_panel.clear_clicked.connect(self._clear_history)
@@ -485,7 +527,10 @@ class MainWindow(QMainWindow):
 
     def _on_record_started(self):
         if not self.models_loaded:
+            # Silent reset used to make this look like a broken button.
             self.control_panel.reset_recording()
+            self.control_panel.set_status("模型仍在加载，请稍候再试")
+            self.control_panel.set_record_hint("正在加载模型，完成后录音按钮才可用。")
             return
 
         if self._pipeline_busy:
@@ -533,7 +578,9 @@ class MainWindow(QMainWindow):
                 daemon=True,
             ).start()
         else:
-            self.processing_queue.put(("recording_start_failed", attempt_id))
+            self.processing_queue.put(
+                ("recording_start_failed", (attempt_id, "语音识别未加载（缺少 FunASR 权重或依赖）"))
+            )
 
     def _on_record_stopped(self):
         if not self.is_recording:
@@ -561,18 +608,65 @@ class MainWindow(QMainWindow):
 
         try:
             self.stt_service.start_recording()
-        except RecordingStartError:
+        except RecordingStartError as exc:
             logger.exception("Microphone recording startup failed")
-            self.processing_queue.put(("recording_start_failed", attempt_id))
-        except Exception:
+            self.processing_queue.put(("recording_start_failed", (attempt_id, str(exc))))
+        except Exception as exc:
             # Keep the UI fail-safe even if a provider violates the explicit
             # startup-error contract; the technical traceback remains in the
             # log and the participant still receives a safe status.
             logger.exception("Unexpected microphone recording startup failure")
-            self.processing_queue.put(("recording_start_failed", attempt_id))
+            self.processing_queue.put(
+                ("recording_start_failed", (attempt_id, f"{type(exc).__name__}: {exc}"))
+            )
 
-    def _handle_recording_start_failed(self, attempt_id):
-        """Reset the current recording UI for a matching startup failure."""
+    def _open_settings(self):
+        """Open the on-machine settings (microphone, speakers, interface scale)."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from services.user_settings import UserSettings
+        from ui.settings_dialog import open_settings_dialog
+
+        settings = UserSettings().load()
+        for warning in settings.warnings:
+            logger.warning("用户配置：%s", warning)
+        if not open_settings_dialog(self, settings):
+            return
+
+        # 设备选择可以被正在运行的服务立即用上；缩放要重建窗口才生效。
+        try:
+            input_value = settings.input_device
+            output_value = settings.output_device
+            import os
+
+            if input_value and input_value != "auto":
+                os.environ["VOICECHAT_INPUT_DEVICE"] = str(input_value)
+            else:
+                os.environ.pop("VOICECHAT_INPUT_DEVICE", None)
+            if output_value and output_value != "default":
+                os.environ["VOICECHAT_OUTPUT_DEVICE"] = str(output_value)
+            else:
+                os.environ.pop("VOICECHAT_OUTPUT_DEVICE", None)
+            if self.tts_service and hasattr(self.tts_service, "refresh_output_device"):
+                self.tts_service.refresh_output_device()
+        except Exception:  # noqa: BLE001 - 设置已保存，运行期应用失败不应打断会话
+            logger.exception("应用新的音频设置失败")
+
+        self.control_panel.set_status("设置已保存")
+        self.control_panel.set_record_hint("设置已保存；下次双击启动时界面缩放生效。")
+        QMessageBox.information(
+            self, "已保存",
+            "设置已写入 config\\user_settings.json。\n"
+            "麦克风/扬声器立刻生效；界面缩放需要重启程序。",
+        )
+
+    def _handle_recording_start_failed(self, attempt_id, detail=""):
+        """Reset the recording UI and say *why* it failed.
+
+        The previous version only reset the button, so a machine with no usable
+        microphone looked like a dead button: the user clicked, the icon pulsed
+        for a moment, and nothing else happened.
+        """
         if attempt_id != self._active_recording_attempt_id:
             logger.info(
                 "Ignoring stale microphone startup failure attempt=%s current=%s",
@@ -588,7 +682,12 @@ class MainWindow(QMainWindow):
         # empty conversation turn after a failed microphone start.
         self.control_panel.set_recording_state(False)
         self.control_panel.reset_recording()
-        self.control_panel.set_status("麦克风启动失败，请检查麦克风连接后重试")
+        message = detail.strip() or "无法打开麦克风"
+        self.control_panel.set_status(f"麦克风启动失败：{message}")
+        self.control_panel.set_record_hint(
+            "麦克风没有启动成功。点右下角“设置”选择正确的录音设备，"
+            "并用“测试录音 2 秒”确认有声音。"
+        )
 
     def _cancel_active_pipeline(self, reason=""):
         """Cancel the active delivery generation and stale all callbacks."""
@@ -894,7 +993,8 @@ class MainWindow(QMainWindow):
                     self._handle_engine_event(content)
 
                 elif msg_type == "recording_start_failed":
-                    self._handle_recording_start_failed(content)
+                    attempt, detail = content if isinstance(content, tuple) else (content, "")
+                    self._handle_recording_start_failed(attempt, detail)
 
                 elif msg_type == "status":
                     self.control_panel.set_status(content)

@@ -109,3 +109,7 @@ knowledge_base/*.json
 
 # Derived relaxation audio rendered from the source videos
 media_library/relaxation/temp/
+
+# 本机用户设置（麦克风/显示等），每台机器一份，不入库
+config/user_settings.json
+config/user_settings.json.tmp
