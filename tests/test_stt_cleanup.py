@@ -5,6 +5,39 @@ import numpy as np
 from services import stt_service as stt_module
 from services.stt_service import STTService
 
+# Entry point written beside the fake weights. Kept as a triple-quoted literal
+# so the file content is exactly what a checkpoint would ship.
+_STUB_ENTRY = '''class _Parameter:
+    def __init__(self, dtype):
+        self.dtype = dtype
+
+
+class MixedModel:
+    def __init__(self):
+        self.float_called = False
+        self.eval_called = False
+
+    def parameters(self):
+        return [_Parameter("float32"), _Parameter("bfloat16")]
+
+    def float(self):
+        self.float_called = True
+        return self
+
+    def eval(self):
+        self.eval_called = True
+        return self
+
+
+_MIXED = MixedModel()
+
+
+class FunASRNano:
+    @staticmethod
+    def from_pretrained(**_kwargs):
+        return _MIXED, {}
+'''
+
 
 def test_cleanup_stops_audio_releases_model_and_clears_cuda_cache(monkeypatch):
     class Stream:
@@ -39,44 +72,26 @@ def test_cleanup_stops_audio_releases_model_and_clears_cuda_cache(monkeypatch):
 
 
 def test_load_model_normalizes_a_mixed_dtype_checkpoint(monkeypatch, tmp_path):
+    """Mixed bf16/fp32 checkpoint must be normalized before inference.
+
+    The stub entry point is written as a real ``model.py`` beside the weights
+    instead of being injected into ``sys.modules``: the service loads it by file
+    path exactly as it does for a real checkpoint, so a cached module named
+    ``model`` can neither satisfy nor hijack that import.
+    """
     import sys
-    import types
 
-    class Parameter:
-        def __init__(self, dtype):
-            self.dtype = dtype
-
-    class MixedModel:
-        def __init__(self):
-            self.float_called = False
-            self.eval_called = False
-
-        def parameters(self):
-            return [Parameter("float32"), Parameter("bfloat16")]
-
-        def float(self):
-            self.float_called = True
-            return self
-
-        def eval(self):
-            self.eval_called = True
-            return self
-
-    mixed = MixedModel()
-
-    class FunASRNano:
-        @staticmethod
-        def from_pretrained(**_kwargs):
-            return mixed, {}
-
-    monkeypatch.setitem(sys.modules, "model", types.SimpleNamespace(FunASRNano=FunASRNano))
+    (tmp_path / "model.py").write_text(_STUB_ENTRY, encoding="utf-8")
+    # A decoy under the bare name must be irrelevant now.
+    monkeypatch.setitem(sys.modules, "model", type(sys)("model"))
     monkeypatch.setattr("services.stt_service.torch.nn.Module.to", lambda module, *_a, **_k: module)
 
     service = STTService(model_path=str(tmp_path), device="cpu")
     service.load_model()
 
-    assert mixed.float_called is True
-    assert mixed.eval_called is True
+    assert service.model is not None
+    assert service.model.float_called is True
+    assert service.model.eval_called is True
     assert service.model_kwargs["language"] == "zh"
 
 

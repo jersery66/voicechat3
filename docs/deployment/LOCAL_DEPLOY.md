@@ -264,6 +264,37 @@ python -m pytest -q --basetemp=%TEMP%\pt_run
 - 直接编辑 JSON 再点"应用文本"，语法错误会提示且不会覆盖原文件；也可以点
   "打开所在文件夹"用记事本改。不知道的键不会被删除，方便留扩展位。
 
+### 断网机器怎么打补丁
+
+现场设备可能在封闭区域，没有网络、也没法 `git pull`。仓库里带了一个按**代码原文**
+匹配的补丁器，不依赖行号，版本略有漂移也能改：
+
+```powershell
+python scripts\launch\offline_patch.py --dry-run   :: 只检查，不写盘
+python scripts\launch\offline_patch.py             :: 备份后应用
+python scripts\launch\offline_patch.py --revert    :: 用备份还原
+```
+
+或者直接双击 `scripts\launch\apply_offline_fix.bat`（先检查，确认后才改）。
+
+安全设计：
+- **整文件原子**：某份文件里只要有一处匹配不上，这份文件整体不动，绝不改一半；
+- **改后编译**：写盘后立刻 `py_compile`，语法不过自动用备份还原；
+- **备份可查**：`main_window.py.bak_20261119_153049` 就在同目录，出事直接改名回去；
+- **可重复执行**：已经改过的会显示"跳过"。
+
+补丁内容（7 处，3 个文件）：
+1. `services/stt_service.py` — FunASR 入口改为**按文件路径**加载。原写法
+   `from model import FunASRNano` 是裸模块名：只要进程里已经有人 import 过叫
+   `model` 的模块（那时往 `sys.path` 插队也没用），入口就被静默跳过，ASR 退化到
+   `funasr.AutoModel`，而它在 Fun-ASR-Nano 权重上会直接失败（
+   `'NoneType' object has no attribute 'from_pretrained'`）。**这是"点录音没反应"
+   的真正原因**，不只是缺提示。
+2. `ui/main_window.py` — 录音失败的 4 处：模型未加载时给出提示、把异常原因带出来、
+   失败提示显示具体原因。
+3. `ui/main_window.py` — 最小窗口 1024×768 → 900×600（小屏"页面偏离"）。
+4. `ui/control_panel.py` — 录音按钮禁用时的悬停提示。
+
 ### "点了录音没反应"的排查顺序
 
 界面里所有失败路径现在都会给出文字原因，不再静默复位：

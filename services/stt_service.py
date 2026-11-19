@@ -159,6 +159,42 @@ class RecordingStartError(RuntimeError):
     """Raised when a microphone recording cannot be started."""
 
 
+def load_checkpoint_entry(model_path: str):
+    """Import ``FunASRNano`` from the checkpoint's ``model.py`` by file path.
+
+    The historical ``from model import FunASRNano`` is a bare module name: once
+    anything else in the process has imported a module called ``model``, the
+    checkpoint's entry point is silently skipped (inserting ``model_path`` into
+    ``sys.path`` cannot displace an entry that already exists in
+    ``sys.modules``). The service then falls back to ``funasr.AutoModel``, which
+    on the bundled Fun-ASR-Nano checkpoint fails with
+    ``'NoneType' object has no attribute 'from_pretrained'`` — and the user sees
+    a record button that does nothing.
+
+    Loading through ``spec_from_file_location`` with a private module name makes
+    the lookup independent of whatever else is in ``sys.modules``.
+
+    Returns the class, or ``None`` when the checkpoint has no usable entry.
+    """
+    entry = os.path.join(str(model_path), "model.py")
+    if not os.path.isfile(entry):
+        return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_vc_local_funasr_entry", entry)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - any failure means "no entry point"
+        logger.warning("Loading %s failed (%s); falling back to funasr.AutoModel", entry, exc)
+        return None
+    return getattr(module, "FunASRNano", None)
+
+
+
+
 # Capture is requested in 64 ms blocks because that is what 1024 frames at
 # 16 kHz already was; keeping the period constant means the VAD chunker and the
 # silence timers see the same cadence whichever native rate the device runs at.
@@ -442,12 +478,10 @@ class STTService:
             if self.model_path not in sys.path:
                 sys.path.insert(0, self.model_path)
 
-            FunASRNano = None
-            try:
-                from model import FunASRNano  # checkpoint-local entry point
-            except ImportError:
+            FunASRNano = load_checkpoint_entry(self.model_path)
+            if FunASRNano is None:
                 logger.warning(
-                    "No model.py beside %s (the FunASRNano entry point is absent); "
+                    "No usable model.py beside %s (the FunASRNano entry point is absent); "
                     "loading the same weights through funasr.AutoModel instead.",
                     self.model_path,
                 )
