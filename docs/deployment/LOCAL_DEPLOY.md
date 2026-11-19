@@ -277,6 +277,17 @@ python scripts\launch\offline_patch.py --revert    :: 用备份还原
 
 或者直接双击 `scripts\launch\apply_offline_fix.bat`（先检查，确认后才改）。
 
+打补丁前后都可以先跑一遍**离线诊断**（不需要麦克风，也不需要网络）：
+
+```powershell
+python scripts\launch\offline_selftest.py          :: 环境 + 设备 + 权重 + 用 data/s1.flac 验 ASR
+python scripts\launch\offline_selftest.py --no-asr :: 只看环境与设备
+```
+
+它会打印权重解析结果、所有输入设备（并标出 loopback）、入口文件是否可加载，最后拿
+仓库自带的 `data/s1.flac` 转写一遍并和 `data/S1.txt` 比对——机器没有麦克风也能证明
+识别链路通不通。
+
 安全设计：
 - **整文件原子**：某份文件里只要有一处匹配不上，这份文件整体不动，绝不改一半；
 - **改后编译**：写盘后立刻 `py_compile`，语法不过自动用备份还原；
