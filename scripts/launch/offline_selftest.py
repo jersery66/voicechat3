@@ -25,21 +25,28 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 RESULTS: list[tuple[str, bool, str]] = []
+_LINES: list[str] = []
+
+
+def emit(line: str = "", **_kwargs) -> None:
+    """Print and remember, so --report can write the same text to a file."""
+    print(line, flush=True)
+    _LINES.append(line)
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
     RESULTS.append((name, bool(ok), detail))
-    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""), flush=True)
+    emit(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""), flush=True)
     return bool(ok)
 
 
 def note(text: str) -> None:
-    print(f"       {text}", flush=True)
+    emit(f"       {text}", flush=True)
 
 
 def show_environment() -> None:
-    print(f"程序目录 : {ROOT}")
-    print(f"Python   : {sys.version.split()[0]} ({sys.executable})")
+    emit(f"程序目录 : {ROOT}")
+    emit(f"Python   : {sys.version.split()[0]} ({sys.executable})")
     try:
         import config
 
@@ -50,9 +57,17 @@ def show_environment() -> None:
                 exists = "存在" if os.path.exists(str(value)) else "不存在"
                 note(f"{attr:18} = {value}  [{exists}]")
         note(f"SAMPLE_RATE        = {getattr(config, 'SAMPLE_RATE', '?')}")
+        data_root = str(getattr(config, "DATA_ROOT", "") or "")
+        if data_root:
+            note(f"DATA_ROOT          = {data_root}")
+            if any(ord(ch) > 127 for ch in data_root):
+                # libsndfile / miniaudio open files by narrow path; a Chinese
+                # folder breaks them. Live dialogue records from memory, so this
+                # only affects features that re-open a saved file.
+                note("注意：数据目录含中文，回放历史录音可能失败（不影响实时对话）")
     except Exception as exc:  # noqa: BLE001
         check("读取 config", False, f"{type(exc).__name__}: {exc}")
-    print()
+    emit()
 
 
 def check_audio_devices() -> None:
@@ -89,7 +104,7 @@ def check_audio_devices() -> None:
         note("系统默认输入 = 未设置")
     forced = os.environ.get("VOICECHAT_INPUT_DEVICE", "").strip()
     note(f"VOICECHAT_INPUT_DEVICE = {forced or '（未设置，自动选择）'}")
-    print()
+    emit()
 
 
 def check_entry_point() -> None:
@@ -149,8 +164,23 @@ def check_asr() -> None:
         import config
         from services.stt_service import get_stt_service
 
-        decoded = miniaudio.decode_file(
-            str(audio_file), output_format=miniaudio.SampleFormat.FLOAT32)
+        # 按字节解码。机器装在 D:\戒毒所 这类中文目录下时，
+        # soundfile/lib sndfile 会报 "psf_fseek() failed"，
+        # miniaudio.decode_file 会报 DecodeError -7 —— 它们都按窄字符路径打开文件。
+        raw = audio_file.read_bytes()
+        try:
+            decoded = miniaudio.decode(raw, output_format=miniaudio.SampleFormat.FLOAT32)
+        except Exception:
+            import io
+
+            import soundfile as sf
+
+            data, rate = sf.read(io.BytesIO(raw), dtype="float32")
+            decoded = type("Decoded", (), {
+                "samples": data.reshape(-1),
+                "sample_rate": rate,
+                "nchannels": 1 if data.ndim == 1 else data.shape[1],
+            })()
         audio = np.array(decoded.samples, dtype=np.float32).reshape(-1, decoded.nchannels).mean(axis=1)
         target = int(getattr(config, "SAMPLE_RATE", 16000))
         if decoded.sample_rate != target:
@@ -210,9 +240,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="离线自检（不需要麦克风）")
     parser.add_argument("--no-asr", action="store_true", help="跳过语音识别")
     parser.add_argument("--tts", action="store_true", help="额外验证语音合成")
+    parser.add_argument("--report", help="把同样的内容写到这个文件（供现场回传）")
     args = parser.parse_args(argv)
 
-    print("=" * 60)
+    emit("=" * 60)
     show_environment()
     check_audio_devices()
     check_entry_point()
@@ -222,10 +253,20 @@ def main(argv: list[str] | None = None) -> int:
         check_tts()
 
     failed = [r for r in RESULTS if not r[1]]
-    print("=" * 60)
-    print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} 项通过")
+    emit("=" * 60)
+    emit(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} 项通过")
     for name, _ok, detail in failed:
-        print(f"  失败：{name} — {detail}")
+        emit(f"  失败：{name} — {detail}")
+
+    if args.report:
+        try:
+            path = Path(args.report)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # utf-8-sig: Notepad on a Chinese Windows shows it without mojibake.
+            path.write_text("\n".join(_LINES) + "\n", encoding="utf-8-sig")
+            emit(f"报告已保存：{path}")
+        except OSError as exc:
+            emit(f"报告写入失败：{exc}")
     return 0 if not failed else 1
 
 
