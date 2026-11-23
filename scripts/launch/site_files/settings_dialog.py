@@ -162,8 +162,8 @@ class SettingsDialog(QDialog):
         scale_row.addWidget(self.scale_spin)
         note = QLabel("1366×768 或系统缩放 150% 的机器用 0.85；1080p 以上保持 1.00")
         note.setStyleSheet("color: #4A5A52; font-size: 11px;")
-        scale_row.addWidget(note)
-        scale_row.addStretch(1)
+        note.setWordWrap(True)
+        scale_row.addWidget(note, 1)
         layout.addLayout(scale_row)
 
         buttons = QHBoxLayout()
