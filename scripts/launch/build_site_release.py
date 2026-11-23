@@ -74,6 +74,9 @@ SITE_README = """# 小微老师 · 戒毒所专用版
    在 125%~150% 缩放下不会再顶出屏幕。
 3. **语音识别入口更稳**：改为按文件路径加载 `model.py`，不再受同名模块影响。
 4. **新增离线自检**：不需要麦克风、不需要联网，就能验证识别链路是否正常。
+5. **新增“设置”界面**：左栏录音按钮下方多了一个 **⚙ 设置（麦克风 / 显示）** 按钮。
+   可以下拉选麦克风、点“测试录音 2 秒”看电平、拖动界面缩放；保存后写进
+   `site-config.cmd`，麦克风下一次录音即生效，缩放下次启动生效。
 
 ## 二、第一次装：三步
 
@@ -108,11 +111,16 @@ SITE_README = """# 小微老师 · 戒毒所专用版
 
 ## 四、麦克风选错了怎么办
 
-自检输出里找到真正的"麦克风"那一行的方括号数字（例如 `[28] 麦克风 (Realtek...)`），
-然后：
+**方法一（推荐，界面里改）**：点左栏录音按钮下方的 **⚙ 设置** →
+下拉里选真正的麦克风（带 loopback/CABLE 字样的不要选）→ 点 **测试录音 2 秒**，
+对着话筒说话，看到"收到声音：峰值 0.xxx"就说明选对了 → **保存**。
+麦克风下一次录音即生效，不用重启。
+
+**方法二（改文件）**：自检输出里找到真正的"麦克风"那一行的方括号数字
+（例如 `[28] 麦克风 (Realtek...)`），然后：
 
 1. 用记事本打开 `site-config.cmd`；
-2. 把 `REM  set VOICECHAT_INPUT_DEVICE=28` 这一行前面的 `REM ` 删掉，数字改成你的；
+2. 把 `set VOICECHAT_INPUT_DEVICE=` 后面的数字改成你的；
 3. 保存；以后用 `Site-Start.bat` 启动即可。
 
 想一次性固定（原入口也生效），在命令提示符里执行一次：
@@ -246,6 +254,94 @@ def materialise(source: Path, out: Path) -> Path:
     return target
 
 
+# 站点的"设置"入口。三处接线 + 一个新文件；锚点取自 2026-11-06 快照，
+# 缺失即中止构建，避免打出一个"按钮点了没反应"的包。
+SITE_UI_EDITS: list[tuple[str, str, str, str]] = [
+    (
+        "ui/control_panel.py",
+        "    open_relaxation_center = Signal()\n",
+        "    open_relaxation_center = Signal()\n    open_settings = Signal()\n",
+        "设置：新增 open_settings 信号",
+    ),
+    (
+        "ui/control_panel.py",
+        '        self.rec_hint_label = QLabel("点击麦克风开始录音")\n'
+        "        self.rec_hint_label.setAlignment(Qt.AlignCenter)\n"
+        '        self.rec_hint_label.setStyleSheet("color: #7f8c8d; font-size: 11px;")\n'
+        "        layout.addWidget(self.rec_hint_label)\n",
+        '        self.rec_hint_label = QLabel("点击麦克风开始录音")\n'
+        "        self.rec_hint_label.setAlignment(Qt.AlignCenter)\n"
+        '        self.rec_hint_label.setStyleSheet("color: #7f8c8d; font-size: 11px;")\n'
+        "        layout.addWidget(self.rec_hint_label)\n"
+        "\n"
+        '        self.btn_settings = QPushButton("⚙ 设置（麦克风 / 显示）")\n'
+        "        self.btn_settings.setCursor(Qt.PointingHandCursor)\n"
+        '        self.btn_settings.setToolTip("选择录音设备、试录确认、调整界面缩放")\n'
+        '        self.btn_settings.setStyleSheet("""\n'
+        "            QPushButton {\n"
+        "                background-color: rgba(30, 42, 50, 0.06); color: #4A5A52;\n"
+        "                border: 1px solid rgba(30, 42, 50, 0.14); border-radius: 8px;\n"
+        "                padding: 6px; font-size: 11px;\n"
+        "            }\n"
+        "            QPushButton:hover { background-color: rgba(30, 42, 50, 0.12); color: #1E2A32; }\n"
+        '        """)\n'
+        "        self.btn_settings.clicked.connect(self.open_settings.emit)\n"
+        "        layout.addWidget(self.btn_settings)\n",
+        "设置：录音提示下方新增按钮",
+    ),
+    (
+        "ui/main_window.py",
+        "        self.control_panel.record_stopped.connect(self._on_record_stopped)\n",
+        "        self.control_panel.record_stopped.connect(self._on_record_stopped)\n"
+        "        self.control_panel.open_settings.connect(self._open_settings)\n",
+        "设置：连接面板信号",
+    ),
+    (
+        "ui/main_window.py",
+        "    def _on_record_stopped(self):\n",
+        "    def _open_settings(self):\n"
+        '        """打开本机设置：麦克风、试录、界面缩放。"""\n'
+        "        try:\n"
+        "            from ui.settings_dialog import open_settings_dialog\n"
+        "        except Exception:\n"
+        "            from PySide6.QtWidgets import QMessageBox\n"
+        '            QMessageBox.warning(self, "设置不可用",\n'
+        '                                "设置组件缺失，请重新安装本版本。")\n'
+        "            return\n"
+        "        try:\n"
+        "            open_settings_dialog(self)\n"
+        "        except Exception as exc:\n"
+        "            from PySide6.QtWidgets import QMessageBox\n"
+        '            QMessageBox.warning(self, "设置打开失败", f"{type(exc).__name__}: {exc}")\n'
+        "\n"
+        "    def _on_record_stopped(self):\n",
+        "设置：主窗口打开对话框",
+    ),
+]
+
+
+def apply_ui_edits(root: Path, patch_module) -> None:
+    """Add the settings entry on top of the anchored fixes."""
+    by_file: dict[Path, list[tuple[str, str, str]]] = {}
+    for rel, anchor, replacement, label in SITE_UI_EDITS:
+        by_file.setdefault(root / rel, []).append((anchor, replacement, label))
+
+    for path, items in by_file.items():
+        text = path.read_text(encoding="utf-8")
+        for anchor, replacement, label in items:
+            if replacement in text:
+                print(f"  [跳过] {label}（已存在）")
+                continue
+            if anchor not in text:
+                raise SystemExit(f"锚点缺失，停止构建：{label} -> {path.name}")
+            text = text.replace(anchor, replacement, 1)
+            print(f"  [已改] {label}  ->  {path.name}")
+        path.write_text(text, encoding="utf-8")
+        ok, message = patch_module._verify_syntax(path)
+        if not ok:
+            raise SystemExit(f"{path.name} 改后语法错误：{message}")
+
+
 def strip_dev_files(root: Path) -> list[str]:
     removed: list[str] = []
     for rel in DEV_PATHS:
@@ -287,7 +383,9 @@ def write_site_files(root: Path, patch_module) -> None:
         "  - 录音：按文件路径加载 FunASR 入口，避免 model 模块名被占用\n"
         "  - 显示：最小窗口 900x600，小屏不再溢出\n"
         "  - 新增：离线诊断（Site-SelfTest.bat，不需要麦克风）\n"
-        "  - 新增：site-config.cmd（麦克风编号 / 界面缩放 / 权重路径）\n",
+        "  - 新增：site-config.cmd（麦克风编号 / 界面缩放 / 权重路径）\n"
+        "  - 新增：⚙ 设置按钮 + ui/settings_dialog.py（麦克风下拉 / 试录 2 秒 / 界面缩放）\n"
+        "  - 新增：Install.bat（自动探测权重 + 建桌面快捷方式）\n",
         encoding="utf-8",
     )
     import datetime
@@ -319,6 +417,10 @@ def main(argv: list[str] | None = None) -> int:
     if code != 0:
         print("补丁未能全部应用，请检查上面的输出。")
         return code
+
+    apply_ui_edits(root, patch_module)
+    shutil.copy2(HERE / "site_files" / "settings_dialog.py", root / "ui" / "settings_dialog.py")
+    print("已加入 ui/settings_dialog.py（麦克风选择 / 试录 / 界面缩放）")
 
     write_site_files(root, patch_module)
     print("已写入 site-config.cmd / Site-Start.bat / Site-SelfTest.bat / SITE-BUILD.txt")
