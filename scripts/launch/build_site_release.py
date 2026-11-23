@@ -75,11 +75,25 @@ SITE_README = """# 小微老师 · 戒毒所专用版
 3. **语音识别入口更稳**：改为按文件路径加载 `model.py`，不再受同名模块影响。
 4. **新增离线自检**：不需要麦克风、不需要联网，就能验证识别链路是否正常。
 
-## 二、怎么启动
+## 二、第一次装：三步
 
-- **日常**：双击 `start_voicechat3_offline.bat`（和以前完全一样）。
-- **需要改麦克风或界面缩放**：双击 `Site-Start.bat`，它会先读 `site-config.cmd` 再启动。
-- 原来的快捷方式、原来的启动参数（-PreflightOnly / -SkipLlmStart）都照旧可用。
+1. **备份**现有 `D:\\戒毒所\\voicechat3`（整个文件夹复制一份即可；至少保住 `config\\`
+   和会话数据）。
+2. 把本压缩包里的 `voicechat3` 文件夹**覆盖**过去（`.venv` 和 `models` 不删，继续用）。
+3. **双击 `Install.bat`**。它会自动：
+   - 查找 Fun-ASR / VoxCPM2 / 音色提示的实际位置，写进 `site-env.json`；
+   - 检查 Python 依赖是否齐全；
+   - 在桌面创建 **“小微老师”** 快捷方式（带图标）；
+   - 把结果存成 `安装结果.txt`，可回传。
+
+装完以后，**每次只要双击桌面上的“小微老师”**。
+
+## 二之二、日常怎么启动
+
+- **桌面快捷方式**（推荐）：等价于 `Site-Start.bat`，会自动加载上面探测到的路径。
+- `Site-Start.bat`：手动启动入口，先读环境文件再调原来的启动脚本。
+- `start_voicechat3_offline.bat`：完全原始的方式，参数（`-PreflightOnly` /
+  `-SkipLlmStart`）照旧可用，但**不会**加载自动探测的路径。
 
 ## 三、出问题先做这一步
 
@@ -135,16 +149,48 @@ SITE_README = """# 小微老师 · 戒毒所专用版
 
 
 SITE_START_BAT = """@echo off
-REM Start the counsellor application with the site settings applied.
-REM Kept ASCII-only on purpose: cmd.exe misparses UTF-8 Chinese here.
+REM Start the app with the paths found at install time.
+REM ASCII-only and no chcp: the original launcher is GBK and is called from here.
+setlocal
+cd /d "%~dp0"
+
+set "PY=%CD%\\.venv\\Scripts\\python.exe"
+if not exist "%PY%" set "PY=python"
+
+"%PY%" scripts\\launch\\site_launch.py %*
+exit /b %ERRORLEVEL%
+"""
+
+SITE_INSTALL_BAT = """@echo off
+REM One-time setup after unzipping: find the models and create a desktop shortcut.
+REM ASCII-only and CRLF: cmd.exe misparses UTF-8 Chinese in .bat files.
 chcp 65001 >nul 2>nul
 setlocal
 cd /d "%~dp0"
 
-if exist "%~dp0site-config.cmd" call "%~dp0site-config.cmd"
+set "PY=%CD%\\.venv\\Scripts\\python.exe"
+if not exist "%PY%" set "PY=python"
 
-call "%~dp0start_voicechat3_offline.bat" %*
-exit /b %ERRORLEVEL%
+echo ============================================================
+echo  XiaoWei - site setup
+echo  Folder : %CD%
+echo  Python : %PY%
+echo ============================================================
+echo.
+
+"%PY%" scripts\\launch\\site_autoconfig.py --install
+if errorlevel 1 (
+  echo.
+  echo Setup reported a problem. Read the output above.
+  echo It is also saved to the install report file in this folder.
+  pause
+  exit /b 1
+)
+
+echo.
+echo You can start the program from the desktop shortcut from now on.
+pause
+exit /b 0
 """
 
 SITE_SELFTEST_BAT = """@echo off
@@ -225,7 +271,9 @@ def write_site_files(root: Path, patch_module) -> None:
                                          encoding="ascii", newline="")
     (root / "Site-SelfTest.bat").write_text(SITE_SELFTEST_BAT.replace("\n", "\r\n"),
                                             encoding="ascii", newline="")
-    for name in ("offline_selftest.py", "offline_patch.py"):
+    (root / "Install.bat").write_text(SITE_INSTALL_BAT.replace("\n", "\r\n"),
+                                      encoding="ascii", newline="")
+    for name in ("offline_selftest.py", "offline_patch.py", "site_autoconfig.py", "site_launch.py"):
         shutil.copy2(HERE / name, root / "scripts" / "launch" / name)
     (root / "README-戒治所.md").write_text(SITE_README, encoding="utf-8")
     checks = "\n".join(f"  - {label}" for _f, _a, _r, label in patch_module.EDITS)
