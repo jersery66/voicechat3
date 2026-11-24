@@ -86,8 +86,17 @@ SITE_README = """# 小微老师 · 戒毒所专用版
 3. **双击 `Install.bat`**。它会自动：
    - 查找 Fun-ASR / VoxCPM2 / 音色提示的实际位置，写进 `site-env.json`；
    - 检查 Python 依赖是否齐全；
+   - **列出录音设备与系统默认录音/播放设备**（默认录音若是 loopback/CABLE 会直接报警）；
+   - **实测一次语音识别**（加载模型 + 转写 `data\\s1.flac`，约 1 分钟，不需要人说话）；
    - 在桌面创建 **“小微老师”** 快捷方式（带图标）；
-   - 把结果存成 `安装结果.txt`，可回传。
+   - 把结果存成 `安装结果.txt`，识别那一份存成 `logs\\asr-doctor.txt`，都可回传。
+
+   装完窗口最后会给一行结论：
+   - `[PASS] Speech recognition works` → 可以直接用
+   - `[FAIL]` → 把上边两个 txt 发回，里面写明是缺模型、缺入口还是依赖不匹配
+
+   如果【3/5】显示“默认录音设备 = CABLE/loopback”，那不是坏了，是 Windows 的默认录音选成了虚拟声卡：
+   到 **⚙ 设置** 里改选真正的麦克风即可（改完下一次录音就生效）。
 
 装完以后，**每次只要双击桌面上的“小微老师”**。
 
@@ -196,7 +205,21 @@ if errorlevel 1 (
 )
 
 echo.
-echo You can start the program from the desktop shortcut from now on.
+echo ------------------------------------------------------------
+echo  Checking speech recognition (loads the model, about 1 minute).
+echo  Close the program first if it is running.
+echo ------------------------------------------------------------
+"%PY%" scripts\\launch\\asr_doctor.py --fix --report "logs\\asr-doctor.txt"
+set "ASR=%ERRORLEVEL%"
+
+echo.
+if "%ASR%"=="0" (
+  echo [PASS] Speech recognition works. You can start from the desktop icon.
+) else (
+  echo [FAIL] Speech recognition did not pass.
+  echo        Send logs\\asr-doctor.txt and the install report to support.
+)
+echo.
 pause
 exit /b 0
 """
