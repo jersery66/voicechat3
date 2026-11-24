@@ -201,6 +201,29 @@ pause
 exit /b 0
 """
 
+SITE_FIX_ASR_BAT = """@echo off
+REM Speech recognition will not load? This checks that one model and can repair it.
+REM ASCII-only and CRLF: cmd.exe misparses UTF-8 Chinese in .bat files.
+chcp 65001 >nul 2>nul
+setlocal
+cd /d "%~dp0"
+
+set "PY=%CD%\\.venv\\Scripts\\python.exe"
+if not exist "%PY%" set "PY=python"
+
+echo ============================================================
+echo  ASR check and repair
+echo  Folder : %CD%
+echo  Python : %PY%
+echo ============================================================
+echo.
+
+"%PY%" scripts\\launch\\asr_doctor.py --fix --report "logs\\asr-doctor.txt"
+echo.
+echo A copy is saved to logs\\asr-doctor.txt - send that file to support.
+pause
+"""
+
 SITE_SELFTEST_BAT = """@echo off
 REM Offline diagnosis: no microphone and no network needed.
 REM Writes a report under logs\\ as well as printing it.
@@ -369,7 +392,10 @@ def write_site_files(root: Path, patch_module) -> None:
                                             encoding="ascii", newline="")
     (root / "Install.bat").write_text(SITE_INSTALL_BAT.replace("\n", "\r\n"),
                                       encoding="ascii", newline="")
-    for name in ("offline_selftest.py", "offline_patch.py", "site_autoconfig.py", "site_launch.py"):
+    (root / "Site-Fix-ASR.bat").write_text(SITE_FIX_ASR_BAT.replace("\n", "\r\n"),
+                                           encoding="ascii", newline="")
+    for name in ("offline_selftest.py", "offline_patch.py", "site_autoconfig.py",
+                 "site_launch.py", "asr_doctor.py"):
         shutil.copy2(HERE / name, root / "scripts" / "launch" / name)
     (root / "README-戒治所.md").write_text(SITE_README, encoding="utf-8")
     checks = "\n".join(f"  - {label}" for _f, _a, _r, label in patch_module.EDITS)

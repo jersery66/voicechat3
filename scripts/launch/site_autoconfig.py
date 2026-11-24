@@ -74,6 +74,41 @@ def find_dir(base: Path, name: str, marker: str) -> Path | None:
     return None
 
 
+def find_voice_prompt(base: Path) -> Path | None:
+    """The prompt audio is a file, and sites name its folder inconsistently.
+
+    Deployed layouts seen so far: models/voice_prompt/s1.mp3 and
+    models/voicechat3/tts/voice_prompt/s1.mp3, plus a bare s1.mp3 under tts/.
+    Rather than guess the folder, look for the file itself, three levels deep.
+    """
+    lowered = Path(str(base))
+    if not lowered.is_dir():
+        return None
+    for depth, directory in _walk_limited(lowered, max_depth=3):
+        for name in ("s1.mp3", "s1.wav", "s1.flac"):
+            candidate = Path(directory) / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _walk_limited(root: Path, max_depth: int):
+    stack = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        yield depth, current
+        if depth >= max_depth:
+            continue
+        try:
+            children = [p for p in current.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            stack.append((child, depth + 1))
+
+
 def detect_models() -> dict[str, str]:
     found: dict[str, str] = {}
     for key, (name, marker) in MODEL_HINTS.items():
@@ -85,6 +120,11 @@ def detect_models() -> dict[str, str]:
                 # The voice prompt is a file the TTS reads, not a folder.
                 found[key] = str(hit / marker) if key == "voice_prompt" else str(hit)
                 break
+            if key == "voice_prompt":
+                prompt = find_voice_prompt(base)
+                if prompt is not None:
+                    found[key] = str(prompt)
+                    break
     return found
 
 
