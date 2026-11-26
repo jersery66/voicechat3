@@ -126,6 +126,18 @@ def detect_models() -> dict[str, str]:
                 if prompt is not None:
                     found[key] = str(prompt)
                     break
+
+    # Last resort: the sample that ships with the program. It is the same S1
+    # recording the TTS was tuned on, so the voice stays recognisable, and it
+    # keeps the report from crying "not found" on a machine that never had a
+    # separate voice_prompt folder.
+    if "voice_prompt" not in found:
+        for name in ("s1.mp3", "s1.wav", "s1.flac"):
+            candidate = ROOT / "data" / name
+            if candidate.is_file():
+                found["voice_prompt"] = str(candidate)
+                found["voice_prompt_fallback"] = "1"
+                break
     return found
 
 
@@ -412,7 +424,11 @@ def main(argv: list[str] | None = None) -> int:
               "voice_prompt": "音色提示", "tacit": "决策 Tacit（可选）"}
     for key, label in labels.items():
         path = models.get(key)
-        emit(f"  [{'OK ' if path else ('-- ' if key == 'tacit' else '!! ')}] {label}: {path or '未找到'}")
+        suffix = ""
+        if key == "voice_prompt" and path and models.get("voice_prompt_fallback"):
+            suffix = "（程序自带，音色与 S1 一致）"
+        emit(f"  [{'OK ' if path else ('-- ' if key == 'tacit' else '!! ')}] {label}: "
+             f"{path or '未找到'}{suffix}")
     missing_required = [k for k in ("funasr", "voxcpm") if k not in models]
     emit("")
 

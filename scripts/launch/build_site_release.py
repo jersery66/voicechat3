@@ -227,6 +227,29 @@ pause
 exit /b 0
 """
 
+SITE_MIC_TEST_BAT = """@echo off
+REM Record four seconds from the microphone and transcribe it right away.
+REM ASCII-only and CRLF: cmd.exe misparses UTF-8 Chinese in .bat files.
+chcp 65001 >nul 2>nul
+setlocal
+cd /d "%~dp0"
+
+set "PY=%CD%\\.venv\\Scripts\\python.exe"
+if not exist "%PY%" set "PY=python"
+
+echo ============================================================
+echo  Microphone test: speak for 4 seconds, then we transcribe it
+echo  Folder : %CD%
+echo  Python : %PY%
+echo ============================================================
+echo.
+
+"%PY%" scripts\\launch\\mic_test.py --report "logs\\mic-test.txt"
+echo.
+echo A copy is saved to logs\\mic-test.txt - send that file to support.
+pause
+"""
+
 SITE_FIX_ASR_BAT = """@echo off
 REM Speech recognition will not load? This checks that one model and can repair it.
 REM ASCII-only and CRLF: cmd.exe misparses UTF-8 Chinese in .bat files.
@@ -366,6 +389,41 @@ SITE_UI_EDITS: list[tuple[str, str, str, str]] = [
         "    def _on_record_stopped(self):\n",
         "设置：主窗口打开对话框",
     ),
+    (
+        "services/stt_service.py",
+        "        # Concatenate all audio chunks exactly once after the collector drain.\n"
+        "        if chunks:\n"
+        "            audio = np.concatenate(chunks, axis=0)\n"
+        "            return audio.flatten()\n"
+        "        return np.array([])\n",
+        "        # Concatenate all audio chunks exactly once after the collector drain.\n"
+        "        if chunks:\n"
+        "            audio = np.concatenate(chunks, axis=0)\n"
+        "            flattened = audio.flatten()\n"
+        "            # Recorded level decides the next question: is the microphone\n"
+        "            # silent, or is the text missing for another reason? Without\n"
+        "            # this line every report of \u201crecorded but no text\u201d needs\n"
+        "            # somebody to guess from a screenshot.\n"
+        "            peak = float(np.max(np.abs(flattened))) if flattened.size else 0.0\n"
+        "            rate = float(getattr(self, \"sample_rate\", 0) or 0) or 16000.0\n"
+        "            logger.info(\n"
+        "                \"[ASRDebug] Captured %.2fs, peak=%.4f%s\",\n"
+        "                flattened.size / rate, peak,\n"
+        "                \"  <- 几乎没有声音：检查话筒/设备选择\" if peak < 0.001 else \"\",\n"
+        "            )\n"
+        "            return flattened\n"
+        "        return np.array([])\n",
+        "录音：把采集音量写进日志",
+    ),
+    (
+        "services/stt_service.py",
+        """    capture = [(index, device) for index, device in inputs if not is_loopback(name_of(device))]""",
+        """    capture = [(index, device) for index, device in inputs if not is_loopback(name_of(device))]
+    # The same microphone shows up under several APIs. Try the ones that actually
+    # deliver audio first (WASAPI, MME) and keep WDM-KS as the last resort.
+    capture.sort(key=lambda item: _hostapi_rank(devices, item[0]))""",
+        "麦克风：同名设备按 WASAPI/MME 优先排序",
+    ),
 ]
 
 
@@ -420,8 +478,10 @@ def write_site_files(root: Path, patch_module) -> None:
                                       encoding="ascii", newline="")
     (root / "Site-Fix-ASR.bat").write_text(SITE_FIX_ASR_BAT.replace("\n", "\r\n"),
                                            encoding="ascii", newline="")
+    (root / "Site-Test-Record.bat").write_text(SITE_MIC_TEST_BAT.replace("\n", "\r\n"),
+                                               encoding="ascii", newline="")
     for name in ("offline_selftest.py", "offline_patch.py", "site_autoconfig.py",
-                 "site_launch.py", "asr_doctor.py"):
+                 "site_launch.py", "asr_doctor.py", "mic_test.py"):
         shutil.copy2(HERE / name, root / "scripts" / "launch" / name)
     (root / "README-戒治所.md").write_text(SITE_README, encoding="utf-8")
     checks = "\n".join(f"  - {label}" for _f, _a, _r, label in patch_module.EDITS)
