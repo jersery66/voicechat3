@@ -151,7 +151,8 @@ def probe_service(port: int = 8000) -> bool:
 
 
 LOOPBACK_MARKERS = ("stereo mix", "立体声混音", "loopback", "cable output",
-                    "wave out mix", "线路输入")
+                    "wave out mix", "线路输入", "vb-audio", "voicemeeter",
+                    "virtual audio")
 
 
 def audio_report() -> dict[str, object]:
@@ -266,6 +267,25 @@ def choose_input_device(inputs: list[tuple[int, str, bool]]) -> tuple[int, str, 
 
 SITE_CONFIG = ROOT / "site-config.cmd"
 CONFIG_MARKER = "REM ---- settings below this line take effect ----"
+
+
+def override_default_reason(*, default_is_loopback: bool, default_index: int | None,
+                            chosen_index: int, chosen_peak: float) -> tuple[bool, str]:
+    """Decide whether to rewrite the recording device, and why.
+
+    Only three situations justify touching a working machine's setting: the
+    default is a virtual cable (records silence), there is no default at all, or
+    the default is measurably worse than the microphone we found. When the default
+    is already a real microphone we leave it alone — a technician may have set it
+    on purpose.
+    """
+    if default_is_loopback:
+        return True, "默认是虚拟声卡"
+    if default_index is None:
+        return True, "没有默认录音设备"
+    if chosen_index != default_index and chosen_peak >= 0.003:
+        return True, "默认设备没有声音，选中的这个有"
+    return False, ""
 
 
 def write_device_choice(index: int) -> Path:
@@ -416,11 +436,12 @@ def main(argv: list[str] | None = None) -> int:
                 mark = "  <- loopback，不要选" if loopback else ""
                 emit(f"        [{index}] {name}{mark}")
             default_in = audio["default_in"]
+            default_is_loopback = False
             if default_in:
                 index, name = default_in  # type: ignore[misc]
-                is_loop = any(m in str(name).lower() for m in LOOPBACK_MARKERS)
-                emit(f"  [{'!! ' if is_loop else 'OK '}] 默认录音设备：[{index}] {name}"
-                     + ("  <- loopback！会让对话录到一片安静" if is_loop else ""))
+                default_is_loopback = any(m in str(name).lower() for m in LOOPBACK_MARKERS)
+                emit(f"  [{'!! ' if default_is_loopback else 'OK '}] 默认录音设备：[{index}] {name}"
+                     + ("  <- loopback！会让对话录到一片安静" if default_is_loopback else ""))
             else:
                 emit("  [!! ] 系统没有默认录音设备")
             default_out = audio["default_out"]
@@ -436,26 +457,39 @@ def main(argv: list[str] | None = None) -> int:
             elif real:
                 emit("       试测每个麦克风（各 0.4 秒），看哪个真能收到声音 …")
                 best = choose_input_device(inputs)  # type: ignore[arg-type]
-                if best is None:
-                    emit("  [!! ] 所有麦克风都打不开（被别的程序占用，或没有权限）")
-                elif best[2] >= 0.003:
-                    if args.check:
-                        emit(f"  [OK ] 能收到声音的是：[{best[0]}] {best[1]}"
-                             f"（峰值 {best[2]:.3f}）—— 加 --install 才会写进配置")
+                usable = (best is not None
+                          and (best[2] >= 0.003 or looks_like_microphone(best[1])))
+                if usable:
+                    reason = ("试测收到声音，峰值 %.3f" % best[2] if best[2] >= 0.003
+                              else "静音环境，设备可正常打开")
+                    should_write, why = override_default_reason(
+                        default_is_loopback=default_is_loopback,
+                        default_index=default_in[0] if default_in else None,
+                        chosen_index=best[0], chosen_peak=best[2])
+                    if not should_write:
+                        emit(f"  [-- ] 默认录音设备已可用（[{best[0]}] {best[1]}），保持不动")
                     else:
-                        path = write_device_choice(best[0])
-                        emit(f"  [OK ] 已自动选用：[{best[0]}] {best[1]}（峰值 {best[2]:.3f}）")
-                        emit(f"         已写入 {path.name}，以后录音就用这个")
-                        audio["chosen"] = (best[0], best[1], best[2])
-                elif looks_like_microphone(best[1]):
-                    if args.check:
-                        emit(f"  [OK ] 最像麦克风且能打开：[{best[0]}] {best[1]}"
-                             f"（当前静音）—— 加 --install 才会写进配置")
+                        if default_is_loopback:
+                            emit(f"  [OK ] 默认录音是虚拟声卡，已改用：[{best[0]}] {best[1]}（{reason}）")
+                        else:
+                            emit(f"  [OK ] 已自动选用：[{best[0]}] {best[1]}（{reason}）")
+                        if args.check:
+                            emit("         加 --install 才会写进 site-config.cmd")
+                        else:
+                            path = write_device_choice(best[0])
+                            emit(f"         已写入 {path.name}，以后录音就用这个")
+                            if best[2] < 0.003:
+                                emit("         第一次录音前请对着话筒说句话，确认能出字")
+                            audio["chosen"] = (best[0], best[1], best[2])
+                elif best is None:
+                    if default_is_loopback:
+                        emit("  [!! ] 默认是虚拟声卡，而实体麦克风一个都打不开")
+                        emit("         到「设置 → 系统 → 声音 → 输入」里启用麦克风，再重跑安装")
                     else:
-                        path = write_device_choice(best[0])
-                        emit(f"  [OK ] 已自动选用：[{best[0]}] {best[1]}（静音环境，设备可正常打开）")
-                        emit(f"         已写入 {path.name}；第一次录音前请对着话筒说句话确认")
-                        audio["chosen"] = (best[0], best[1], best[2])
+                        emit("  [!! ] 所有麦克风都打不开（被别的程序占用，或没有权限）")
+                elif default_is_loopback:
+                    emit("  [!! ] 默认是虚拟声卡，且没找到能用的实体麦克风")
+                    emit("         请在 ⚙ 设置 里手动选，或到「声音」里把麦克风设为默认后重跑安装")
                 else:
                     emit(f"  [-- ] 没测到声音（最高峰值 {best[2]:.4f}），保持自动选择")
         emit("")

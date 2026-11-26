@@ -135,3 +135,32 @@ def test_unopenable_devices_are_skipped(monkeypatch):
 def test_no_candidate_returns_none(monkeypatch):
     monkeypatch.setattr(autoconfig, "probe_peak", lambda index, **kw: -1.0)
     assert autoconfig.choose_input_device([(1, "麦克风", False)]) is None
+
+
+def test_loopback_default_is_replaced():
+    """The case on site: Windows default input is a virtual cable."""
+    ok, why = autoconfig.override_default_reason(
+        default_is_loopback=True, default_index=1, chosen_index=12, chosen_peak=0.0)
+    assert ok and "虚拟声卡" in why
+
+
+def test_missing_default_is_set():
+    ok, why = autoconfig.override_default_reason(
+        default_is_loopback=False, default_index=None, chosen_index=12, chosen_peak=0.0)
+    assert ok and "没有默认" in why
+
+
+def test_working_default_is_left_alone():
+    """A technician may have chosen this device deliberately."""
+    ok, _why = autoconfig.override_default_reason(
+        default_is_loopback=False, default_index=12, chosen_index=12, chosen_peak=0.2)
+    assert not ok
+    ok, _why = autoconfig.override_default_reason(
+        default_is_loopback=False, default_index=5, chosen_index=12, chosen_peak=0.0)
+    assert not ok
+
+
+def test_silent_default_loses_to_a_sounding_mic():
+    ok, why = autoconfig.override_default_reason(
+        default_is_loopback=False, default_index=5, chosen_index=12, chosen_peak=0.25)
+    assert ok and "有" in why
