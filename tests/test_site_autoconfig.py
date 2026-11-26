@@ -106,3 +106,32 @@ def test_generated_env_is_read_back(monkeypatch, tmp_path):
 def test_missing_env_file_is_not_fatal(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "ENV_FILE", tmp_path / "absent.json")
     assert launcher.load_generated() == {}
+
+
+def test_generic_alias_is_not_a_microphone():
+    """"Microsoft Sound Mapper" contains the letters of "mic" but is an alias."""
+    assert autoconfig.looks_like_microphone("麦克风 (Realtek High Definition Audio)")
+    assert autoconfig.looks_like_microphone("Microphone (USB Audio)")
+    assert not autoconfig.looks_like_microphone("Microsoft Sound Mapper - Input")
+    assert not autoconfig.looks_like_microphone("CABLE Output (VB-Audio Virtual Cable)")
+    assert not autoconfig.looks_like_microphone("主声音捕获驱动程序")
+
+
+def test_named_microphone_wins_over_a_louder_stranger(monkeypatch):
+    """A silent but correctly named microphone still beats an unknown endpoint."""
+    inputs = [(3, "USB Audio Device", False), (7, "麦克风 (Realtek)", False)]
+    monkeypatch.setattr(autoconfig, "probe_peak", lambda index, **kw: 0.4 if index == 3 else 0.0)
+    index, name, peak = autoconfig.choose_input_device(inputs)
+    assert index == 7 and "麦克风" in name and peak == 0.0
+
+
+def test_unopenable_devices_are_skipped(monkeypatch):
+    inputs = [(1, "麦克风 (Realtek)", False), (2, "麦克风 2", False)]
+    monkeypatch.setattr(autoconfig, "probe_peak", lambda index, **kw: -1.0 if index == 1 else 0.01)
+    index, _name, peak = autoconfig.choose_input_device(inputs)
+    assert index == 2 and peak == 0.01
+
+
+def test_no_candidate_returns_none(monkeypatch):
+    monkeypatch.setattr(autoconfig, "probe_peak", lambda index, **kw: -1.0)
+    assert autoconfig.choose_input_device([(1, "麦克风", False)]) is None

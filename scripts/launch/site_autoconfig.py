@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import re
 import json
 import os
 import subprocess
@@ -195,6 +196,104 @@ def real_microphones(inputs: list[tuple[int, str, bool]]) -> list[tuple[int, str
     return [item for item in inputs if not item[2]]
 
 
+def probe_peak(index: int, seconds: float = 0.4, rate: int = 16000) -> float:
+    """Peak level captured from one endpoint; -1.0 when it cannot be opened.
+
+    The app picks a device by *name* (a real microphone before a loopback), which
+    is a good guess but not proof — a disabled or dead microphone still has a
+    plausible name. Measuring for a fraction of a second tells us which endpoints
+    actually deliver signal, and that answer is worth storing.
+    """
+    try:
+        import numpy as np
+        import sounddevice as sd
+
+        frames = int(rate * seconds)
+        captured = sd.rec(frames, samplerate=rate, channels=1, dtype="float32",
+                          device=index, blocking=True)
+        data = np.asarray(captured, dtype=np.float32)
+        if data.size == 0:
+            return 0.0
+        if not np.all(np.isfinite(data)):
+            return -1.0
+        peak = float(np.max(np.abs(data)))
+        # A device that never delivers frames hands back an uninitialised buffer;
+        # those values are astronomical, not audio. Audio stays within ±1 or so.
+        if peak > 4.0:
+            return -1.0
+        return peak
+    except Exception:  # noqa: BLE001 - busy/disabled/permission denied
+        return -1.0
+
+
+MIC_NAME_HINTS = ("麦克风", "microphone", "话筒", "阵列")
+GENERIC_ALIASES = ("sound mapper", "主声音捕获", "primary sound")
+
+
+def looks_like_microphone(name: str) -> bool:
+    low = str(name).lower()
+    if any(marker in low for marker in LOOPBACK_MARKERS):
+        return False
+    if any(alias in low for alias in GENERIC_ALIASES):
+        return False  # legacy alias, not a physical endpoint
+    if any(hint in low for hint in MIC_NAME_HINTS):
+        return True
+    # "Mic" is only meaningful as its own word — "Microsoft" contains the letters.
+    import re as _re
+
+    return _re.search(r"(?<![a-z])mic(?![a-z])", low) is not None
+
+
+def choose_input_device(inputs: list[tuple[int, str, bool]]) -> tuple[int, str, float] | None:
+    """Pick the most plausible working microphone.
+
+    Name first, then measured level: a room can be silent while someone installs
+    software, so "it opened and its name says microphone" already beats the
+    system default, which is very often a virtual cable.
+    """
+    scored: list[tuple[int, float, int, str]] = []
+    for index, name, _loopback in real_microphones(inputs)[:6]:
+        peak = probe_peak(index)
+        if peak < 0:  # cannot open: busy, disabled, or no permission
+            continue
+        scored.append((1 if looks_like_microphone(name) else 0, peak, index, name))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    named, peak, index, name = scored[0]
+    return index, name, peak
+
+
+SITE_CONFIG = ROOT / "site-config.cmd"
+CONFIG_MARKER = "REM ---- settings below this line take effect ----"
+
+
+def write_device_choice(index: int) -> Path:
+    """Persist the chosen device in site-config.cmd, keeping any other settings."""
+    values: dict[str, str] = {}
+    text = ""
+    if SITE_CONFIG.is_file():
+        try:
+            text = SITE_CONFIG.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            match = re.match(r'\s*set\s+"?([A-Za-z_][A-Za-z0-9_]*)=([^"\r\n]*)"?\s*$',
+                             line, re.IGNORECASE)
+            if match:
+                values[match.group(1).upper()] = match.group(2).strip()
+    values["VOICECHAT_INPUT_DEVICE"] = str(index)
+
+    head = (text.split(CONFIG_MARKER, 1)[0] + CONFIG_MARKER) if CONFIG_MARKER in text else (
+        "@echo off\r\n"
+        "REM Site settings written by the installer and the in-app settings dialog.\r\n"
+        f"{CONFIG_MARKER}")
+    body = [f'set "{name}={value}"' for name, value in values.items() if value]
+    SITE_CONFIG.write_text(head + "\r\n" + "\r\n".join(body) + "\r\n",
+                           encoding="utf-8", newline="")
+    return SITE_CONFIG
+
+
 def write_generated_env(models: dict[str, str]) -> Path:
     """Write the resolved paths as UTF-8 JSON.
 
@@ -330,6 +429,35 @@ def main(argv: list[str] | None = None) -> int:
                 emit(f"  [OK ] 默认播放设备：[{index}] {name}")
             else:
                 emit("  [!! ] 系统没有默认播放设备（小薇会没有声音）")
+
+            fixed = os.environ.get("VOICECHAT_INPUT_DEVICE", "").strip()
+            if fixed:
+                emit(f"  [-- ] 录音设备已被固定为：{fixed}（不再试测）")
+            elif real:
+                emit("       试测每个麦克风（各 0.4 秒），看哪个真能收到声音 …")
+                best = choose_input_device(inputs)  # type: ignore[arg-type]
+                if best is None:
+                    emit("  [!! ] 所有麦克风都打不开（被别的程序占用，或没有权限）")
+                elif best[2] >= 0.003:
+                    if args.check:
+                        emit(f"  [OK ] 能收到声音的是：[{best[0]}] {best[1]}"
+                             f"（峰值 {best[2]:.3f}）—— 加 --install 才会写进配置")
+                    else:
+                        path = write_device_choice(best[0])
+                        emit(f"  [OK ] 已自动选用：[{best[0]}] {best[1]}（峰值 {best[2]:.3f}）")
+                        emit(f"         已写入 {path.name}，以后录音就用这个")
+                        audio["chosen"] = (best[0], best[1], best[2])
+                elif looks_like_microphone(best[1]):
+                    if args.check:
+                        emit(f"  [OK ] 最像麦克风且能打开：[{best[0]}] {best[1]}"
+                             f"（当前静音）—— 加 --install 才会写进配置")
+                    else:
+                        path = write_device_choice(best[0])
+                        emit(f"  [OK ] 已自动选用：[{best[0]}] {best[1]}（静音环境，设备可正常打开）")
+                        emit(f"         已写入 {path.name}；第一次录音前请对着话筒说句话确认")
+                        audio["chosen"] = (best[0], best[1], best[2])
+                else:
+                    emit(f"  [-- ] 没测到声音（最高峰值 {best[2]:.4f}），保持自动选择")
         emit("")
 
     emit("【4/5】检查模型服务")
@@ -368,6 +496,9 @@ def main(argv: list[str] | None = None) -> int:
         for key, label in (("default_in", "默认录音"), ("default_out", "默认播放")):
             value = audio.get(key)
             audio_lines.append(f"  {label}：" + (f"[{value[0]}] {value[1]}" if value else "无"))
+        chosen = audio.get("chosen")
+        if chosen:
+            audio_lines.append(f"  自动选用：[{chosen[0]}] {chosen[1]}（峰值 {chosen[2]:.3f}）")
 
     lines = [
         "小微老师 · 安装结果",
