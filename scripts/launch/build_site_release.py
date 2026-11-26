@@ -532,6 +532,10 @@ def main(argv: list[str] | None = None) -> int:
 
     apply_ui_edits(root, patch_module)
     shutil.copy2(HERE / "site_files" / "settings_dialog.py", root / "ui" / "settings_dialog.py")
+    prompt_src = HERE / "site_files" / "voice_prompt" / "s1.mp3"
+    if prompt_src.is_file():
+        (root / "voice_prompt").mkdir(exist_ok=True)
+        shutil.copy2(prompt_src, root / "voice_prompt" / "s1.mp3")
     print("已加入 ui/settings_dialog.py（麦克风选择 / 试录 / 界面缩放）")
 
     write_site_files(root, patch_module)

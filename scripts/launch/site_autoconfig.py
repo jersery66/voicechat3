@@ -127,6 +127,17 @@ def detect_models() -> dict[str, str]:
                     found[key] = str(prompt)
                     break
 
+    # The package carries the same reference recording the site used before
+    # (7.42 s, verified identical to data/s1.flac), so the voice does not change
+    # just because a machine never had a voice_prompt folder.
+    if "voice_prompt" not in found:
+        for name in ("s1.mp3", "s1.wav", "s1.flac"):
+            candidate = ROOT / "voice_prompt" / name
+            if candidate.is_file():
+                found["voice_prompt"] = str(candidate)
+                found["voice_prompt_fallback"] = "typed"
+                break
+
     # Last resort: the sample that ships with the program. It is the same S1
     # recording the TTS was tuned on, so the voice stays recognisable, and it
     # keeps the report from crying "not found" on a machine that never had a
