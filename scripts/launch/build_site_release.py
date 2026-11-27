@@ -227,6 +227,52 @@ pause
 exit /b 0
 """
 
+SITE_SCAN_BAT = """@echo off
+REM List every capture endpoint and report which ones actually deliver frames.
+REM ASCII-only and CRLF: cmd.exe misparses UTF-8 Chinese in .bat files.
+chcp 65001 >nul 2>nul
+setlocal
+cd /d "%~dp0"
+
+set "PY=%CD%\\.venv\\Scripts\\python.exe"
+if not exist "%PY%" set "PY=python"
+
+echo ============================================================
+echo  Microphone scan - takes about 10 seconds, no speaking needed
+echo  Folder : %CD%
+echo  Python : %PY%
+echo ============================================================
+echo.
+
+"%PY%" scripts\\launch\\mic_scan.py --report "logs\\mic-scan.txt"
+echo.
+echo A copy is saved to logs\\mic-scan.txt - send that file to support.
+pause
+"""
+
+SITE_SCAN_BAT = """@echo off
+REM List every capture endpoint and report which ones actually deliver frames.
+REM ASCII-only and CRLF: cmd.exe misparses UTF-8 Chinese in .bat files.
+chcp 65001 >nul 2>nul
+setlocal
+cd /d "%~dp0"
+
+set "PY=%CD%\.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
+
+echo ============================================================
+echo  Microphone scan - takes about 10 seconds, no speaking needed
+echo  Folder : %CD%
+echo  Python : %PY%
+echo ============================================================
+echo.
+
+"%PY%" scripts\launch\mic_scan.py --report "logs\mic-scan.txt"
+echo.
+echo A copy is saved to logs\mic-scan.txt - send that file to support.
+pause
+"""
+
 SITE_MIC_TEST_BAT = """@echo off
 REM Record four seconds from the microphone and transcribe it right away.
 REM ASCII-only and CRLF: cmd.exe misparses UTF-8 Chinese in .bat files.
@@ -480,8 +526,11 @@ def write_site_files(root: Path, patch_module) -> None:
                                            encoding="ascii", newline="")
     (root / "Site-Test-Record.bat").write_text(SITE_MIC_TEST_BAT.replace("\n", "\r\n"),
                                                encoding="ascii", newline="")
+    (root / "Site-Scan-Mics.bat").write_text(SITE_SCAN_BAT.replace("\n", "\r\n"),
+                                             encoding="ascii", newline="")
     for name in ("offline_selftest.py", "offline_patch.py", "site_autoconfig.py",
-                 "site_launch.py", "asr_doctor.py", "mic_test.py"):
+                 "site_launch.py", "asr_doctor.py", "mic_test.py",
+                 "mic_scan.py"):
         shutil.copy2(HERE / name, root / "scripts" / "launch" / name)
     (root / "README-戒治所.md").write_text(SITE_README, encoding="utf-8")
     checks = "\n".join(f"  - {label}" for _f, _a, _r, label in patch_module.EDITS)
